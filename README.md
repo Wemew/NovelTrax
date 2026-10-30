@@ -93,6 +93,42 @@ Access the dashboard at:
 
 ---
 
+### 🐬 TrueNAS SCALE Stack Setup (UID / GID 568)
+
+If deploying to **TrueNAS SCALE** (Electric Eel, Dragonfish, or via Portainer / Dockge):
+1. TrueNAS executes container apps under the unprivileged `apps` user (`UID 568`, `GID 568`).
+2. You can build and deploy directly from GitHub without cloning first by pasting the following into your TrueNAS **Custom App** compose editor:
+
+```yaml
+services:
+  noveltrax:
+    build:
+      context: https://github.com/Wemew/NovelTrax.git#main
+      dockerfile: Dockerfile
+    image: noveltrax:latest
+    container_name: noveltrax
+    restart: unless-stopped
+    user: "568:568"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    ports:
+      - "8080:8080"
+    environment:
+      - PORT=8080
+      - CALIBRE_DIR=/calibre
+      - DATA_DIR=/app/data
+      - TZ=Etc/UTC
+    volumes:
+      # Replace with your Calibre dataset host path:
+      - /mnt/tank/media/calibre:/calibre:ro
+      # Replace with your app data dataset host path:
+      - /mnt/tank/apps/noveltrax/data:/app/data
+```
+
+---
+
 ## 🧭 Dashboard Walkthrough
 
 | Tab | Purpose |

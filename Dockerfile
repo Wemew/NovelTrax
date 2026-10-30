@@ -26,8 +26,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application source code
 COPY backend/ /app/
 
-# Create mount points for Calibre network share and persistent data with proper ownership
-RUN mkdir -p /calibre /app/data && chown -R appuser:appuser /app /calibre
+# Create mount points and ensure permissions for any unprivileged UID (e.g. 1000 or TrueNAS 568)
+RUN mkdir -p /calibre /app/data && \
+    chown -R appuser:appuser /app /calibre && \
+    chmod -R 755 /app && \
+    chmod 777 /app/data /calibre
 
 USER appuser
 

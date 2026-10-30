@@ -1,0 +1,44 @@
+services:
+  noveltrax:
+    # Option A: Build directly from GitHub repo without manual git clone on TrueNAS
+    build:
+      context: https://github.com/Wemew/NovelTrax.git#main
+      dockerfile: Dockerfile
+
+    # Option B (Alternative): If you git cloned the repository locally on your server:
+    # build:
+    #   context: .
+    #   dockerfile: Dockerfile
+
+    image: noveltrax:latest
+    container_name: noveltrax
+    restart: unless-stopped
+
+    # TrueNAS SCALE unprivileged 'apps' user and group
+    user: "568:568"
+
+    # Container security hardening
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+    ports:
+      # Format: "HOST_PORT:CONTAINER_PORT"
+      # If 8080 is used by another service on TrueNAS, change left side (e.g., "8282:8080")
+      - "8080:8080"
+
+    environment:
+      - PORT=8080
+      - CALIBRE_DIR=/calibre
+      - DATA_DIR=/app/data
+      - TZ=Etc/UTC  # Set to your timezone, e.g. Europe/Copenhagen, America/New_York
+
+    volumes:
+      # 1. Mount your Calibre library dataset or folder (READ-ONLY)
+      # Replace '/mnt/pool/media/calibre' with your actual TrueNAS dataset path:
+      - /mnt/tank/media/calibre:/calibre:ro
+
+      # 2. Mount persistent storage for NovelTrax database, cached covers, and logs
+      # Replace '/mnt/pool/apps/noveltrax/data' with your app dataset:
+      - /mnt/tank/apps/noveltrax/data:/app/data
