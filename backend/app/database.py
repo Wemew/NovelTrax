@@ -2,7 +2,7 @@ import os
 import sqlite3
 import json
 from datetime import datetime
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 
 class Database:
     def __init__(self, db_path: str):
