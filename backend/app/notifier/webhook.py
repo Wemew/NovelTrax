@@ -2,7 +2,7 @@ import logging
 import httpx
 from typing import Dict, Any, Optional
 
-logger = logging.getLogger("novelpulse.notifier")
+logger = logging.getLogger("noveltrax.notifier")
 
 class NotificationService:
     def __init__(self, discord_webhook: Optional[str] = None, generic_webhook: Optional[str] = None):
@@ -46,7 +46,7 @@ class NotificationService:
             return
 
         payload = {
-            "username": "NovelPulse",
+            "username": "NovelTrax",
             "avatar_url": "https://raw.githubusercontent.com/feathericons/feather/master/icons/book-open.svg",
             "embeds": [{
                 "title": title,

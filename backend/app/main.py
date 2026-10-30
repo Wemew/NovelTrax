@@ -5,7 +5,7 @@ from typing import Dict, Any, Optional
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, Form, Query, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 
@@ -13,29 +13,31 @@ from app.database import Database
 from app.calibre.scanner import CalibreScanner
 from app.providers.registry import create_provider
 from app.scheduler import TaskManager
+from app.covers import CoverCache
 
 # Setup Logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 )
-logger = logging.getLogger("novelpulse")
+logger = logging.getLogger("noveltrax")
 
 # Directories & Configuration
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.getenv("DATA_DIR", os.path.join(BASE_DIR, "..", "data"))
 os.makedirs(DATA_DIR, exist_ok=True)
-DB_PATH = os.path.join(DATA_DIR, "novelpulse.db")
+DB_PATH = os.path.join(DATA_DIR, "noveltrax.db")
 CALIBRE_DIR = os.getenv("CALIBRE_DIR", "/calibre")
 
-# Initialize Database & Task Manager
+# Initialize Database, Cache & Task Manager
 db = Database(DB_PATH)
+cover_cache = CoverCache(DATA_DIR)
 task_manager = TaskManager(db, CALIBRE_DIR)
 
 # Lifespan Context Manager
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("Starting NovelPulse application...")
+    logger.info("Starting NovelTrax application...")
     task_manager.start()
     # Trigger initial Calibre sync if available
     scanner = CalibreScanner(db.get_setting("calibre_path", CALIBRE_DIR))
@@ -45,10 +47,10 @@ async def lifespan(app: FastAPI):
     else:
         logger.info(f"Calibre library metadata.db not yet found at {scanner.db_path}. Will re-check periodically.")
     yield
-    logger.info("Shutting down NovelPulse application...")
+    logger.info("Shutting down NovelTrax application...")
     task_manager.stop()
 
-app = FastAPI(title="NovelPulse", lifespan=lifespan)
+app = FastAPI(title="NovelTrax", lifespan=lifespan)
 
 # Setup Templates
 templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
@@ -110,6 +112,17 @@ async def logs_view(request: Request):
         "logs": logs
     })
 
+@app.get("/discovery", response_class=HTMLResponse)
+async def discovery_view(request: Request):
+    discovered = db.get_discovery_releases(limit=100)
+    blacklisted = db.get_blacklisted_series()
+    return templates.TemplateResponse("discovery.html", {
+        "request": request,
+        "active_page": "discovery",
+        "discovered_releases": discovered,
+        "blacklisted_series": blacklisted
+    })
+
 @app.get("/settings", response_class=HTMLResponse)
 async def settings_view(request: Request):
     settings = db.get_all_settings()
@@ -133,6 +146,29 @@ async def api_calibre_test(path: str = Query(...)):
     scanner = CalibreScanner(path)
     summary = scanner.get_library_summary()
     return JSONResponse(summary)
+
+@app.get("/api/covers")
+async def api_get_cover(url: str = Query(...)):
+    """Serves locally cached cover image, downloading on-demand if not already on disk."""
+    if not url:
+        raise HTTPException(status_code=400, detail="Missing url")
+
+    filepath = await cover_cache.get_or_download(url)
+    if filepath and os.path.isfile(filepath):
+        media_type = "image/jpeg"
+        if filepath.endswith(".png"):
+            media_type = "image/png"
+        elif filepath.endswith(".webp"):
+            media_type = "image/webp"
+
+        return FileResponse(
+            filepath,
+            media_type=media_type,
+            headers={"Cache-Control": "public, max-age=864000"}
+        )
+
+    # Fallback to redirecting to original url if local caching fails
+    return RedirectResponse(url=url)
 
 @app.post("/api/feeds/check")
 async def api_feeds_check():
@@ -215,6 +251,13 @@ async def api_toggle_series(series_id: int):
     is_monitored = db.toggle_series_monitored(series_id)
     return JSONResponse({"status": "success", "is_monitored": is_monitored})
 
+@app.post("/api/series/{series_id}/link")
+async def api_update_series_link(series_id: int, payload: Dict[str, Any]):
+    """Update or save custom website link for a series."""
+    website_url = payload.get("website_url", "")
+    db.update_series_website_url(series_id, website_url)
+    return JSONResponse({"status": "success", "website_url": website_url})
+
 @app.post("/api/releases/{release_id}/status")
 async def api_update_release_status(release_id: int, payload: Dict[str, Any]):
     """Update release status (e.g., mark as IN_CALIBRE, REQUESTED, or IGNORED)."""
@@ -223,6 +266,49 @@ async def api_update_release_status(release_id: int, payload: Dict[str, Any]):
         return JSONResponse({"status": "error", "message": "Status required"}, status_code=400)
 
     db.update_release_status(release_id, status)
+    return JSONResponse({"status": "success"})
+
+@app.post("/api/blacklist")
+async def api_add_blacklist(payload: Dict[str, Any]):
+    """Add a series to the blacklist and purge pending requests for it."""
+    name = payload.get("name")
+    reason = payload.get("reason", "")
+    if not name:
+        return JSONResponse({"status": "error", "message": "Series name required"}, status_code=400)
+
+    success = db.add_to_blacklist(name, reason)
+    db.log_activity("SERIES_BLACKLISTED", f"Blacklisted series: {name}", reason)
+    return JSONResponse({"status": "success"})
+
+@app.delete("/api/blacklist/{blacklist_id}")
+async def api_delete_blacklist(blacklist_id: int):
+    """Remove a series from the blacklist."""
+    db.remove_from_blacklist(blacklist_id)
+    db.log_activity("BLACKLIST_REMOVED", f"Removed series #{blacklist_id} from blacklist")
+    return JSONResponse({"status": "success"})
+
+@app.post("/api/discovery/track")
+async def api_discovery_track(payload: Dict[str, Any]):
+    """Track a newly discovered series and request the volume."""
+    series_name = payload.get("series_name")
+    release_id = payload.get("release_id")
+    if not series_name:
+        return JSONResponse({"status": "error", "message": "Series name required"}, status_code=400)
+
+    db.track_discovered_series(series_name, release_id)
+    db.log_activity("SERIES_TRACKED", f"Started tracking new series: {series_name}")
+    return JSONResponse({"status": "success"})
+
+@app.post("/api/discovery/blacklist")
+async def api_discovery_blacklist(payload: Dict[str, Any]):
+    """Blacklist a series directly from a discovery card."""
+    series_name = payload.get("series_name")
+    reason = payload.get("reason", "Blacklisted from Discovery panel")
+    if not series_name:
+        return JSONResponse({"status": "error", "message": "Series name required"}, status_code=400)
+
+    db.add_to_blacklist(series_name, reason)
+    db.log_activity("SERIES_BLACKLISTED", f"Blacklisted series from discovery: {series_name}")
     return JSONResponse({"status": "success"})
 
 @app.post("/api/settings")

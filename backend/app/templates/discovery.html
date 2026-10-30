@@ -1,0 +1,339 @@
+{% extends "base.html" %}
+
+{% block title %}Series Discovery & Blacklist{% endblock %}
+
+{% block content %}
+<div class="space-y-6">
+
+    <!-- Header -->
+    <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div>
+            <h1 class="text-2xl font-black text-white flex items-center gap-2.5">
+                <i data-lucide="compass" class="w-6 h-6 text-amber-400"></i>
+                New Series Discovery & Blacklist
+            </h1>
+            <p class="text-xs text-slate-400 mt-1">
+                Review newly detected series (Volume 1 or unnumbered releases). 1-click <strong class="text-emerald-400 font-semibold">Track</strong> to monitor upcoming volumes, or <strong class="text-rose-400 font-semibold">Blacklist</strong> to permanently block tracking.
+            </p>
+        </div>
+        <div class="flex items-center gap-2">
+            <button onclick="triggerFeedCheck()" class="text-xs px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-medium flex items-center gap-2 transition-all shadow-sm">
+                <i data-lucide="radio" class="w-4 h-4 text-brand-400" id="icon-feed-check"></i>
+                Check Feeds Now
+            </button>
+        </div>
+    </div>
+
+    <!-- Tab Navigation -->
+    <div class="flex border-b border-slate-800 space-x-6 text-sm font-semibold">
+        <button onclick="switchTab('discovery')" id="tab-btn-discovery" class="pb-3 border-b-2 border-brand-500 text-brand-400 flex items-center gap-2 transition-colors">
+            <i data-lucide="sparkles" class="w-4 h-4"></i>
+            <span>Discovered Releases (Vol. 1 & Standalones)</span>
+            <span class="px-2 py-0.5 rounded-full text-xs bg-brand-500/15 text-brand-300 border border-brand-500/20" id="discovery-badge">{{ discovered_releases|length }}</span>
+        </button>
+        <button onclick="switchTab('blacklist')" id="tab-btn-blacklist" class="pb-3 border-b-2 border-transparent text-slate-400 hover:text-slate-200 flex items-center gap-2 transition-colors">
+            <i data-lucide="ban" class="w-4 h-4 text-rose-400"></i>
+            <span>Blacklisted Series</span>
+            <span class="px-2 py-0.5 rounded-full text-xs bg-rose-500/15 text-rose-300 border border-rose-500/20" id="blacklist-badge">{{ blacklisted_series|length }}</span>
+        </button>
+    </div>
+
+    <!-- TAB 1: Discovery Panel -->
+    <div id="tab-content-discovery" class="space-y-4">
+        <!-- Search filter -->
+        <div class="bg-slate-900/80 border border-slate-800 rounded-2xl p-4 flex items-center justify-between gap-3">
+            <div class="relative w-full sm:w-80">
+                <i data-lucide="search" class="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2"></i>
+                <input type="text" id="discovery-search" oninput="filterDiscovery()" placeholder="Filter discovered releases..." class="w-full bg-slate-950/70 border border-slate-700/80 rounded-xl pl-10 pr-4 py-2 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-brand-500">
+            </div>
+            <p class="text-xs text-slate-400 hidden sm:block">
+                Showing {{ discovered_releases|length }} potential new series
+            </p>
+        </div>
+
+        {% if discovered_releases %}
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4" id="discovery-grid">
+            {% for item in discovered_releases %}
+            <div class="discovery-card bg-slate-900/90 border border-slate-800 hover:border-slate-700 rounded-2xl p-4 flex flex-col justify-between transition-all hover:shadow-xl group" data-title="{{ item.title|lower }}" data-series="{{ (item.series_name or '')|lower }}">
+                <div>
+                    <!-- Top series & volume badge -->
+                    <div class="flex items-start justify-between gap-2 mb-2">
+                        <span class="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-bold bg-amber-500/10 text-amber-400 border border-amber-500/20">
+                            {{ item.series_name or 'Standalone Novel' }}
+                        </span>
+                        <span class="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-bold {% if item.volume == 1.0 %}bg-brand-500/15 text-brand-300 border border-brand-500/30{% else %}bg-slate-800 text-slate-300 border border-slate-700{% endif %}">
+                            {{ 'Vol. 1' if item.volume == 1.0 else 'Standalone' }}
+                        </span>
+                    </div>
+
+                    <!-- Book info container -->
+                    <div class="flex gap-3.5 mt-2">
+                        {% if item.cover_url %}
+                        <img src="/api/covers?url={{ item.cover_url|urlencode }}" alt="Cover" loading="lazy" class="w-16 h-24 object-cover rounded-lg border border-slate-800 flex-shrink-0 shadow-md">
+                        {% else %}
+                        <div class="w-16 h-24 rounded-lg bg-slate-800/80 border border-slate-700 flex flex-col items-center justify-center flex-shrink-0 text-slate-500">
+                            <i data-lucide="book-open" class="w-6 h-6"></i>
+                            <span class="text-[9px] mt-1 font-semibold">NOVEL</span>
+                        </div>
+                        {% endif %}
+
+                        <div class="min-w-0 flex-1">
+                            <h3 class="text-sm font-bold text-white line-clamp-2 group-hover:text-brand-400 transition-colors" title="{{ item.title }}">
+                                {{ item.title }}
+                            </h3>
+                            <p class="text-[11px] text-slate-400 mt-1 flex items-center gap-1">
+                                <i data-lucide="globe" class="w-3 h-3 text-slate-500"></i>
+                                {{ item.source_feed_name or 'Web Feed' }}
+                            </p>
+                            <p class="text-[11px] text-slate-500 mt-0.5 flex items-center gap-1">
+                                <i data-lucide="calendar" class="w-3 h-3 text-slate-500"></i>
+                                {{ item.pub_date[:10] if item.pub_date else 'Recent' }}
+                            </p>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Action Toolbar: Track vs Blacklist -->
+                <div class="mt-4 pt-3.5 border-t border-slate-800/80 space-y-2.5">
+                    <div class="flex items-center justify-between text-xs">
+                        <div class="flex items-center gap-1.5">
+                            <a href="{{ item.link }}" target="_blank" rel="noopener noreferrer" class="text-[11px] text-slate-400 hover:text-white flex items-center gap-1">
+                                <i data-lucide="external-link" class="w-3 h-3"></i> Release Post
+                            </a>
+                            {% if item.series_link %}
+                            <span class="text-slate-600">&bull;</span>
+                            <a href="{{ item.series_link }}" target="_blank" rel="noopener noreferrer" class="text-[11px] text-brand-400/90 hover:text-brand-300 flex items-center gap-1">
+                                <i data-lucide="layers" class="w-3 h-3"></i> Series Hub
+                            </a>
+                            {% endif %}
+                        </div>
+                    </div>
+
+                    <div class="grid grid-cols-2 gap-2">
+                        <button onclick="trackDiscovered('{{ item.series_name|replace('\'', '\\\'') }}', {{ item.id }})" class="w-full px-3 py-2 rounded-xl bg-brand-600 hover:bg-brand-500 text-white font-bold text-xs flex items-center justify-center gap-1.5 transition-all shadow-md shadow-brand-600/20 active:scale-95" title="Track this series and add to Calibre wishlist">
+                            <i data-lucide="bookmark-plus" class="w-3.5 h-3.5"></i>
+                            Track Series
+                        </button>
+                        <button onclick="blacklistDiscovered('{{ item.series_name|replace('\'', '\\\'') }}')" class="w-full px-3 py-2 rounded-xl bg-slate-800 hover:bg-rose-500/20 text-slate-300 hover:text-rose-400 border border-slate-700 hover:border-rose-500/30 font-bold text-xs flex items-center justify-center gap-1.5 transition-all active:scale-95" title="Blacklist series: never track or notify for future releases">
+                            <i data-lucide="ban" class="w-3.5 h-3.5 text-rose-400"></i>
+                            Blacklist
+                        </button>
+                    </div>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+        {% else %}
+        <div class="bg-slate-900/60 border border-slate-800/80 rounded-2xl p-12 text-center">
+            <div class="w-14 h-14 rounded-2xl bg-brand-500/10 text-brand-400 border border-brand-500/20 flex items-center justify-center mx-auto mb-3">
+                <i data-lucide="check-check" class="w-7 h-7"></i>
+            </div>
+            <h3 class="text-base font-bold text-white">No new unreviewed series!</h3>
+            <p class="text-xs text-slate-400 max-w-md mx-auto mt-1">
+                Whenever your feeds discover a Volume 1 or unnumbered release that isn't already in your Calibre library or blacklist, it will appear here for you to easily Track or Blacklist.
+            </p>
+        </div>
+        {% endif %}
+    </div>
+
+    <!-- TAB 2: Blacklist Management Panel -->
+    <div id="tab-content-blacklist" class="hidden space-y-6">
+
+        <!-- Manual Add to Blacklist Form -->
+        <div class="bg-slate-900/90 border border-slate-800 rounded-2xl p-5 shadow-xl">
+            <h3 class="text-sm font-bold uppercase tracking-wider text-white mb-1 flex items-center gap-2">
+                <i data-lucide="plus-circle" class="w-4 h-4 text-rose-400"></i>
+                Proactively Blacklist a Series
+            </h3>
+            <p class="text-xs text-slate-400 mb-4">
+                Add any series name here to proactively block it. NovelTrax will ignore any incoming releases matching this series and cancel existing requests.
+            </p>
+
+            <form onsubmit="submitManualBlacklist(event)" class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div class="sm:col-span-1">
+                    <label class="block text-xs font-semibold text-slate-300 mb-1">Series Name</label>
+                    <input type="text" id="manual-blacklist-name" required placeholder="e.g. Unwanted Series Title" class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-rose-500">
+                </div>
+                <div class="sm:col-span-1">
+                    <label class="block text-xs font-semibold text-slate-300 mb-1">Reason / Notes (Optional)</label>
+                    <input type="text" id="manual-blacklist-reason" placeholder="e.g. Not interested / dropped" class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-rose-500">
+                </div>
+                <div class="flex items-end">
+                    <button type="submit" class="w-full px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs flex items-center justify-center gap-1.5 transition-all shadow-md shadow-rose-600/20 active:scale-95">
+                        <i data-lucide="ban" class="w-4 h-4"></i>
+                        Add to Blacklist
+                    </button>
+                </div>
+            </form>
+        </div>
+
+        <!-- Blacklisted Series Table -->
+        <div class="bg-slate-900/90 border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
+            <div class="p-4 border-b border-slate-800 flex items-center justify-between">
+                <h3 class="text-sm font-bold text-white flex items-center gap-2">
+                    <i data-lucide="shield-alert" class="w-4 h-4 text-rose-400"></i>
+                    Currently Blacklisted Series ({{ blacklisted_series|length }})
+                </h3>
+                <div class="relative w-64">
+                    <i data-lucide="search" class="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2"></i>
+                    <input type="text" id="blacklist-search" oninput="filterBlacklist()" placeholder="Search blacklist..." class="w-full bg-slate-950 border border-slate-700 rounded-lg pl-8 pr-3 py-1.5 text-xs text-white focus:outline-none focus:border-rose-500">
+                </div>
+            </div>
+
+            <div class="overflow-x-auto">
+                <table class="w-full text-left text-xs">
+                    <thead class="bg-[#111827] border-b border-slate-800 text-slate-400 font-semibold uppercase tracking-wider text-[11px]">
+                        <tr>
+                            <th class="py-3.5 px-6">Blacklisted Series Name</th>
+                            <th class="py-3.5 px-4">Reason / Notes</th>
+                            <th class="py-3.5 px-4">Date Added</th>
+                            <th class="py-3.5 px-6 text-right">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody class="divide-y divide-slate-800/60" id="blacklist-table-body">
+                        {% for b in blacklisted_series %}
+                        <tr class="blacklist-row hover:bg-slate-800/40 transition-colors" data-name="{{ b.name|lower }}">
+                            <td class="py-3.5 px-6 font-bold text-white flex items-center gap-2">
+                                <span class="w-2 h-2 rounded-full bg-rose-400"></span>
+                                <span class="text-sm">{{ b.name }}</span>
+                            </td>
+                            <td class="py-3.5 px-4 text-slate-400">
+                                {{ b.reason or 'Manually Blacklisted' }}
+                            </td>
+                            <td class="py-3.5 px-4 text-slate-500 font-mono text-[11px]">
+                                {{ b.created_at[:10] if b.created_at else 'Recent' }}
+                            </td>
+                            <td class="py-3.5 px-6 text-right">
+                                <button onclick="removeFromBlacklist({{ b.id }}, '{{ b.name|replace('\'', '\\\'') }}')" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-brand-500/20 text-slate-300 hover:text-brand-300 border border-slate-700 hover:border-brand-500/30 text-xs font-semibold flex items-center gap-1.5 transition-colors ml-auto" title="Restore and allow tracking">
+                                    <i data-lucide="undo-2" class="w-3.5 h-3.5"></i>
+                                    Unblock / Restore
+                                </button>
+                            </td>
+                        </tr>
+                        {% else %}
+                        <tr>
+                            <td colspan="4" class="py-12 text-center text-slate-500">
+                                No series currently blacklisted.
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+    </div>
+
+</div>
+
+<script>
+    function switchTab(tab) {
+        const discContent = document.getElementById('tab-content-discovery');
+        const blackContent = document.getElementById('tab-content-blacklist');
+        const discBtn = document.getElementById('tab-btn-discovery');
+        const blackBtn = document.getElementById('tab-btn-blacklist');
+
+        if (tab === 'discovery') {
+            discContent.classList.remove('hidden');
+            blackContent.classList.add('hidden');
+            discBtn.className = "pb-3 border-b-2 border-brand-500 text-brand-400 flex items-center gap-2 transition-colors";
+            blackBtn.className = "pb-3 border-b-2 border-transparent text-slate-400 hover:text-slate-200 flex items-center gap-2 transition-colors";
+        } else {
+            discContent.classList.add('hidden');
+            blackContent.classList.remove('hidden');
+            discBtn.className = "pb-3 border-b-2 border-transparent text-slate-400 hover:text-slate-200 flex items-center gap-2 transition-colors";
+            blackBtn.className = "pb-3 border-b-2 border-rose-500 text-rose-400 flex items-center gap-2 transition-colors";
+        }
+    }
+
+    function filterDiscovery() {
+        const query = document.getElementById('discovery-search').value.toLowerCase();
+        const cards = document.querySelectorAll('.discovery-card');
+        cards.forEach(c => {
+            const title = c.dataset.title;
+            const series = c.dataset.series;
+            c.style.display = (title.includes(query) || series.includes(query)) ? '' : 'none';
+        });
+    }
+
+    function filterBlacklist() {
+        const query = document.getElementById('blacklist-search').value.toLowerCase();
+        const rows = document.querySelectorAll('.blacklist-row');
+        rows.forEach(r => {
+            const name = r.dataset.name;
+            r.style.display = name.includes(query) ? '' : 'none';
+        });
+    }
+
+    async function trackDiscovered(seriesName, releaseId) {
+        try {
+            const res = await fetch('/api/discovery/track', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ series_name: seriesName, release_id: releaseId })
+            });
+            const data = await res.json();
+            if (data.status === 'success') {
+                showToast(`Started tracking "${seriesName}"!`, 'success');
+                setTimeout(() => location.reload(), 600);
+            }
+        } catch (err) {
+            showToast(`Error: ${err}`, 'error');
+        }
+    }
+
+    async function blacklistDiscovered(seriesName) {
+        if (!confirm(`Are you sure you want to blacklist "${seriesName}"? Any active requests for this series will be cancelled and future releases will not be tracked.`)) return;
+
+        try {
+            const res = await fetch('/api/discovery/blacklist', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ series_name: seriesName })
+            });
+            const data = await res.json();
+            if (data.status === 'success') {
+                showToast(`Blacklisted "${seriesName}" and cleared requests.`, 'success');
+                setTimeout(() => location.reload(), 600);
+            }
+        } catch (err) {
+            showToast(`Error: ${err}`, 'error');
+        }
+    }
+
+    async function submitManualBlacklist(e) {
+        e.preventDefault();
+        const name = document.getElementById('manual-blacklist-name').value.trim();
+        const reason = document.getElementById('manual-blacklist-reason').value.trim();
+        if (!name) return;
+
+        try {
+            const res = await fetch('/api/blacklist', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name: name, reason: reason })
+            });
+            const data = await res.json();
+            if (data.status === 'success') {
+                showToast(`Added "${name}" to blacklist!`, 'success');
+                setTimeout(() => location.reload(), 600);
+            }
+        } catch (err) {
+            showToast(`Error: ${err}`, 'error');
+        }
+    }
+
+    async function removeFromBlacklist(id, seriesName) {
+        try {
+            const res = await fetch(`/api/blacklist/${id}`, { method: 'DELETE' });
+            const data = await res.json();
+            if (data.status === 'success') {
+                showToast(`Unblocked "${seriesName}".`, 'success');
+                setTimeout(() => location.reload(), 600);
+            }
+        } catch (err) {
+            showToast(`Error: ${err}`, 'error');
+        }
+    }
+</script>
+{% endblock %}

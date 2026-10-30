@@ -1,12 +1,12 @@
 version: '3.8'
 
 services:
-  novelpulse:
+  noveltrax:
     build:
       context: .
       dockerfile: Dockerfile
-    image: novelpulse:latest
-    container_name: novelpulse
+    image: noveltrax:latest
+    container_name: noveltrax
     restart: unless-stopped
     ports:
       - "8080:8080"

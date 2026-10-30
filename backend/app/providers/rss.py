@@ -5,7 +5,7 @@ import feedparser
 from app.providers.base import BaseFeedProvider, ReleaseItem
 from app.parser import extract_series_and_volume
 
-logger = logging.getLogger("novelpulse.providers.rss")
+logger = logging.getLogger("noveltrax.providers.rss")
 
 class RSSFeedProvider(BaseFeedProvider):
     """
@@ -17,7 +17,7 @@ class RSSFeedProvider(BaseFeedProvider):
 
     def fetch_releases(self) -> List[ReleaseItem]:
         headers = {
-            "User-Agent": "NovelPulse/1.0 (Book Release Monitor; +https://github.com/novelpulse)",
+            "User-Agent": "NovelTrax/1.0 (Book Release Monitor; +https://github.com/noveltrax)",
         }
         feed = feedparser.parse(self.url, request_headers=headers)
         if feed.bozo and not feed.entries:

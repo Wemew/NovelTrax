@@ -47,6 +47,7 @@
                         <th class="py-3.5 px-4">Author(s)</th>
                         <th class="py-3.5 px-4 text-center">In Calibre</th>
                         <th class="py-3.5 px-4 text-center">Latest Owned</th>
+                        <th class="py-3.5 px-4 text-center">Website Hub</th>
                         <th class="py-3.5 px-4 text-center">Monitor Status</th>
                         <th class="py-3.5 px-4 text-right">Last Sync</th>
                     </tr>
@@ -55,10 +56,14 @@
                     {% for s in series_list %}
                     <tr class="series-row hover:bg-slate-800/40 transition-colors" data-name="{{ s.name|lower }}" data-author="{{ s.authors|lower }}" data-monitored="{{ s.is_monitored }}">
                         <!-- Series Name -->
-                        <td class="py-4 px-4 sm:px-6 font-bold text-white flex items-center gap-2.5">
-                            <div class="w-8 h-8 rounded-lg bg-slate-800 flex items-center justify-center text-brand-400 flex-shrink-0">
+                        <td class="py-4 px-4 sm:px-6 font-bold text-white flex items-center gap-3">
+                            {% if s.cover_url %}
+                            <img src="/api/covers?url={{ s.cover_url|urlencode }}" alt="Cover" loading="lazy" class="w-8 h-11 object-cover rounded shadow flex-shrink-0 border border-slate-800">
+                            {% else %}
+                            <div class="w-8 h-11 rounded-lg bg-slate-800 flex items-center justify-center text-brand-400 flex-shrink-0">
                                 <i data-lucide="book-marked" class="w-4 h-4"></i>
                             </div>
+                            {% endif %}
                             <div>
                                 <span class="text-sm font-bold text-white hover:text-brand-400 transition-colors">{{ s.name }}</span>
                                 {% if s.calibre_series_id %}
@@ -84,6 +89,22 @@
                             <span class="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-bold bg-brand-500/10 text-brand-400 border border-brand-500/20">
                                 Vol. {{ s.latest_index }}
                             </span>
+                        </td>
+
+                        <!-- Website Hub -->
+                        <td class="py-4 px-4 text-center">
+                            <div class="flex items-center justify-center gap-1.5">
+                                {% if s.website_url %}
+                                <a href="{{ s.website_url }}" target="_blank" rel="noopener noreferrer" class="px-2.5 py-1 rounded-lg bg-brand-500/10 hover:bg-brand-500/20 text-brand-400 border border-brand-500/20 font-medium inline-flex items-center gap-1.5 transition-colors" title="Open Series Hub on Website">
+                                    <i data-lucide="globe" class="w-3.5 h-3.5"></i>
+                                    <span>Browse</span>
+                                    <i data-lucide="external-link" class="w-2.5 h-2.5 text-slate-400"></i>
+                                </a>
+                                {% endif %}
+                                <button onclick="editSeriesLink({{ s.id }}, '{{ s.website_url or '' }}', '{{ s.name|replace('\'', '\\\'') }}')" class="p-1 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-white transition-colors" title="Edit custom series website URL">
+                                    <i data-lucide="edit-3" class="w-3.5 h-3.5"></i>
+                                </button>
+                            </div>
                         </td>
 
                         <!-- Monitor Toggle -->
@@ -140,6 +161,28 @@
 
             row.style.display = (matchesQuery && matchesFilter) ? '' : 'none';
         });
+    }
+
+    async function editSeriesLink(seriesId, currentUrl, seriesName) {
+        const newUrl = prompt(`Enter website link or search URL for "${seriesName}":`, currentUrl);
+        if (newUrl === null) return;
+
+        try {
+            const res = await fetch(`/api/series/${seriesId}/link`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ website_url: newUrl.trim() })
+            });
+            const data = await res.json();
+            if (data.status === 'success') {
+                showToast('Series website link updated!');
+                setTimeout(() => location.reload(), 600);
+            } else {
+                showToast('Failed to update series link', 'error');
+            }
+        } catch (err) {
+            showToast(`Error: ${err}`, 'error');
+        }
     }
 </script>
 {% endblock %}

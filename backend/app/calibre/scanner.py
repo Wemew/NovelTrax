@@ -3,7 +3,7 @@ import sqlite3
 import logging
 from typing import List, Dict, Any, Optional
 
-logger = logging.getLogger("novelpulse.calibre")
+logger = logging.getLogger("noveltrax.calibre")
 
 class CalibreScanner:
     """

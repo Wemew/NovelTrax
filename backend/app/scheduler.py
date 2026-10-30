@@ -8,13 +8,15 @@ from app.calibre.scanner import CalibreScanner
 from app.calibre.matcher import CalibreMatcher
 from app.providers.registry import create_provider
 from app.notifier.webhook import NotificationService
+from app.covers import CoverCache
 
-logger = logging.getLogger("novelpulse.scheduler")
+logger = logging.getLogger("noveltrax.scheduler")
 
 class TaskManager:
-    def __init__(self, db: Database, calibre_path: str):
+    def __init__(self, db: Database, calibre_path: str, data_dir: Optional[str] = None):
         self.db = db
         self.calibre_path = calibre_path
+        self.cover_cache = CoverCache(data_dir or os.getenv("DATA_DIR", "/app/data"))
         self.scheduler = AsyncIOScheduler()
         self.is_syncing_calibre = False
         self.is_checking_feeds = False
@@ -129,8 +131,9 @@ class TaskManager:
             calibre_books = scanner.get_all_books() if scanner.is_available() else []
             matcher = CalibreMatcher(calibre_series, calibre_books)
 
-            # Get monitored series names for filtering
+            # Get monitored series names and blacklisted series for filtering
             monitored_series = {s["name"].lower(): s for s in self.db.get_all_series(monitored_only=True)}
+            blacklisted_series = {b["name"].lower() for b in self.db.get_blacklisted_series()}
             notifier = self.get_notifier()
 
             feeds = self.db.get_all_feeds()
@@ -152,24 +155,30 @@ class TaskManager:
 
                     new_requests_for_feed = 0
                     for r in releases:
-                        # Evaluate against Calibre
-                        match_result = matcher.check_release(
-                            r.to_dict(),
-                            auto_request_monitored=auto_request
-                        )
-
-                        # Determine if series is monitored
                         series_name = r.series_name or ""
-                        is_monitored = False
-                        if series_name.lower() in monitored_series:
-                            is_monitored = True
-                        elif match_result.get("matched_series"):
-                            is_monitored = True
 
-                        status = match_result["status"]
-                        # If not matched to any monitored series and auto_request is strict, keep as NEW or IGNORED
-                        if status == "REQUESTED" and not is_monitored and not auto_request:
-                            status = "NEW"
+                        # If series is blacklisted, immediately mark as BLACKLISTED
+                        if series_name and series_name.lower() in blacklisted_series:
+                            status = "BLACKLISTED"
+                            match_result = {"status": "BLACKLISTED", "matched_book_id": None}
+                        else:
+                            # Evaluate against Calibre
+                            match_result = matcher.check_release(
+                                r.to_dict(),
+                                auto_request_monitored=auto_request
+                            )
+
+                            # Determine if series is monitored
+                            is_monitored = False
+                            if series_name.lower() in monitored_series:
+                                is_monitored = True
+                            elif match_result.get("matched_series"):
+                                is_monitored = True
+
+                            status = match_result["status"]
+                            # If not matched to any monitored series and auto_request is strict, keep as NEW
+                            if status == "REQUESTED" and not is_monitored and not auto_request:
+                                status = "NEW"
 
                         rel_dict = r.to_dict()
                         rel_dict.update({
@@ -180,6 +189,10 @@ class TaskManager:
                         })
 
                         is_new, rel_id = self.db.upsert_release(rel_dict)
+
+                        # Pre-cache cover image locally in background
+                        if r.cover_url:
+                            self.cover_cache.cache_sync(r.cover_url)
 
                         if is_new and status == "REQUESTED":
                             total_requested += 1

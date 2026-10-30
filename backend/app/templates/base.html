@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{% block title %}NovelPulse{% endblock %} - Calibre Novel Release Monitor</title>
+    <title>{% block title %}NovelTrax{% endblock %} - Calibre Novel Release Monitor</title>
     <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
     <!-- Lucide Icons -->
@@ -52,7 +52,7 @@
                         </div>
                         <div>
                             <span class="text-xl font-bold tracking-tight text-white flex items-center gap-1.5">
-                                NovelPulse
+                                NovelTrax
                                 <span class="text-xs px-2 py-0.5 rounded-full bg-brand-500/10 text-brand-400 border border-brand-500/20 font-medium">Calibre</span>
                             </span>
                             <p class="text-[10px] text-slate-400 tracking-wider uppercase font-semibold">Release Monitor</p>
@@ -72,7 +72,11 @@
                     </a>
                     <a href="/releases" class="px-3.5 py-2 rounded-lg text-sm font-medium transition-colors {% if active_page == 'releases' %}bg-slate-800 text-brand-400 border border-slate-700{% else %}text-slate-300 hover:text-white hover:bg-slate-800/60{% endif %} flex items-center gap-2">
                         <i data-lucide="sparkles" class="w-4 h-4"></i>
-                        Releases & Requests
+                        Releases
+                    </a>
+                    <a href="/discovery" class="px-3.5 py-2 rounded-lg text-sm font-medium transition-colors {% if active_page == 'discovery' %}bg-slate-800 text-brand-400 border border-slate-700{% else %}text-slate-300 hover:text-white hover:bg-slate-800/60{% endif %} flex items-center gap-2">
+                        <i data-lucide="compass" class="w-4 h-4 text-amber-400"></i>
+                        Discovery
                     </a>
                     <a href="/feeds" class="px-3.5 py-2 rounded-lg text-sm font-medium transition-colors {% if active_page == 'feeds' %}bg-slate-800 text-brand-400 border border-slate-700{% else %}text-slate-300 hover:text-white hover:bg-slate-800/60{% endif %} flex items-center gap-2">
                         <i data-lucide="rss" class="w-4 h-4"></i>
@@ -117,7 +121,7 @@
     <!-- Footer -->
     <footer class="border-t border-slate-800/80 bg-[#0e131f] py-6 text-center text-xs text-slate-500">
         <div class="max-w-7xl mx-auto px-4 flex flex-col sm:flex-row items-center justify-between gap-2">
-            <p>NovelPulse &bull; Monitoring J-Novels, Light Novel Trackers & Calibre Library</p>
+            <p>NovelTrax &bull; Monitoring J-Novels, Light Novel Trackers & Calibre Library</p>
             <p class="text-slate-400">Zero-Lock SQLite Engine &bull; Docker Ready</p>
         </div>
     </footer>

@@ -32,6 +32,7 @@ class Database:
                     book_count INTEGER DEFAULT 0,
                     latest_index REAL DEFAULT 0.0,
                     is_monitored INTEGER DEFAULT 1,
+                    website_url TEXT DEFAULT '',
                     last_sync TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
             """)
@@ -51,10 +52,32 @@ class Database:
                     author TEXT,
                     source_feed_id INTEGER,
                     source_feed_name TEXT,
+                    series_link TEXT,
                     status TEXT DEFAULT 'REQUESTED',
                     calibre_matched_book_id INTEGER,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+
+            # Migrations for existing databases
+            try:
+                cur.execute("ALTER TABLE series_tracking ADD COLUMN website_url TEXT DEFAULT '';")
+            except sqlite3.OperationalError:
+                pass
+
+            try:
+                cur.execute("ALTER TABLE releases ADD COLUMN series_link TEXT;")
+            except sqlite3.OperationalError:
+                pass
+
+            # Series blacklist table
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS series_blacklist (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT UNIQUE NOT NULL,
+                    reason TEXT DEFAULT '',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
             """)
 
@@ -118,7 +141,10 @@ class Database:
                     "J-Novels EPUB Releases",
                     "jnovels",
                     "https://jnovels.com/?s=epub",
-                    json.dumps({"description": "Monitors J-Novels for newly posted light novel and web novel EPUB releases."})
+                    json.dumps({
+                        "description": "Monitors J-Novels for newly posted light novel and web novel EPUB releases.",
+                        "max_pages": 3
+                    })
                 ))
 
             conn.commit()
@@ -151,6 +177,7 @@ class Database:
         Preserves user's is_monitored status!
         """
         updated_count = 0
+        from urllib.parse import quote_plus
         with self.get_connection() as conn:
             cur = conn.cursor()
             for s in calibre_series_list:
@@ -159,17 +186,19 @@ class Database:
                 count = s["book_count"]
                 latest = s["latest_index"]
                 authors = s.get("authors", "")
+                default_web_url = f"https://jnovels.com/?s={quote_plus(name)}"
 
                 cur.execute("""
-                    INSERT INTO series_tracking (calibre_series_id, name, authors, book_count, latest_index, is_monitored, last_sync)
-                    VALUES (?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP)
+                    INSERT INTO series_tracking (calibre_series_id, name, authors, book_count, latest_index, is_monitored, website_url, last_sync)
+                    VALUES (?, ?, ?, ?, ?, 1, ?, CURRENT_TIMESTAMP)
                     ON CONFLICT(name) DO UPDATE SET
                         calibre_series_id = excluded.calibre_series_id,
                         authors = excluded.authors,
                         book_count = excluded.book_count,
                         latest_index = excluded.latest_index,
+                        website_url = CASE WHEN series_tracking.website_url = '' OR series_tracking.website_url IS NULL THEN excluded.website_url ELSE series_tracking.website_url END,
                         last_sync = CURRENT_TIMESTAMP;
-                """, (ser_id, name, authors, count, latest))
+                """, (ser_id, name, authors, count, latest, default_web_url))
                 updated_count += 1
             conn.commit()
         return updated_count
@@ -177,10 +206,16 @@ class Database:
     def get_all_series(self, monitored_only: bool = False) -> List[Dict[str, Any]]:
         with self.get_connection() as conn:
             cur = conn.cursor()
+            base_query = """
+                SELECT 
+                    st.*,
+                    (SELECT r.cover_url FROM releases r WHERE lower(r.series_name) = lower(st.name) AND r.cover_url IS NOT NULL AND r.cover_url != '' ORDER BY r.id DESC LIMIT 1) AS cover_url
+                FROM series_tracking st
+            """
             if monitored_only:
-                cur.execute("SELECT * FROM series_tracking WHERE is_monitored = 1 ORDER BY name COLLATE NOCASE ASC;")
+                cur.execute(f"{base_query} WHERE st.is_monitored = 1 ORDER BY st.name COLLATE NOCASE ASC;")
             else:
-                cur.execute("SELECT * FROM series_tracking ORDER BY is_monitored DESC, name COLLATE NOCASE ASC;")
+                cur.execute(f"{base_query} ORDER BY st.is_monitored DESC, st.name COLLATE NOCASE ASC;")
             return [dict(row) for row in cur.fetchall()]
 
     def toggle_series_monitored(self, series_id: int) -> bool:
@@ -191,6 +226,12 @@ class Database:
             cur.execute("SELECT is_monitored FROM series_tracking WHERE id = ?;", (series_id,))
             row = cur.fetchone()
             return bool(row["is_monitored"]) if row else False
+
+    def update_series_website_url(self, series_id: int, website_url: str):
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("UPDATE series_tracking SET website_url = ? WHERE id = ?;", (website_url.strip(), series_id))
+            conn.commit()
 
     # --- Release Operations ---
     def upsert_release(self, release_data: Dict[str, Any]) -> Tuple[bool, int]:
@@ -217,6 +258,7 @@ class Database:
                         cover_url = ?,
                         description = ?,
                         author = ?,
+                        series_link = COALESCE(?, series_link),
                         updated_at = CURRENT_TIMESTAMP
                     WHERE id = ?;
                 """, (
@@ -228,6 +270,7 @@ class Database:
                     release_data.get("cover_url"),
                     release_data.get("description"),
                     release_data.get("author"),
+                    release_data.get("series_link"),
                     rel_id
                 ))
                 conn.commit()
@@ -237,8 +280,8 @@ class Database:
                     INSERT INTO releases (
                         guid, title, series_name, volume, link, pub_date,
                         cover_url, description, author, source_feed_id,
-                        source_feed_name, status, calibre_matched_book_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                        source_feed_name, series_link, status, calibre_matched_book_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                 """, (
                     guid,
                     release_data["title"],
@@ -251,10 +294,22 @@ class Database:
                     release_data.get("author"),
                     release_data.get("source_feed_id"),
                     release_data.get("source_feed_name"),
+                    release_data.get("series_link"),
                     release_data.get("status", "REQUESTED"),
                     release_data.get("calibre_matched_book_id")
                 ))
                 rel_id = cur.lastrowid
+
+                # If this release has a series link, update the tracked series website_url if currently empty
+                s_name = release_data.get("series_name")
+                s_link = release_data.get("series_link")
+                if s_name and s_link:
+                    cur.execute("""
+                        UPDATE series_tracking 
+                        SET website_url = ? 
+                        WHERE lower(name) = lower(?) AND (website_url IS NULL OR website_url = '' OR website_url LIKE '%?s=%');
+                    """, (s_link, s_name))
+
                 conn.commit()
                 return True, rel_id
 
@@ -382,9 +437,123 @@ class Database:
             cur.execute("SELECT count(*) FROM feeds WHERE enabled = 1;")
             active_feeds = cur.fetchone()[0]
 
+            cur.execute("""
+                SELECT count(*) 
+                FROM releases r
+                WHERE (r.volume IS NULL OR r.volume = 1.0)
+                  AND r.status NOT IN ('IN_CALIBRE', 'BLACKLISTED')
+                  AND (r.series_name IS NULL OR lower(r.series_name) NOT IN (SELECT lower(name) FROM series_blacklist))
+                  AND (r.series_name IS NULL OR lower(r.series_name) NOT IN (SELECT lower(name) FROM series_tracking WHERE is_monitored = 1));
+            """)
+            discovered_count = cur.fetchone()[0]
+
+            cur.execute("SELECT count(*) FROM series_blacklist;")
+            blacklisted_count = cur.fetchone()[0]
+
             return {
                 "monitored_series": monitored_series,
                 "pending_requests": pending_requests,
                 "acquired_books": acquired_books,
-                "active_feeds": active_feeds
+                "active_feeds": active_feeds,
+                "discovered_count": discovered_count,
+                "blacklisted_count": blacklisted_count
             }
+
+    # --- Blacklist Operations ---
+    def add_to_blacklist(self, series_name: str, reason: str = "") -> bool:
+        """
+        Adds a series to the blacklist and cancels/clears any existing pending requests for it.
+        """
+        clean_name = series_name.strip()
+        if not clean_name:
+            return False
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                INSERT INTO series_blacklist (name, reason, created_at)
+                VALUES (?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(name) DO UPDATE SET reason = excluded.reason;
+            """, (clean_name, reason))
+
+            # Automatically cancel any pending requests for this series
+            cur.execute("""
+                UPDATE releases 
+                SET status = 'BLACKLISTED', updated_at = CURRENT_TIMESTAMP
+                WHERE lower(series_name) = lower(?) AND status = 'REQUESTED';
+            """, (clean_name,))
+
+            # Also disable tracking if present in series_tracking
+            cur.execute("""
+                UPDATE series_tracking
+                SET is_monitored = 0
+                WHERE lower(name) = lower(?);
+            """, (clean_name,))
+
+            conn.commit()
+            return True
+
+    def remove_from_blacklist(self, blacklist_id: int):
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("DELETE FROM series_blacklist WHERE id = ?;", (blacklist_id,))
+            conn.commit()
+
+    def get_blacklisted_series(self) -> List[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT * FROM series_blacklist ORDER BY name COLLATE NOCASE ASC;")
+            return [dict(row) for row in cur.fetchall()]
+
+    def is_series_blacklisted(self, series_name: str) -> bool:
+        if not series_name:
+            return False
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT id FROM series_blacklist WHERE lower(name) = lower(?);", (series_name.strip(),))
+            return cur.fetchone() is not None
+
+    # --- Discovery Operations ---
+    def get_discovery_releases(self, limit: int = 100) -> List[Dict[str, Any]]:
+        """
+        Returns releases that are Volume 1 or unnumbered (standalone),
+        which are NOT currently in Calibre, NOT in series_tracking, and NOT blacklisted.
+        """
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT r.* 
+                FROM releases r
+                WHERE (r.volume IS NULL OR r.volume = 1.0)
+                  AND r.status NOT IN ('IN_CALIBRE', 'BLACKLISTED')
+                  AND (r.series_name IS NULL OR lower(r.series_name) NOT IN (SELECT lower(name) FROM series_blacklist))
+                  AND (r.series_name IS NULL OR lower(r.series_name) NOT IN (SELECT lower(name) FROM series_tracking WHERE is_monitored = 1))
+                ORDER BY r.updated_at DESC, r.id DESC
+                LIMIT ?;
+            """, (limit,))
+            return [dict(row) for row in cur.fetchall()]
+
+    def track_discovered_series(self, series_name: str, release_id: Optional[int] = None) -> bool:
+        """
+        Adds a discovered series to series_tracking (monitored = 1) and
+        updates associated release status to REQUESTED.
+        """
+        clean_name = series_name.strip()
+        if not clean_name:
+            return False
+        from urllib.parse import quote_plus
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            default_link = f"https://jnovels.com/?s={quote_plus(clean_name)}"
+            cur.execute("""
+                INSERT INTO series_tracking (name, book_count, latest_index, is_monitored, website_url, last_sync)
+                VALUES (?, 0, 0.0, 1, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(name) DO UPDATE SET is_monitored = 1;
+            """, (clean_name, default_link))
+
+            if release_id:
+                cur.execute("UPDATE releases SET status = 'REQUESTED', updated_at = CURRENT_TIMESTAMP WHERE id = ?;", (release_id,))
+            else:
+                cur.execute("UPDATE releases SET status = 'REQUESTED', updated_at = CURRENT_TIMESTAMP WHERE lower(series_name) = lower(?) AND status != 'IN_CALIBRE';", (clean_name,))
+
+            conn.commit()
+            return True

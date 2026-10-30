@@ -68,6 +68,30 @@
         </div>
     </div>
 
+    <!-- New Series Discovery Alert Banner (if any) -->
+    {% if stats.discovered_count > 0 %}
+    <div class="bg-gradient-to-r from-amber-950/40 via-slate-900 to-slate-900 border border-amber-500/30 rounded-2xl p-4 sm:p-5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 shadow-lg">
+        <div class="flex items-center space-x-3.5">
+            <div class="w-10 h-10 rounded-xl bg-amber-500/20 border border-amber-500/30 text-amber-400 flex items-center justify-center flex-shrink-0">
+                <i data-lucide="compass" class="w-5 h-5"></i>
+            </div>
+            <div>
+                <div class="flex items-center gap-2">
+                    <h4 class="font-bold text-white text-sm">New Series & Volume 1 Releases Discovered</h4>
+                    <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30">{{ stats.discovered_count }} Awaiting Review</span>
+                </div>
+                <p class="text-xs text-slate-400 mt-0.5">
+                    Newly detected Volume 1 or unnumbered releases found on your feeds. Easily 1-click Track or Blacklist them.
+                </p>
+            </div>
+        </div>
+        <a href="/discovery" class="text-xs px-3.5 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold flex items-center gap-1.5 transition-all shadow-md shadow-amber-500/20 whitespace-nowrap">
+            <span>Review New Series</span>
+            <i data-lucide="arrow-right" class="w-3.5 h-3.5"></i>
+        </a>
+    </div>
+    {% endif %}
+
     <!-- Calibre Library Status Banner -->
     <div class="bg-[#111827] border border-slate-800 rounded-2xl p-4 sm:p-5 flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
         <div class="flex items-center space-x-3.5">
@@ -140,7 +164,7 @@
                     <!-- Book info container -->
                     <div class="flex gap-3.5 mt-2">
                         {% if req.cover_url %}
-                        <img src="{{ req.cover_url }}" alt="Cover" class="w-16 h-24 object-cover rounded-lg border border-slate-800 flex-shrink-0 shadow-md">
+                        <img src="/api/covers?url={{ req.cover_url|urlencode }}" alt="Cover" loading="lazy" class="w-16 h-24 object-cover rounded-lg border border-slate-800 flex-shrink-0 shadow-md">
                         {% else %}
                         <div class="w-16 h-24 rounded-lg bg-slate-800/80 border border-slate-700 flex flex-col items-center justify-center flex-shrink-0 text-slate-500">
                             <i data-lucide="book" class="w-6 h-6"></i>
@@ -166,10 +190,18 @@
 
                 <!-- Action Toolbar -->
                 <div class="mt-4 pt-3 border-t border-slate-800/80 flex items-center justify-between gap-2">
-                    <a href="{{ req.link }}" target="_blank" rel="noopener noreferrer" class="text-xs px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 flex items-center gap-1.5 transition-colors font-medium">
-                        <i data-lucide="external-link" class="w-3.5 h-3.5 text-slate-400"></i>
-                        Download / Link
-                    </a>
+                    <div class="flex items-center gap-1.5 flex-wrap">
+                        <a href="{{ req.link }}" target="_blank" rel="noopener noreferrer" class="text-xs px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 flex items-center gap-1.5 transition-colors font-medium" title="Go to specific novel release post">
+                            <i data-lucide="external-link" class="w-3.5 h-3.5 text-slate-400"></i>
+                            Release
+                        </a>
+                        {% if req.series_link %}
+                        <a href="{{ req.series_link }}" target="_blank" rel="noopener noreferrer" class="text-xs px-2.5 py-1.5 rounded-lg bg-brand-500/10 hover:bg-brand-500/20 text-brand-400 border border-brand-500/20 flex items-center gap-1.5 transition-colors font-medium" title="View all releases for this series on website">
+                            <i data-lucide="layers" class="w-3.5 h-3.5"></i>
+                            Series Hub
+                        </a>
+                        {% endif %}
+                    </div>
                     <div class="flex items-center gap-1.5">
                         <button onclick="updateReleaseStatus({{ req.id }}, 'IN_CALIBRE')" title="Manually mark as added to Calibre" class="text-xs p-1.5 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/20 transition-colors">
                             <i data-lucide="check" class="w-4 h-4"></i>

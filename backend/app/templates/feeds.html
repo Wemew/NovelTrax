@@ -158,10 +158,14 @@
                     <input type="url" id="new-feed-url" required placeholder="https://jnovels.com/?s=epub" class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white font-mono focus:outline-none focus:border-brand-500">
                 </div>
 
-                <div class="grid grid-cols-2 gap-3">
+                <div class="grid grid-cols-3 gap-3">
                     <div>
-                        <label class="block text-xs font-semibold text-slate-300 mb-1">Check Interval (Minutes)</label>
+                        <label class="block text-xs font-semibold text-slate-300 mb-1">Check Interval (m)</label>
                         <input type="number" id="new-feed-interval" value="60" min="5" max="1440" class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-brand-500">
+                    </div>
+                    <div>
+                        <label class="block text-xs font-semibold text-slate-300 mb-1">Scan Depth (Pages)</label>
+                        <input type="number" id="new-feed-pages" value="3" min="1" max="10" title="How many pagination pages to scan (1 page ≈ 6-10 books)" class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-brand-500">
                     </div>
                     <div class="flex items-center pt-5">
                         <label class="flex items-center space-x-2 cursor-pointer">
@@ -214,7 +218,9 @@
             url: document.getElementById('new-feed-url').value,
             interval: parseInt(document.getElementById('new-feed-interval').value) || 60,
             auto_request: document.getElementById('new-feed-autorequest').checked,
-            config: {}
+            config: {
+                max_pages: parseInt(document.getElementById('new-feed-pages').value) || 3
+            }
         };
 
         if (payload.feed_type === 'html_scraper') {

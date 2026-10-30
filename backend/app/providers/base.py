@@ -15,6 +15,7 @@ class ReleaseItem:
         description: Optional[str] = None,
         guid: Optional[str] = None,
         author: Optional[str] = None,
+        series_link: Optional[str] = None,
         raw_data: Optional[Dict[str, Any]] = None
     ):
         self.title = title.strip()
@@ -25,6 +26,7 @@ class ReleaseItem:
         self.cover_url = cover_url
         self.description = description or ""
         self.author = author or ""
+        self.series_link = series_link
         self.raw_data = raw_data or {}
         
         # Calculate consistent GUID if not provided
@@ -45,6 +47,7 @@ class ReleaseItem:
             "cover_url": self.cover_url,
             "description": self.description,
             "author": self.author,
+            "series_link": self.series_link,
         }
 
 class BaseFeedProvider(ABC):

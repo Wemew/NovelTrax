@@ -6,7 +6,7 @@ from bs4 import BeautifulSoup
 from app.providers.base import BaseFeedProvider, ReleaseItem
 from app.parser import extract_series_and_volume
 
-logger = logging.getLogger("novelpulse.providers.novelupdates")
+logger = logging.getLogger("noveltrax.providers.novelupdates")
 
 class NovelUpdatesProvider(BaseFeedProvider):
     """
@@ -62,6 +62,7 @@ class NovelUpdatesProvider(BaseFeedProvider):
                 series_name=parsed["series_name"] or series_title,
                 volume=parsed["volume"],
                 cover_url=cover_url,
+                series_link=link,
                 raw_data={"confidence": parsed["confidence"]}
             ))
 
