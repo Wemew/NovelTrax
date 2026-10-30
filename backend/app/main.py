@@ -76,71 +76,92 @@ async def dashboard_view(request: Request):
     pending_requests = db.get_pending_requests()
     recent_logs = db.get_logs(limit=10)
 
-    return templates.TemplateResponse("index.html", {
-        "request": request,
-        "active_page": "dashboard",
-        "stats": stats,
-        "calibre_status": calibre_status,
-        "pending_requests": pending_requests,
-        "recent_logs": recent_logs
-    })
+    return templates.TemplateResponse(
+        request=request,
+        name="index.html",
+        context={
+            "active_page": "dashboard",
+            "stats": stats,
+            "calibre_status": calibre_status,
+            "pending_requests": pending_requests,
+            "recent_logs": recent_logs
+        }
+    )
 
 @app.get("/series", response_class=HTMLResponse)
 async def series_view(request: Request):
     series_list = db.get_all_series()
-    return templates.TemplateResponse("series.html", {
-        "request": request,
-        "active_page": "series",
-        "series_list": series_list
-    })
+    return templates.TemplateResponse(
+        request=request,
+        name="series.html",
+        context={
+            "active_page": "series",
+            "series_list": series_list
+        }
+    )
 
 @app.get("/releases", response_class=HTMLResponse)
 async def releases_view(request: Request, status: Optional[str] = None):
     releases = db.get_releases(status=status, limit=500)
-    return templates.TemplateResponse("releases.html", {
-        "request": request,
-        "active_page": "releases",
-        "releases": releases,
-        "current_status": status
-    })
+    return templates.TemplateResponse(
+        request=request,
+        name="releases.html",
+        context={
+            "active_page": "releases",
+            "releases": releases,
+            "current_status": status
+        }
+    )
 
 @app.get("/feeds", response_class=HTMLResponse)
 async def feeds_view(request: Request):
     feeds = db.get_all_feeds()
-    return templates.TemplateResponse("feeds.html", {
-        "request": request,
-        "active_page": "feeds",
-        "feeds": feeds
-    })
+    return templates.TemplateResponse(
+        request=request,
+        name="feeds.html",
+        context={
+            "active_page": "feeds",
+            "feeds": feeds
+        }
+    )
 
 @app.get("/logs", response_class=HTMLResponse)
 async def logs_view(request: Request):
     logs = db.get_logs(limit=150)
-    return templates.TemplateResponse("logs.html", {
-        "request": request,
-        "active_page": "logs",
-        "logs": logs
-    })
+    return templates.TemplateResponse(
+        request=request,
+        name="logs.html",
+        context={
+            "active_page": "logs",
+            "logs": logs
+        }
+    )
 
 @app.get("/discovery", response_class=HTMLResponse)
 async def discovery_view(request: Request):
     discovered = db.get_discovery_releases(limit=100)
     blacklisted = db.get_blacklisted_series()
-    return templates.TemplateResponse("discovery.html", {
-        "request": request,
-        "active_page": "discovery",
-        "discovered_releases": discovered,
-        "blacklisted_series": blacklisted
-    })
+    return templates.TemplateResponse(
+        request=request,
+        name="discovery.html",
+        context={
+            "active_page": "discovery",
+            "discovered_releases": discovered,
+            "blacklisted_series": blacklisted
+        }
+    )
 
 @app.get("/settings", response_class=HTMLResponse)
 async def settings_view(request: Request):
     settings = db.get_all_settings()
-    return templates.TemplateResponse("settings.html", {
-        "request": request,
-        "active_page": "settings",
-        "settings": settings
-    })
+    return templates.TemplateResponse(
+        request=request,
+        name="settings.html",
+        context={
+            "active_page": "settings",
+            "settings": settings
+        }
+    )
 
 # --- API Endpoints ---
 
