@@ -15,6 +15,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
+# Create non-root unprivileged user (UID/GID 1000) for defense-in-depth
+RUN groupadd -g 1000 appuser && \
+    useradd -u 1000 -g appuser -s /bin/sh -m appuser
+
 # Copy and install dependencies
 COPY backend/requirements.txt /app/
 RUN pip install --no-cache-dir -r requirements.txt
@@ -22,8 +26,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application source code
 COPY backend/ /app/
 
-# Create mount points for Calibre network share and persistent data
-RUN mkdir -p /calibre /app/data
+# Create mount points for Calibre network share and persistent data with proper ownership
+RUN mkdir -p /calibre /app/data && chown -R appuser:appuser /app /calibre
+
+USER appuser
 
 EXPOSE 8080
 

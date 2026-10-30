@@ -224,7 +224,54 @@ def run_e2e_test():
     print("✓ Successfully removed/restored series from Blacklist!")
 
     print("\n" + "=" * 60)
-    print("ALL TESTS PASSED WITH 100% SUCCESS!")
+    print("STEP 8: TESTING SECURITY HARDENING & DEFENSE-IN-DEPTH")
+    print("=" * 60)
+    from app.covers import is_safe_public_url, detect_valid_image
+
+    print("Testing SSRF URL validation:")
+    blocked_urls = [
+        "http://127.0.0.1/image.jpg",
+        "http://localhost/test.png",
+        "http://169.254.169.254/latest/meta-data/",
+        "http://192.168.1.1/admin.jpg",
+        "http://10.0.0.5/secret.webp",
+        "http://172.17.0.1:8080/internal",
+        "file:///etc/passwd",
+        "ftp://internal.lan/file.jpg",
+        "javascript:alert(1)"
+    ]
+    for url in blocked_urls:
+        assert not is_safe_public_url(url), f"Failed to block unsafe URL: {url}"
+        print(f"  ✓ Blocked unsafe URL: {url}")
+
+    print("\nTesting image magic-byte verification:")
+    assert detect_valid_image(b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x01\x00`\x00`\x00\x00") == "image/jpeg"
+    print("  ✓ Allowed valid JPEG binary header")
+
+    assert detect_valid_image(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x10") == "image/png"
+    print("  ✓ Allowed valid PNG binary header")
+
+    assert detect_valid_image(b"RIFF\x24\x00\x00\x00WEBPVP8 \x18\x00\x00\x00") == "image/webp"
+    print("  ✓ Allowed valid WEBP binary header")
+
+    assert detect_valid_image(b"GIF89a\x01\x00\x01\x00\x80\x00\x00\xff\xff\xff\x00\x00\x00!\xf9\x04") == "image/gif"
+    print("  ✓ Allowed valid GIF binary header")
+
+    # Reject non-images and script payloads
+    malicious_payloads = [
+        b"<svg onload=alert(1)>",
+        b"<html><head><script>evil()</script></head><body>hello</body></html>",
+        b"<?php system($_GET['cmd']); ?>",
+        b"#!/bin/bash\nrm -rf /",
+        b"MZ\x90\x00\x03\x00\x00\x00\x04\x00\x00\x00\xff\xff\x00\x00",  # Windows PE binary
+        b"Short text"
+    ]
+    for payload in malicious_payloads:
+        assert detect_valid_image(payload) is None, f"Failed to reject malicious payload: {payload[:20]}"
+        print(f"  ✓ Rejected unsafe content payload: {payload[:20]!r}")
+
+    print("\n" + "=" * 60)
+    print("ALL TESTS (INCLUDING SECURITY HARDENING) PASSED WITH 100% SUCCESS!")
     print("=" * 60)
 
 if __name__ == "__main__":

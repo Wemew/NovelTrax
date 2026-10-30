@@ -8,7 +8,14 @@ services:
     image: noveltrax:latest
     container_name: noveltrax
     restart: unless-stopped
+    # Container hardening: drop kernel capabilities and block privilege escalation
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     ports:
+      # If using a reverse proxy (Nginx, Traefik, Caddy, Cloudflare Tunnel),
+      # bind to 127.0.0.1:8080:8080 to prevent direct LAN exposure.
       - "8080:8080"
     environment:
       - PORT=8080

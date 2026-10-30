@@ -101,7 +101,7 @@
                                     <i data-lucide="external-link" class="w-2.5 h-2.5 text-slate-400"></i>
                                 </a>
                                 {% endif %}
-                                <button onclick="editSeriesLink({{ s.id }}, '{{ s.website_url or '' }}', '{{ s.name|replace('\'', '\\\'') }}')" class="p-1 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-white transition-colors" title="Edit custom series website URL">
+                                <button data-series-id="{{ s.id }}" data-website-url="{{ s.website_url or '' }}" data-series-name="{{ s.name }}" onclick="handleEditLink(this)" class="p-1 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-white transition-colors" title="Edit custom series website URL">
                                     <i data-lucide="edit-3" class="w-3.5 h-3.5"></i>
                                 </button>
                             </div>
@@ -161,6 +161,10 @@
 
             row.style.display = (matchesQuery && matchesFilter) ? '' : 'none';
         });
+    }
+
+    function handleEditLink(el) {
+        editSeriesLink(parseInt(el.dataset.seriesId), el.dataset.websiteUrl || '', el.dataset.seriesName || '');
     }
 
     async function editSeriesLink(seriesId, currentUrl, seriesName) {

@@ -5,7 +5,7 @@ from typing import Dict, Any, Optional
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, Form, Query, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 
@@ -51,6 +51,16 @@ async def lifespan(app: FastAPI):
     task_manager.stop()
 
 app = FastAPI(title="NovelTrax", lifespan=lifespan)
+
+# Security Headers Middleware
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "SAMEORIGIN"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    return response
 
 # Setup Templates
 templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
@@ -147,11 +157,13 @@ async def api_calibre_test(path: str = Query(...)):
     summary = scanner.get_library_summary()
     return JSONResponse(summary)
 
+FALLBACK_COVER_SVG = """<svg xmlns="http://www.w3.org/2000/svg" width="100" height="150" viewBox="0 0 100 150"><rect width="100" height="150" rx="8" fill="#1e293b" stroke="#334155" stroke-width="2"/><path d="M35 55h30M35 70h30M35 85h20" stroke="#64748b" stroke-width="2" stroke-linecap="round"/><text x="50" y="115" font-family="system-ui,-apple-system,sans-serif" font-size="10" font-weight="600" fill="#94a3b8" text-anchor="middle">EPUB</text></svg>"""
+
 @app.get("/api/covers")
 async def api_get_cover(url: str = Query(...)):
     """Serves locally cached cover image, downloading on-demand if not already on disk."""
     if not url:
-        raise HTTPException(status_code=400, detail="Missing url")
+        return Response(content=FALLBACK_COVER_SVG, media_type="image/svg+xml", status_code=200)
 
     filepath = await cover_cache.get_or_download(url)
     if filepath and os.path.isfile(filepath):
@@ -167,8 +179,8 @@ async def api_get_cover(url: str = Query(...)):
             headers={"Cache-Control": "public, max-age=864000"}
         )
 
-    # Fallback to redirecting to original url if local caching fails
-    return RedirectResponse(url=url)
+    # Safe fallback placeholder (prevents open redirects to arbitrary third-party URLs)
+    return Response(content=FALLBACK_COVER_SVG, media_type="image/svg+xml", status_code=200)
 
 @app.post("/api/feeds/check")
 async def api_feeds_check():
