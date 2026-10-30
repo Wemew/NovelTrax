@@ -1,0 +1,174 @@
+{% extends "base.html" %}
+
+{% block title %}Settings{% endblock %}
+
+{% block content %}
+<div class="max-w-4xl space-y-8">
+
+    <div>
+        <h1 class="text-2xl font-black text-white flex items-center gap-2.5">
+            <i data-lucide="settings" class="w-6 h-6 text-brand-400"></i>
+            System Settings & Integration
+        </h1>
+        <p class="text-xs text-slate-400 mt-1">
+            Configure your Calibre library connection, polling intervals, and notification webhooks.
+        </p>
+    </div>
+
+    <!-- Zero-Lock Safety Notice -->
+    <div class="bg-brand-950/30 border border-brand-500/20 rounded-2xl p-4 sm:p-5 flex items-start gap-3.5">
+        <div class="w-8 h-8 rounded-lg bg-brand-500/20 text-brand-400 flex items-center justify-center flex-shrink-0 mt-0.5">
+            <i data-lucide="shield-check" class="w-5 h-5"></i>
+        </div>
+        <div>
+            <h4 class="text-sm font-bold text-white">Non-Locking Calibre Database Reader Active</h4>
+            <p class="text-xs text-slate-300 mt-1 leading-relaxed">
+                NovelPulse uses SQLite's <code class="font-mono text-brand-300">mode=ro&immutable=1</code> protocol. SQLite bypasses all filesystem lock requests on network shares and host filesystems. This guarantees that your host Calibre application, Calibre-Web, or network clients will <strong>never</strong> experience database write locks or blocking.
+            </p>
+        </div>
+    </div>
+
+    <!-- Settings Form -->
+    <form onsubmit="saveSettings(event)" class="bg-slate-900/90 border border-slate-800 rounded-2xl p-6 space-y-6 shadow-xl">
+        
+        <!-- Section: Calibre Library -->
+        <div>
+            <h3 class="text-sm font-bold uppercase tracking-wider text-slate-300 border-b border-slate-800 pb-2 mb-4 flex items-center gap-2">
+                <i data-lucide="library" class="w-4 h-4 text-brand-400"></i>
+                Calibre Library Network Mount
+            </h3>
+            
+            <div class="space-y-4">
+                <div>
+                    <label class="block text-xs font-semibold text-slate-300 mb-1">
+                        Calibre Library Path in Container
+                    </label>
+                    <div class="flex gap-2">
+                        <input type="text" id="setting-calibre-path" value="{{ settings.calibre_path }}" required class="flex-1 bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white font-mono focus:outline-none focus:border-brand-500">
+                        <button type="button" onclick="testCalibreConnection()" class="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold flex items-center gap-1.5 transition-colors">
+                            <i data-lucide="check" class="w-4 h-4 text-brand-400"></i>
+                            Test Connection
+                        </button>
+                    </div>
+                    <p class="text-[11px] text-slate-500 mt-1">
+                        Default inside Docker is <code class="font-mono text-slate-400">/calibre</code>. Must contain <code class="font-mono text-slate-400">metadata.db</code>.
+                    </p>
+                </div>
+
+                <div id="calibre-test-result" class="hidden p-3 rounded-xl text-xs font-mono"></div>
+            </div>
+        </div>
+
+        <!-- Section: Automation Intervals -->
+        <div>
+            <h3 class="text-sm font-bold uppercase tracking-wider text-slate-300 border-b border-slate-800 pb-2 mb-4 flex items-center gap-2">
+                <i data-lucide="clock" class="w-4 h-4 text-brand-400"></i>
+                Automation & Polling Intervals
+            </h3>
+
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                    <label class="block text-xs font-semibold text-slate-300 mb-1">
+                        Calibre Sync Interval (Minutes)
+                    </label>
+                    <input type="number" id="setting-calibre-interval" value="{{ settings.calibre_sync_interval_minutes }}" min="1" max="1440" required class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-brand-500">
+                    <p class="text-[11px] text-slate-500 mt-1">How often to re-scan Calibre and auto-clear acquired requests.</p>
+                </div>
+
+                <div>
+                    <label class="block text-xs font-semibold text-slate-300 mb-1">
+                        Feed Check Interval (Minutes)
+                    </label>
+                    <input type="number" id="setting-feed-interval" value="{{ settings.feed_check_interval_minutes }}" min="5" max="1440" required class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-brand-500">
+                    <p class="text-[11px] text-slate-500 mt-1">How often to poll J-Novels and other novel release feeds.</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Section: Notifications -->
+        <div>
+            <h3 class="text-sm font-bold uppercase tracking-wider text-slate-300 border-b border-slate-800 pb-2 mb-4 flex items-center gap-2">
+                <i data-lucide="bell" class="w-4 h-4 text-brand-400"></i>
+                Notifications (Optional)
+            </h3>
+
+            <div class="space-y-4">
+                <div>
+                    <label class="block text-xs font-semibold text-slate-300 mb-1">
+                        Discord Webhook URL
+                    </label>
+                    <input type="url" id="setting-discord-url" value="{{ settings.discord_webhook_url }}" placeholder="https://discord.com/api/webhooks/..." class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white font-mono focus:outline-none focus:border-brand-500">
+                    <p class="text-[11px] text-slate-500 mt-1">Sends rich embed cards when a new release is requested or acquired into Calibre.</p>
+                </div>
+
+                <div>
+                    <label class="block text-xs font-semibold text-slate-300 mb-1">
+                        Generic Webhook / Apprise Endpoint
+                    </label>
+                    <input type="url" id="setting-apprise-url" value="{{ settings.apprise_url }}" placeholder="http://gotify:80/message or https://my-webhook.com" class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white font-mono focus:outline-none focus:border-brand-500">
+                </div>
+            </div>
+        </div>
+
+        <div class="pt-4 border-t border-slate-800 flex justify-end">
+            <button type="submit" class="px-5 py-2.5 rounded-xl bg-brand-600 hover:bg-brand-500 text-white text-xs font-bold transition-all shadow-lg shadow-brand-600/30 active:scale-95">
+                Save Settings
+            </button>
+        </div>
+    </form>
+
+</div>
+
+<script>
+    async function testCalibreConnection() {
+        const box = document.getElementById('calibre-test-result');
+        const path = document.getElementById('setting-calibre-path').value;
+        box.classList.remove('hidden');
+        box.className = 'p-3 rounded-xl text-xs font-mono bg-slate-800 text-slate-300 border border-slate-700 flex items-center gap-2';
+        box.innerHTML = '<i data-lucide="loader-2" class="w-4 h-4 animate-spin text-brand-400"></i> Testing Calibre path...';
+        lucide.createIcons();
+
+        try {
+            const res = await fetch(`/api/calibre/test?path=${encodeURIComponent(path)}`);
+            const data = await res.json();
+            if (data.available) {
+                box.className = 'p-3 rounded-xl text-xs font-mono bg-emerald-500/10 text-emerald-400 border border-emerald-500/20';
+                box.innerHTML = `✓ Connection Successful! Found ${data.total_books} books, ${data.total_series} series in metadata.db.`;
+            } else {
+                box.className = 'p-3 rounded-xl text-xs font-mono bg-rose-500/10 text-rose-300 border border-rose-500/20';
+                box.innerHTML = `✗ metadata.db not found at "${data.db_path}". Please verify mount path.`;
+            }
+        } catch (err) {
+            box.className = 'p-3 rounded-xl text-xs font-mono bg-rose-500/10 text-rose-300 border border-rose-500/20';
+            box.innerHTML = `✗ Connection error: ${err}`;
+        }
+    }
+
+    async function saveSettings(e) {
+        e.preventDefault();
+        const payload = {
+            calibre_path: document.getElementById('setting-calibre-path').value,
+            calibre_sync_interval_minutes: document.getElementById('setting-calibre-interval').value,
+            feed_check_interval_minutes: document.getElementById('setting-feed-interval').value,
+            discord_webhook_url: document.getElementById('setting-discord-url').value,
+            apprise_url: document.getElementById('setting-apprise-url').value
+        };
+
+        try {
+            const res = await fetch('/api/settings', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+            const data = await res.json();
+            if (data.status === 'success') {
+                showToast('Settings saved successfully!');
+            } else {
+                showToast(`Failed to save settings: ${data.message}`, 'error');
+            }
+        } catch (err) {
+            showToast(`Error saving settings: ${err}`, 'error');
+        }
+    }
+</script>
+{% endblock %}

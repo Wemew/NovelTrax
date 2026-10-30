@@ -1,0 +1,34 @@
+version: '3.8'
+
+services:
+  novelpulse:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: novelpulse:latest
+    container_name: novelpulse
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      - PORT=8080
+      - CALIBRE_DIR=/calibre
+      - DATA_DIR=/app/data
+      - TZ=UTC
+    volumes:
+      # Mount your Calibre library network share or folder here.
+      # IMPORTANT: Keep :ro (read-only) to protect your Calibre library from accidental writes.
+      # Replace '/path/to/your/calibre/library' with your actual network share path or host directory:
+      - /path/to/your/calibre/library:/calibre:ro
+
+      # Persistent application database, settings, and logs:
+      - ./data:/app/data
+
+# Optional: If you want Docker itself to mount your CIFS/SMB Windows Network Share directly:
+# volumes:
+#   calibre_smb:
+#     driver: local
+#     driver_opts:
+#       type: cifs
+#       device: "//192.168.1.100/calibre_share"
+#       o: "username=your_user,password=your_pass,ro,vers=3.0"

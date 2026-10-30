@@ -1,0 +1,331 @@
+{% extends "base.html" %}
+
+{% block title %}Feeds & Scrapers{% endblock %}
+
+{% block content %}
+<div class="space-y-6">
+
+    <!-- Header & Action Row -->
+    <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div>
+            <h1 class="text-2xl font-black text-white flex items-center gap-2.5">
+                <i data-lucide="rss" class="w-6 h-6 text-brand-400"></i>
+                Monitored Feeds & Web Scrapers
+            </h1>
+            <p class="text-xs text-slate-400 mt-1">
+                Configure release sources: J-Novels, Light Novel release trackers, RSS/Atom feeds, or custom website scrapers.
+            </p>
+        </div>
+        <div class="flex items-center gap-2.5">
+            <button onclick="openAddFeedModal()" class="text-xs px-3.5 py-2 rounded-xl bg-brand-600 hover:bg-brand-500 text-white font-medium flex items-center gap-2 transition-all shadow-md shadow-brand-600/20 active:scale-95">
+                <i data-lucide="plus" class="w-4 h-4"></i>
+                Add New Feed
+            </button>
+        </div>
+    </div>
+
+    <!-- Feeds List -->
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+        {% for feed in feeds %}
+        <div class="bg-slate-900/90 border border-slate-800 rounded-2xl p-5 flex flex-col justify-between shadow-lg">
+            <div>
+                <div class="flex items-start justify-between gap-2">
+                    <div class="flex items-center gap-2.5">
+                        <div class="w-9 h-9 rounded-xl bg-brand-500/10 text-brand-400 border border-brand-500/20 flex items-center justify-center flex-shrink-0">
+                            {% if feed.feed_type == 'jnovels' %}
+                            <i data-lucide="book-open" class="w-5 h-5"></i>
+                            {% elif feed.feed_type == 'rss' %}
+                            <i data-lucide="rss" class="w-5 h-5"></i>
+                            {% else %}
+                            <i data-lucide="code" class="w-5 h-5"></i>
+                            {% endif %}
+                        </div>
+                        <div>
+                            <h3 class="font-bold text-white text-sm">{{ feed.name }}</h3>
+                            <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-mono font-semibold uppercase 
+                                {% if feed.feed_type == 'jnovels' %}bg-amber-500/10 text-amber-400 border border-amber-500/20
+                                {% elif feed.feed_type == 'rss' %}bg-blue-500/10 text-blue-400 border border-blue-500/20
+                                {% else %}bg-purple-500/10 text-purple-400 border border-purple-500/20{% endif %}">
+                                {{ feed.feed_type }}
+                            </span>
+                        </div>
+                    </div>
+                    <div>
+                        {% if feed.last_status == 'OK' %}
+                        <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/15 text-emerald-400 border border-emerald-500/20">
+                            Operational
+                        </span>
+                        {% elif feed.last_status == 'ERROR' %}
+                        <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold bg-rose-500/15 text-rose-400 border border-rose-500/20" title="{{ feed.last_error }}">
+                            Error
+                        </span>
+                        {% else %}
+                        <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-medium bg-slate-800 text-slate-400 border border-slate-700">
+                            Pending First Check
+                        </span>
+                        {% endif %}
+                    </div>
+                </div>
+
+                <!-- URL link -->
+                <div class="mt-3 bg-slate-950/60 rounded-xl p-2.5 border border-slate-800/80">
+                    <p class="text-[11px] font-mono text-slate-300 truncate" title="{{ feed.url }}">
+                        {{ feed.url }}
+                    </p>
+                </div>
+
+                <!-- Metadata Row -->
+                <div class="mt-3 flex items-center gap-4 text-[11px] text-slate-400">
+                    <span>Interval: <strong class="text-slate-200">{{ feed.check_interval_minutes }}m</strong></span>
+                    <span>Auto-Request: <strong class="text-slate-200">{{ 'Enabled' if feed.auto_request else 'Disabled' }}</strong></span>
+                    <span>Last Checked: <strong class="text-slate-200">{{ feed.last_checked[:16] if feed.last_checked else 'Never' }}</strong></span>
+                </div>
+            </div>
+
+            <!-- Action Toolbar -->
+            <div class="mt-5 pt-3.5 border-t border-slate-800/80 flex items-center justify-between gap-2">
+                <button onclick="testFeedLive('{{ feed.feed_type }}', '{{ feed.url }}')" class="text-xs px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 flex items-center gap-1.5 transition-colors font-medium">
+                    <i data-lucide="eye" class="w-3.5 h-3.5 text-brand-400"></i>
+                    Test Live Extraction
+                </button>
+                <div class="flex items-center gap-1.5">
+                    <button onclick="checkSingleFeed({{ feed.id }})" title="Check this feed now" class="p-1.5 rounded-lg bg-brand-500/10 hover:bg-brand-500/20 text-brand-400 border border-brand-500/20 transition-colors">
+                        <i data-lucide="play" class="w-4 h-4"></i>
+                    </button>
+                    <button onclick="deleteFeed({{ feed.id }})" title="Delete feed" class="p-1.5 rounded-lg bg-slate-800 hover:bg-rose-500/20 text-slate-400 hover:text-rose-400 border border-slate-700 transition-colors">
+                        <i data-lucide="trash-2" class="w-4 h-4"></i>
+                    </button>
+                </div>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+
+    <!-- Live Test Results Modal / Panel -->
+    <div id="test-results-modal" class="hidden fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
+        <div class="bg-slate-900 border border-slate-800 rounded-2xl max-w-2xl w-full max-h-[85vh] flex flex-col shadow-2xl">
+            <div class="p-4 sm:p-5 border-b border-slate-800 flex items-center justify-between">
+                <div class="flex items-center gap-2">
+                    <i data-lucide="terminal" class="w-5 h-5 text-brand-400"></i>
+                    <h3 class="font-bold text-white text-base">Live Feed Extraction Preview</h3>
+                </div>
+                <button onclick="closeTestModal()" class="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-slate-800">
+                    <i data-lucide="x" class="w-5 h-5"></i>
+                </button>
+            </div>
+            <div class="p-5 overflow-y-auto flex-1 space-y-3" id="test-results-content">
+                <div class="text-center py-8 text-slate-400 flex flex-col items-center gap-2">
+                    <i data-lucide="loader-2" class="w-6 h-6 animate-spin text-brand-400"></i>
+                    <span>Contacting server and parsing releases...</span>
+                </div>
+            </div>
+            <div class="p-4 border-t border-slate-800 text-right">
+                <button onclick="closeTestModal()" class="text-xs px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-white font-medium">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Add Feed Modal -->
+    <div id="add-feed-modal" class="hidden fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
+        <div class="bg-slate-900 border border-slate-800 rounded-2xl max-w-lg w-full flex flex-col shadow-2xl">
+            <div class="p-4 sm:p-5 border-b border-slate-800 flex items-center justify-between">
+                <div class="flex items-center gap-2">
+                    <i data-lucide="plus-circle" class="w-5 h-5 text-brand-400"></i>
+                    <h3 class="font-bold text-white text-base">Add Monitored Feed / Scraper</h3>
+                </div>
+                <button onclick="closeAddModal()" class="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-slate-800">
+                    <i data-lucide="x" class="w-5 h-5"></i>
+                </button>
+            </div>
+            <form onsubmit="submitAddFeed(event)" class="p-5 space-y-4">
+                <div>
+                    <label class="block text-xs font-semibold text-slate-300 mb-1">Feed Preset / Type</label>
+                    <select id="new-feed-type" onchange="onFeedTypeChange()" class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-brand-500">
+                        <option value="jnovels">J-Novels Scraper (https://jnovels.com/?s=epub)</option>
+                        <option value="rss">Standard RSS / Atom Feed</option>
+                        <option value="novelupdates">NovelUpdates Release Page / List</option>
+                        <option value="html_scraper">Custom HTML Website Scraper</option>
+                    </select>
+                </div>
+
+                <div>
+                    <label class="block text-xs font-semibold text-slate-300 mb-1">Feed Name</label>
+                    <input type="text" id="new-feed-name" required placeholder="e.g. J-Novels EPUB Releases" class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-brand-500">
+                </div>
+
+                <div>
+                    <label class="block text-xs font-semibold text-slate-300 mb-1">Website or Feed URL</label>
+                    <input type="url" id="new-feed-url" required placeholder="https://jnovels.com/?s=epub" class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white font-mono focus:outline-none focus:border-brand-500">
+                </div>
+
+                <div class="grid grid-cols-2 gap-3">
+                    <div>
+                        <label class="block text-xs font-semibold text-slate-300 mb-1">Check Interval (Minutes)</label>
+                        <input type="number" id="new-feed-interval" value="60" min="5" max="1440" class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-brand-500">
+                    </div>
+                    <div class="flex items-center pt-5">
+                        <label class="flex items-center space-x-2 cursor-pointer">
+                            <input type="checkbox" id="new-feed-autorequest" checked class="rounded bg-slate-950 border-slate-700 text-brand-500 focus:ring-0">
+                            <span class="text-xs text-slate-300 font-medium">Auto-Request</span>
+                        </label>
+                    </div>
+                </div>
+
+                <!-- Custom Selectors (only for HTML Scraper) -->
+                <div id="custom-selectors-box" class="hidden space-y-2 pt-2 border-t border-slate-800">
+                    <p class="text-[11px] text-slate-400 font-medium">Custom CSS Selectors (Optional):</p>
+                    <input type="text" id="custom-item-sel" placeholder="Container: article, .novel-item" class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-1.5 text-xs text-white font-mono">
+                    <input type="text" id="custom-title-sel" placeholder="Title: h2.entry-title a, .title a" class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-1.5 text-xs text-white font-mono">
+                </div>
+
+                <div class="pt-4 border-t border-slate-800 flex items-center justify-end gap-2">
+                    <button type="button" onclick="closeAddModal()" class="text-xs px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-white font-medium">Cancel</button>
+                    <button type="submit" class="text-xs px-4 py-2 rounded-xl bg-brand-600 hover:bg-brand-500 text-white font-medium">Add Feed</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+</div>
+
+<script>
+    function openAddFeedModal() {
+        document.getElementById('add-feed-modal').classList.remove('hidden');
+    }
+    function closeAddModal() {
+        document.getElementById('add-feed-modal').classList.add('hidden');
+    }
+
+    function onFeedTypeChange() {
+        const type = document.getElementById('new-feed-type').value;
+        const box = document.getElementById('custom-selectors-box');
+        if (type === 'html_scraper') {
+            box.classList.remove('hidden');
+        } else {
+            box.classList.add('hidden');
+        }
+    }
+
+    async function submitAddFeed(e) {
+        e.preventDefault();
+        const payload = {
+            name: document.getElementById('new-feed-name').value,
+            feed_type: document.getElementById('new-feed-type').value,
+            url: document.getElementById('new-feed-url').value,
+            interval: parseInt(document.getElementById('new-feed-interval').value) || 60,
+            auto_request: document.getElementById('new-feed-autorequest').checked,
+            config: {}
+        };
+
+        if (payload.feed_type === 'html_scraper') {
+            const itemSel = document.getElementById('custom-item-sel').value.trim();
+            const titleSel = document.getElementById('custom-title-sel').value.trim();
+            if (itemSel) payload.config.item_selector = itemSel;
+            if (titleSel) payload.config.title_selector = titleSel;
+        }
+
+        try {
+            const res = await fetch('/api/feeds', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+            const data = await res.json();
+            if (data.status === 'success') {
+                showToast('Feed added successfully!');
+                closeAddModal();
+                setTimeout(() => location.reload(), 800);
+            } else {
+                showToast(`Failed to add feed: ${data.message}`, 'error');
+            }
+        } catch (err) {
+            showToast(`Error adding feed: ${err}`, 'error');
+        }
+    }
+
+    async function deleteFeed(feedId) {
+        if (!confirm('Are you sure you want to delete this feed?')) return;
+        try {
+            const res = await fetch(`/api/feeds/${feedId}`, { method: 'DELETE' });
+            const data = await res.json();
+            if (data.status === 'success') {
+                showToast('Feed deleted');
+                setTimeout(() => location.reload(), 600);
+            }
+        } catch (err) {
+            showToast(`Error deleting feed: ${err}`, 'error');
+        }
+    }
+
+    async function checkSingleFeed(feedId) {
+        try {
+            const res = await fetch(`/api/feeds/check/${feedId}`, { method: 'POST' });
+            const data = await res.json();
+            if (data.status === 'success') {
+                showToast('Feed check completed!');
+                setTimeout(() => location.reload(), 800);
+            } else {
+                showToast(`Check failed: ${data.message}`, 'error');
+            }
+        } catch (err) {
+            showToast(`Error checking feed: ${err}`, 'error');
+        }
+    }
+
+    function closeTestModal() {
+        document.getElementById('test-results-modal').classList.add('hidden');
+    }
+
+    async function testFeedLive(feedType, url) {
+        const modal = document.getElementById('test-results-modal');
+        const content = document.getElementById('test-results-content');
+        modal.classList.remove('hidden');
+        content.innerHTML = `
+            <div class="text-center py-8 text-slate-400 flex flex-col items-center gap-2">
+                <i data-lucide="loader-2" class="w-6 h-6 animate-spin text-brand-400"></i>
+                <span>Testing extraction on ${url}...</span>
+            </div>
+        `;
+        lucide.createIcons();
+
+        try {
+            const res = await fetch('/api/feeds/test', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ feed_type: feedType, url: url })
+            });
+            const data = await res.json();
+
+            if (data.status === 'success' && data.items.length > 0) {
+                let html = `<p class="text-xs text-emerald-400 font-semibold mb-2">Successfully extracted ${data.items.length} items!</p><div class="divide-y divide-slate-800">`;
+                data.items.slice(0, 10).forEach(item => {
+                    html += `
+                        <div class="py-2.5 text-xs">
+                            <div class="flex items-center justify-between">
+                                <span class="font-bold text-white">${item.title}</span>
+                                <span class="text-amber-400 font-semibold font-mono">${item.volume !== null ? 'Vol ' + item.volume : 'No Vol'}</span>
+                            </div>
+                            <div class="flex items-center gap-2 text-[11px] text-slate-400 mt-0.5">
+                                <span>Series: <strong class="text-slate-300">${item.series_name || 'N/A'}</strong></span>
+                                &bull;
+                                <a href="${item.link}" target="_blank" class="text-brand-400 hover:underline">Link</a>
+                            </div>
+                        </div>
+                    `;
+                });
+                html += `</div>`;
+                content.innerHTML = html;
+            } else {
+                content.innerHTML = `
+                    <div class="p-4 bg-rose-500/10 border border-rose-500/20 rounded-xl text-rose-300 text-xs">
+                        <p class="font-bold">Extraction failed or returned 0 items.</p>
+                        <p class="mt-1 font-mono text-[11px]">${data.message || 'No items matched the selector or feed.'}</p>
+                    </div>
+                `;
+            }
+        } catch (err) {
+            content.innerHTML = `<div class="p-4 text-xs text-rose-400">Error connecting to test API: ${err}</div>`;
+        }
+    }
+</script>
+{% endblock %}

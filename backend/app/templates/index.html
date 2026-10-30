@@ -1,0 +1,235 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard{% endblock %}
+
+{% block content %}
+<div class="space-y-8">
+
+    <!-- Top Status & Stats Grid -->
+    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        <!-- Stat: Pending Requests -->
+        <div class="bg-slate-900/90 border border-amber-500/30 rounded-2xl p-5 shadow-lg relative overflow-hidden group">
+            <div class="absolute -right-2 -bottom-2 w-24 h-24 bg-amber-500/10 rounded-full blur-xl group-hover:bg-amber-500/20 transition-all"></div>
+            <div class="flex items-center justify-between">
+                <div>
+                    <p class="text-xs font-semibold uppercase tracking-wider text-amber-400">Pending Requests</p>
+                    <h3 class="text-3xl font-black text-white mt-1">{{ stats.pending_requests }}</h3>
+                    <p class="text-xs text-slate-400 mt-1">Novel releases missing from Calibre</p>
+                </div>
+                <div class="w-12 h-12 rounded-xl bg-amber-500/20 border border-amber-500/30 flex items-center justify-center text-amber-400">
+                    <i data-lucide="bookmark-check" class="w-6 h-6"></i>
+                </div>
+            </div>
+        </div>
+
+        <!-- Stat: Monitored Series -->
+        <div class="bg-slate-900/90 border border-slate-800 rounded-2xl p-5 shadow-lg relative overflow-hidden group">
+            <div class="absolute -right-2 -bottom-2 w-24 h-24 bg-brand-500/10 rounded-full blur-xl group-hover:bg-brand-500/20 transition-all"></div>
+            <div class="flex items-center justify-between">
+                <div>
+                    <p class="text-xs font-semibold uppercase tracking-wider text-slate-400">Tracked Series</p>
+                    <h3 class="text-3xl font-black text-white mt-1">{{ stats.monitored_series }}</h3>
+                    <p class="text-xs text-slate-400 mt-1">Auto-populated from Calibre</p>
+                </div>
+                <div class="w-12 h-12 rounded-xl bg-brand-500/20 border border-brand-500/30 flex items-center justify-center text-brand-400">
+                    <i data-lucide="library" class="w-6 h-6"></i>
+                </div>
+            </div>
+        </div>
+
+        <!-- Stat: Acquired in Library -->
+        <div class="bg-slate-900/90 border border-slate-800 rounded-2xl p-5 shadow-lg relative overflow-hidden group">
+            <div class="absolute -right-2 -bottom-2 w-24 h-24 bg-emerald-500/10 rounded-full blur-xl group-hover:bg-emerald-500/20 transition-all"></div>
+            <div class="flex items-center justify-between">
+                <div>
+                    <p class="text-xs font-semibold uppercase tracking-wider text-slate-400">Acquired / Resolved</p>
+                    <h3 class="text-3xl font-black text-white mt-1">{{ stats.acquired_books }}</h3>
+                    <p class="text-xs text-slate-400 mt-1">Automatically cleared via Calibre</p>
+                </div>
+                <div class="w-12 h-12 rounded-xl bg-emerald-500/20 border border-emerald-500/30 flex items-center justify-center text-emerald-400">
+                    <i data-lucide="check-circle-2" class="w-6 h-6"></i>
+                </div>
+            </div>
+        </div>
+
+        <!-- Stat: Active Feeds -->
+        <div class="bg-slate-900/90 border border-slate-800 rounded-2xl p-5 shadow-lg relative overflow-hidden group">
+            <div class="absolute -right-2 -bottom-2 w-24 h-24 bg-blue-500/10 rounded-full blur-xl group-hover:bg-blue-500/20 transition-all"></div>
+            <div class="flex items-center justify-between">
+                <div>
+                    <p class="text-xs font-semibold uppercase tracking-wider text-slate-400">Active Feeds</p>
+                    <h3 class="text-3xl font-black text-white mt-1">{{ stats.active_feeds }}</h3>
+                    <p class="text-xs text-slate-400 mt-1">J-Novels & LN scrapers active</p>
+                </div>
+                <div class="w-12 h-12 rounded-xl bg-blue-500/20 border border-blue-500/30 flex items-center justify-center text-blue-400">
+                    <i data-lucide="radio" class="w-6 h-6"></i>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Calibre Library Status Banner -->
+    <div class="bg-[#111827] border border-slate-800 rounded-2xl p-4 sm:p-5 flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+        <div class="flex items-center space-x-3.5">
+            <div class="w-10 h-10 rounded-xl {% if calibre_status.available %}bg-emerald-500/15 border border-emerald-500/30 text-emerald-400{% else %}bg-rose-500/15 border border-rose-500/30 text-rose-400{% endif %} flex items-center justify-center flex-shrink-0">
+                <i data-lucide="database" class="w-5 h-5"></i>
+            </div>
+            <div>
+                <div class="flex items-center gap-2">
+                    <h4 class="font-semibold text-white text-sm">Calibre Library (Zero-Lock Storage)</h4>
+                    {% if calibre_status.available %}
+                        <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-500/15 text-emerald-400 border border-emerald-500/20">Connected (Read-Only)</span>
+                    {% else %}
+                        <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold bg-rose-500/15 text-rose-400 border border-rose-500/20">Not Found</span>
+                    {% endif %}
+                </div>
+                <p class="text-xs text-slate-400 mt-0.5 font-mono">
+                    {{ calibre_status.db_path or 'Path: /calibre/metadata.db' }}
+                    {% if calibre_status.available %}
+                        &bull; <span class="text-slate-300 font-sans">{{ calibre_status.total_books }} Books, {{ calibre_status.total_series }} Series</span>
+                    {% endif %}
+                </p>
+            </div>
+        </div>
+        <div class="flex items-center gap-2 w-full md:w-auto">
+            <a href="/series" class="text-xs px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 flex items-center gap-1.5 transition-colors">
+                <i data-lucide="layers" class="w-3.5 h-3.5"></i>
+                View All Series
+            </a>
+            <button onclick="triggerCalibreSync()" class="text-xs px-3 py-1.5 rounded-lg bg-brand-600/20 hover:bg-brand-600/30 text-brand-400 border border-brand-500/30 flex items-center gap-1.5 transition-colors">
+                <i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i>
+                Rescan Calibre
+            </button>
+        </div>
+    </div>
+
+    <!-- Active Requests / Missing Releases Section -->
+    <div class="space-y-4">
+        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+            <div>
+                <h2 class="text-xl font-bold text-white flex items-center gap-2">
+                    <span>Pending Novel Requests</span>
+                    <span class="text-xs px-2.5 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30 font-semibold">{{ pending_requests|length }} Wanted</span>
+                </h2>
+                <p class="text-xs text-slate-400">Releases detected from your feeds for tracked series that are not yet in your Calibre library.</p>
+            </div>
+            <div class="flex items-center gap-2">
+                <a href="/releases?status=REQUESTED" class="text-xs text-brand-400 hover:text-brand-300 flex items-center gap-1 font-medium">
+                    View all in full table <i data-lucide="chevron-right" class="w-4 h-4"></i>
+                </a>
+            </div>
+        </div>
+
+        {% if pending_requests %}
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            {% for req in pending_requests[:9] %}
+            <div class="bg-slate-900/90 border border-slate-800 hover:border-slate-700 rounded-2xl p-4 flex flex-col justify-between transition-all hover:shadow-xl group">
+                <div>
+                    <!-- Top series & volume badge -->
+                    <div class="flex items-start justify-between gap-2 mb-2">
+                        <span class="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-medium bg-brand-500/10 text-brand-400 border border-brand-500/20">
+                            {{ req.series_name or 'Novel' }}
+                        </span>
+                        {% if req.volume is not none %}
+                        <span class="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-bold bg-amber-500/15 text-amber-300 border border-amber-500/30">
+                            Vol. {{ req.volume }}
+                        </span>
+                        {% endif %}
+                    </div>
+
+                    <!-- Book info container -->
+                    <div class="flex gap-3.5 mt-2">
+                        {% if req.cover_url %}
+                        <img src="{{ req.cover_url }}" alt="Cover" class="w-16 h-24 object-cover rounded-lg border border-slate-800 flex-shrink-0 shadow-md">
+                        {% else %}
+                        <div class="w-16 h-24 rounded-lg bg-slate-800/80 border border-slate-700 flex flex-col items-center justify-center flex-shrink-0 text-slate-500">
+                            <i data-lucide="book" class="w-6 h-6"></i>
+                            <span class="text-[9px] mt-1 font-semibold">EPUB</span>
+                        </div>
+                        {% endif %}
+
+                        <div class="min-w-0 flex-1">
+                            <h3 class="text-sm font-bold text-white line-clamp-2 group-hover:text-brand-400 transition-colors" title="{{ req.title }}">
+                                {{ req.title }}
+                            </h3>
+                            <p class="text-[11px] text-slate-400 mt-1 flex items-center gap-1">
+                                <i data-lucide="globe" class="w-3 h-3 text-slate-500"></i>
+                                {{ req.source_feed_name or 'Web Feed' }}
+                            </p>
+                            <p class="text-[11px] text-slate-500 mt-0.5 flex items-center gap-1">
+                                <i data-lucide="calendar" class="w-3 h-3 text-slate-500"></i>
+                                {{ req.pub_date[:10] if req.pub_date else 'Recent' }}
+                            </p>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Action Toolbar -->
+                <div class="mt-4 pt-3 border-t border-slate-800/80 flex items-center justify-between gap-2">
+                    <a href="{{ req.link }}" target="_blank" rel="noopener noreferrer" class="text-xs px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 flex items-center gap-1.5 transition-colors font-medium">
+                        <i data-lucide="external-link" class="w-3.5 h-3.5 text-slate-400"></i>
+                        Download / Link
+                    </a>
+                    <div class="flex items-center gap-1.5">
+                        <button onclick="updateReleaseStatus({{ req.id }}, 'IN_CALIBRE')" title="Manually mark as added to Calibre" class="text-xs p-1.5 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/20 transition-colors">
+                            <i data-lucide="check" class="w-4 h-4"></i>
+                        </button>
+                        <button onclick="updateReleaseStatus({{ req.id }}, 'IGNORED')" title="Dismiss / Ignore this release" class="text-xs p-1.5 rounded-lg bg-slate-800 hover:bg-rose-500/20 text-slate-400 hover:text-rose-400 border border-slate-700 transition-colors">
+                            <i data-lucide="x" class="w-4 h-4"></i>
+                        </button>
+                    </div>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+        {% else %}
+        <div class="bg-slate-900/60 border border-slate-800/80 rounded-2xl p-12 text-center">
+            <div class="w-14 h-14 rounded-2xl bg-brand-500/10 text-brand-400 border border-brand-500/20 flex items-center justify-center mx-auto mb-3">
+                <i data-lucide="check-check" class="w-7 h-7"></i>
+            </div>
+            <h3 class="text-base font-bold text-white">All caught up!</h3>
+            <p class="text-xs text-slate-400 max-w-md mx-auto mt-1">
+                You have no pending novel requests. Whenever a new volume of your tracked series appears on J-Novels or your configured feeds, it will be listed right here.
+            </p>
+            <div class="mt-4 flex items-center justify-center gap-3">
+                <button onclick="triggerFeedCheck()" class="text-xs px-3.5 py-2 rounded-lg bg-brand-600 hover:bg-brand-500 text-white font-medium flex items-center gap-1.5 transition-colors shadow-sm">
+                    <i data-lucide="radio" class="w-3.5 h-3.5"></i>
+                    Check Feeds Now
+                </button>
+            </div>
+        </div>
+        {% endif %}
+    </div>
+
+    <!-- Recent Activity Log Section -->
+    <div class="space-y-4">
+        <div class="flex items-center justify-between">
+            <h2 class="text-base font-bold text-white flex items-center gap-2">
+                <i data-lucide="activity" class="w-4 h-4 text-brand-400"></i>
+                Recent Activity & Auto-Resolutions
+            </h2>
+            <a href="/logs" class="text-xs text-slate-400 hover:text-white">View full log &rarr;</a>
+        </div>
+        <div class="bg-slate-900/80 border border-slate-800 rounded-2xl overflow-hidden divide-y divide-slate-800/60">
+            {% for log in recent_logs[:5] %}
+            <div class="p-3.5 sm:px-5 flex items-center justify-between text-xs">
+                <div class="flex items-center space-x-3 min-w-0">
+                    <span class="px-2 py-0.5 rounded text-[10px] font-semibold flex-shrink-0 
+                        {% if log.event_type == 'REQUEST_RESOLVED' %}bg-emerald-500/15 text-emerald-400 border border-emerald-500/20
+                        {% elif log.event_type == 'NEW_RELEASE' %}bg-amber-500/15 text-amber-400 border border-amber-500/20
+                        {% elif log.event_type == 'ERROR' %}bg-rose-500/15 text-rose-400 border border-rose-500/20
+                        {% else %}bg-slate-800 text-slate-300 border border-slate-700{% endif %}">
+                        {{ log.event_type }}
+                    </span>
+                    <span class="text-slate-200 font-medium truncate">{{ log.message }}</span>
+                </div>
+                <span class="text-[11px] text-slate-500 font-mono flex-shrink-0 ml-4">{{ log.created_at[:19] }}</span>
+            </div>
+            {% else %}
+            <div class="p-6 text-center text-xs text-slate-500">No activity logged yet.</div>
+            {% endfor %}
+        </div>
+    </div>
+
+</div>
+{% endblock %}

@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}NovelPulse{% endblock %} - Calibre Novel Release Monitor</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        brand: {
+                            50: '#f0fdf4',
+                            100: '#dcfce7',
+                            500: '#22c55e',
+                            600: '#16a34a',
+                            700: '#15803d',
+                            900: '#14532d',
+                        },
+                        darkbg: '#0f172a',
+                        darkcard: '#1e293b',
+                        darkborder: '#334155'
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        [x-cloak] { display: none !important; }
+        ::-webkit-scrollbar { width: 8px; height: 8px; }
+        ::-webkit-scrollbar-track { background: #0f172a; }
+        ::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #475569; }
+    </style>
+</head>
+<body class="bg-[#0b0f19] text-slate-100 min-h-screen flex flex-col font-sans antialiased selection:bg-brand-500 selection:text-white">
+
+    <!-- Top Navigation Bar -->
+    <header class="bg-[#111827]/80 backdrop-blur-md border-b border-slate-800 sticky top-0 z-40">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div class="flex items-center justify-between h-16">
+                <!-- Brand Logo & Name -->
+                <div class="flex items-center space-x-3">
+                    <a href="/" class="flex items-center space-x-2.5 group">
+                        <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-brand-600 to-emerald-400 flex items-center justify-center shadow-lg shadow-brand-500/20 group-hover:scale-105 transition-transform">
+                            <i data-lucide="book-open-check" class="w-5 h-5 text-white"></i>
+                        </div>
+                        <div>
+                            <span class="text-xl font-bold tracking-tight text-white flex items-center gap-1.5">
+                                NovelPulse
+                                <span class="text-xs px-2 py-0.5 rounded-full bg-brand-500/10 text-brand-400 border border-brand-500/20 font-medium">Calibre</span>
+                            </span>
+                            <p class="text-[10px] text-slate-400 tracking-wider uppercase font-semibold">Release Monitor</p>
+                        </div>
+                    </a>
+                </div>
+
+                <!-- Main Navigation Links -->
+                <nav class="hidden md:flex space-x-1 lg:space-x-2">
+                    <a href="/" class="px-3.5 py-2 rounded-lg text-sm font-medium transition-colors {% if active_page == 'dashboard' %}bg-slate-800 text-brand-400 border border-slate-700{% else %}text-slate-300 hover:text-white hover:bg-slate-800/60{% endif %} flex items-center gap-2">
+                        <i data-lucide="layout-dashboard" class="w-4 h-4"></i>
+                        Overview
+                    </a>
+                    <a href="/series" class="px-3.5 py-2 rounded-lg text-sm font-medium transition-colors {% if active_page == 'series' %}bg-slate-800 text-brand-400 border border-slate-700{% else %}text-slate-300 hover:text-white hover:bg-slate-800/60{% endif %} flex items-center gap-2">
+                        <i data-lucide="library" class="w-4 h-4"></i>
+                        Series
+                    </a>
+                    <a href="/releases" class="px-3.5 py-2 rounded-lg text-sm font-medium transition-colors {% if active_page == 'releases' %}bg-slate-800 text-brand-400 border border-slate-700{% else %}text-slate-300 hover:text-white hover:bg-slate-800/60{% endif %} flex items-center gap-2">
+                        <i data-lucide="sparkles" class="w-4 h-4"></i>
+                        Releases & Requests
+                    </a>
+                    <a href="/feeds" class="px-3.5 py-2 rounded-lg text-sm font-medium transition-colors {% if active_page == 'feeds' %}bg-slate-800 text-brand-400 border border-slate-700{% else %}text-slate-300 hover:text-white hover:bg-slate-800/60{% endif %} flex items-center gap-2">
+                        <i data-lucide="rss" class="w-4 h-4"></i>
+                        Feeds & Scrapers
+                    </a>
+                    <a href="/logs" class="px-3.5 py-2 rounded-lg text-sm font-medium transition-colors {% if active_page == 'logs' %}bg-slate-800 text-brand-400 border border-slate-700{% else %}text-slate-300 hover:text-white hover:bg-slate-800/60{% endif %} flex items-center gap-2">
+                        <i data-lucide="scroll-text" class="w-4 h-4"></i>
+                        Logs
+                    </a>
+                    <a href="/settings" class="px-3.5 py-2 rounded-lg text-sm font-medium transition-colors {% if active_page == 'settings' %}bg-slate-800 text-brand-400 border border-slate-700{% else %}text-slate-300 hover:text-white hover:bg-slate-800/60{% endif %} flex items-center gap-2">
+                        <i data-lucide="settings" class="w-4 h-4"></i>
+                        Settings
+                    </a>
+                </nav>
+
+                <!-- Quick Action Buttons -->
+                <div class="flex items-center space-x-2">
+                    <button onclick="triggerCalibreSync()" id="btn-sync-calibre" title="Scan Calibre library for new books and series" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-xs font-medium flex items-center gap-1.5 transition-all shadow-sm active:scale-95">
+                        <i data-lucide="refresh-cw" class="w-3.5 h-3.5 text-brand-400" id="icon-calibre-sync"></i>
+                        <span class="hidden sm:inline">Sync Calibre</span>
+                    </button>
+                    <button onclick="triggerFeedCheck()" id="btn-check-feeds" title="Check configured feeds for new novel releases" class="px-3 py-1.5 rounded-lg bg-brand-600 hover:bg-brand-500 text-white text-xs font-medium flex items-center gap-1.5 transition-all shadow-sm active:scale-95 shadow-brand-600/30">
+                        <i data-lucide="radio" class="w-3.5 h-3.5" id="icon-feed-check"></i>
+                        <span class="hidden sm:inline">Check Feeds</span>
+                    </button>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <!-- Main Content Area -->
+    <main class="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        <!-- Toast Notification Container -->
+        <div id="toast" class="fixed bottom-5 right-5 z-50 transform transition-all duration-300 translate-y-20 opacity-0 pointer-events-none flex items-center gap-3 px-4 py-3 rounded-xl shadow-2xl border text-sm">
+            <i id="toast-icon" data-lucide="info" class="w-5 h-5 flex-shrink-0"></i>
+            <span id="toast-msg" class="font-medium"></span>
+        </div>
+
+        {% block content %}{% endblock %}
+    </main>
+
+    <!-- Footer -->
+    <footer class="border-t border-slate-800/80 bg-[#0e131f] py-6 text-center text-xs text-slate-500">
+        <div class="max-w-7xl mx-auto px-4 flex flex-col sm:flex-row items-center justify-between gap-2">
+            <p>NovelPulse &bull; Monitoring J-Novels, Light Novel Trackers & Calibre Library</p>
+            <p class="text-slate-400">Zero-Lock SQLite Engine &bull; Docker Ready</p>
+        </div>
+    </footer>
+
+    <!-- Global App Scripts -->
+    <script>
+        lucide.createIcons();
+
+        function showToast(message, type = 'success') {
+            const toast = document.getElementById('toast');
+            const toastMsg = document.getElementById('toast-msg');
+            const toastIcon = document.getElementById('toast-icon');
+
+            toastMsg.textContent = message;
+            toast.className = `fixed bottom-5 right-5 z-50 transform transition-all duration-300 translate-y-0 opacity-100 flex items-center gap-3 px-4 py-3 rounded-xl shadow-2xl border text-sm pointer-events-auto ${
+                type === 'success' 
+                    ? 'bg-slate-900 border-emerald-500/50 text-emerald-300' 
+                    : type === 'error' 
+                    ? 'bg-slate-900 border-rose-500/50 text-rose-300' 
+                    : 'bg-slate-900 border-blue-500/50 text-blue-300'
+            }`;
+
+            setTimeout(() => {
+                toast.classList.add('translate-y-20', 'opacity-0');
+                toast.classList.remove('translate-y-0', 'opacity-100');
+            }, 4000);
+        }
+
+        async function triggerCalibreSync() {
+            const icon = document.getElementById('icon-calibre-sync');
+            icon.classList.add('animate-spin');
+            try {
+                const res = await fetch('/api/calibre/sync', { method: 'POST' });
+                const data = await res.json();
+                if (data.status === 'success') {
+                    showToast(`Calibre Synced! ${data.series_count} series, resolved ${data.resolved_requests} requests.`, 'success');
+                    setTimeout(() => location.reload(), 1200);
+                } else {
+                    showToast(`Calibre Sync Error: ${data.message}`, 'error');
+                }
+            } catch (err) {
+                showToast(`Failed to trigger Calibre sync: ${err}`, 'error');
+            } finally {
+                icon.classList.remove('animate-spin');
+            }
+        }
+
+        async function triggerFeedCheck() {
+            const icon = document.getElementById('icon-feed-check');
+            icon.classList.add('animate-spin');
+            try {
+                const res = await fetch('/api/feeds/check', { method: 'POST' });
+                const data = await res.json();
+                if (data.status === 'success') {
+                    showToast(`Feeds checked! Found ${data.total_found} items, ${data.total_requested} new requests.`, 'success');
+                    setTimeout(() => location.reload(), 1200);
+                } else {
+                    showToast(`Feed check error: ${data.message}`, 'error');
+                }
+            } catch (err) {
+                showToast(`Failed to trigger feed check: ${err}`, 'error');
+            } finally {
+                icon.classList.remove('animate-spin');
+            }
+        }
+
+        async function updateReleaseStatus(releaseId, newStatus) {
+            try {
+                const res = await fetch(`/api/releases/${releaseId}/status`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ status: newStatus })
+                });
+                const data = await res.json();
+                if (data.status === 'success') {
+                    showToast(`Release updated to ${newStatus}`, 'success');
+                    setTimeout(() => location.reload(), 600);
+                }
+            } catch (err) {
+                showToast(`Error updating release: ${err}`, 'error');
+            }
+        }
+
+        async function toggleSeries(seriesId) {
+            try {
+                const res = await fetch(`/api/series/${seriesId}/toggle`, { method: 'POST' });
+                const data = await res.json();
+                if (data.status === 'success') {
+                    showToast(`Series monitoring ${data.is_monitored ? 'enabled' : 'disabled'}`);
+                }
+            } catch (err) {
+                showToast(`Error toggling series: ${err}`, 'error');
+            }
+        }
+    </script>
+</body>
+</html>
