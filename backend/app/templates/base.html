@@ -36,6 +36,11 @@
         ::-webkit-scrollbar-track { background: #0f172a; }
         ::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
         ::-webkit-scrollbar-thumb:hover { background: #475569; }
+
+        .custom-scrollbar::-webkit-scrollbar { width: 5px; height: 5px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: rgba(15, 23, 42, 0.4); border-radius: 4px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #475569; }
     </style>
 </head>
 <body class="bg-[#0b0f19] text-slate-100 min-h-screen flex flex-col font-sans antialiased selection:bg-brand-500 selection:text-white">
@@ -109,6 +114,18 @@
 
     <!-- Main Content Area -->
     <main class="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        <!-- Global Image Modal / Lightbox -->
+        <div id="image-modal" class="fixed inset-0 z-50 bg-black/85 backdrop-blur-md hidden items-center justify-center p-4 transition-all duration-200" onclick="closeImageModal()">
+            <div class="relative max-w-md w-full flex flex-col items-center" onclick="event.stopPropagation()">
+                <button onclick="closeImageModal()" class="absolute -top-11 right-0 text-slate-300 hover:text-white transition-colors p-1.5 rounded-xl bg-slate-800/90 border border-slate-700 hover:bg-slate-700 flex items-center gap-1.5 text-xs font-semibold shadow-lg" title="Close (Esc)">
+                    <i data-lucide="x" class="w-4 h-4"></i>
+                    <span>Close</span>
+                </button>
+                <img id="image-modal-img" src="" alt="Enlarged Cover" class="max-w-full max-h-[82vh] object-contain rounded-2xl shadow-2xl border border-slate-700/80 bg-slate-950">
+                <p id="image-modal-title" class="text-xs font-semibold text-slate-300 mt-3 text-center px-4 line-clamp-1"></p>
+            </div>
+        </div>
+
         <!-- Toast Notification Container -->
         <div id="toast" class="fixed bottom-5 right-5 z-50 transform transition-all duration-300 translate-y-20 opacity-0 pointer-events-none flex items-center gap-3 px-4 py-3 rounded-xl shadow-2xl border text-sm">
             <i id="toast-icon" data-lucide="info" class="w-5 h-5 flex-shrink-0"></i>
@@ -216,6 +233,30 @@
                 showToast(`Error toggling series: ${err}`, 'error');
             }
         }
+
+        function openImageModal(src, title = '') {
+            if (!src) return;
+            const modal = document.getElementById('image-modal');
+            const img = document.getElementById('image-modal-img');
+            const titleEl = document.getElementById('image-modal-title');
+            img.src = src;
+            titleEl.textContent = title;
+            modal.classList.remove('hidden');
+            modal.classList.add('flex');
+            document.body.style.overflow = 'hidden';
+            if (window.lucide) lucide.createIcons();
+        }
+
+        function closeImageModal() {
+            const modal = document.getElementById('image-modal');
+            modal.classList.add('hidden');
+            modal.classList.remove('flex');
+            document.body.style.overflow = '';
+        }
+
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') closeImageModal();
+        });
     </script>
 </body>
 </html>

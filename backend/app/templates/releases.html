@@ -68,7 +68,7 @@
                         <!-- Title & Cover -->
                         <td class="py-3.5 px-4 sm:px-6 font-medium text-white flex items-center gap-3">
                             {% if r.cover_url %}
-                            <img src="/api/covers?url={{ r.cover_url|urlencode }}" alt="Cover" loading="lazy" class="w-10 h-14 object-cover rounded shadow flex-shrink-0 border border-slate-800">
+                            <img src="/api/covers?url={{ r.cover_url|urlencode }}" alt="Cover" loading="lazy" onclick="openImageModal(this.src, '{{ (r.series_name or r.title)|escape }}')" class="w-10 h-14 object-cover rounded shadow flex-shrink-0 border border-slate-800 cursor-pointer hover:opacity-80 hover:scale-105 transition-all" title="Click to enlarge thumbnail">
                             {% else %}
                             <div class="w-10 h-14 rounded bg-slate-800 border border-slate-700 flex items-center justify-center flex-shrink-0 text-slate-500">
                                 <i data-lucide="book" class="w-4 h-4"></i>

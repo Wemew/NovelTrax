@@ -99,9 +99,9 @@
                     <!-- Book info container -->
                     <div class="flex gap-3.5 mt-2">
                         {% if item.cover_url %}
-                        <img src="/api/covers?url={{ item.cover_url|urlencode }}" alt="Cover" loading="lazy" class="w-16 h-24 object-cover rounded-lg border border-slate-800 flex-shrink-0 shadow-md">
+                        <img src="/api/covers?url={{ item.cover_url|urlencode }}" alt="Cover" loading="lazy" onclick="openImageModal(this.src, '{{ (item.series_name or item.title)|escape }}')" class="w-16 h-24 object-cover rounded-lg border border-slate-800 flex-shrink-0 shadow-md cursor-pointer hover:opacity-85 hover:scale-[1.03] transition-all" title="Click to enlarge thumbnail">
                         {% else %}
-                        <div class="w-16 h-24 rounded-lg bg-slate-800/80 border border-slate-700 flex flex-col items-center justify-center flex-shrink-0 text-slate-500">
+                        <div class="w-16 h-24 rounded-lg bg-slate-800/80 border border-slate-700 flex flex-col items-center justify-center flex-shrink-0 text-slate-500" id="cover-box-{{ item.id }}">
                             <i data-lucide="book-open" class="w-6 h-6"></i>
                             <span class="text-[9px] mt-1 font-semibold">NOVEL</span>
                         </div>
@@ -122,11 +122,11 @@
                         </div>
                     </div>
 
-                    <!-- Synopsis / Description preview -->
+                    <!-- Synopsis / Description preview (Scrollable) -->
                     {% if item.description %}
-                    <p class="text-xs text-slate-300/90 mt-2.5 line-clamp-3 leading-relaxed bg-slate-950/40 p-2.5 rounded-xl border border-slate-800/60" title="{{ item.description }}">
+                    <div class="max-h-28 overflow-y-auto pr-1 text-xs text-slate-300/90 mt-2.5 leading-relaxed bg-slate-950/50 p-2.5 rounded-xl border border-slate-800/60 whitespace-pre-line custom-scrollbar" title="{{ item.description }}">
                         {{ item.description }}
-                    </p>
+                    </div>
                     {% else %}
                     <div class="mt-2.5 flex items-center justify-between text-[11px] text-slate-500 bg-slate-950/30 px-2.5 py-1.5 rounded-xl border border-slate-800/40" id="synopsis-box-{{ item.id }}">
                         <span class="italic text-[10px]">No description loaded</span>
@@ -488,7 +488,13 @@
             if (data.status === 'success' && data.synopsis) {
                 const box = document.getElementById(`synopsis-box-${releaseId}`);
                 if (box) {
-                    box.outerHTML = `<p class="text-xs text-slate-300/90 mt-2.5 line-clamp-3 leading-relaxed bg-slate-950/40 p-2.5 rounded-xl border border-slate-800/60" title="${data.synopsis}">${data.synopsis}</p>`;
+                    box.outerHTML = `<div class="max-h-28 overflow-y-auto pr-1 text-xs text-slate-300/90 mt-2.5 leading-relaxed bg-slate-950/50 p-2.5 rounded-xl border border-slate-800/60 whitespace-pre-line custom-scrollbar" title="${data.synopsis}">${data.synopsis}</div>`;
+                }
+                if (data.cover_url) {
+                    const coverBox = document.getElementById(`cover-box-${releaseId}`);
+                    if (coverBox) {
+                        coverBox.outerHTML = `<img src="/api/covers?url=${encodeURIComponent(data.cover_url)}" alt="Cover" loading="lazy" onclick="openImageModal(this.src, '')" class="w-16 h-24 object-cover rounded-lg border border-slate-800 flex-shrink-0 shadow-md cursor-pointer hover:opacity-85 hover:scale-[1.03] transition-all" title="Click to enlarge thumbnail">`;
+                    }
                 }
                 showToast('Description updated successfully!', 'success');
             } else {

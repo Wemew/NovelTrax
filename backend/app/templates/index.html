@@ -164,7 +164,7 @@
                     <!-- Book info container -->
                     <div class="flex gap-3.5 mt-2">
                         {% if req.cover_url %}
-                        <img src="/api/covers?url={{ req.cover_url|urlencode }}" alt="Cover" loading="lazy" class="w-16 h-24 object-cover rounded-lg border border-slate-800 flex-shrink-0 shadow-md">
+                        <img src="/api/covers?url={{ req.cover_url|urlencode }}" alt="Cover" loading="lazy" onclick="openImageModal(this.src, '{{ (req.series_name or req.title)|escape }}')" class="w-16 h-24 object-cover rounded-lg border border-slate-800 flex-shrink-0 shadow-md cursor-pointer hover:opacity-85 hover:scale-[1.03] transition-all" title="Click to enlarge thumbnail">
                         {% else %}
                         <div class="w-16 h-24 rounded-lg bg-slate-800/80 border border-slate-700 flex flex-col items-center justify-center flex-shrink-0 text-slate-500">
                             <i data-lucide="book" class="w-6 h-6"></i>
@@ -186,6 +186,13 @@
                             </p>
                         </div>
                     </div>
+
+                    <!-- Synopsis / Description preview (Scrollable) -->
+                    {% if req.description %}
+                    <div class="max-h-24 overflow-y-auto pr-1 text-xs text-slate-300/90 mt-2.5 leading-relaxed bg-slate-950/50 p-2.5 rounded-xl border border-slate-800/60 whitespace-pre-line custom-scrollbar" title="{{ req.description }}">
+                        {{ req.description }}
+                    </div>
+                    {% endif %}
                 </div>
 
                 <!-- Action Toolbar -->

@@ -58,19 +58,19 @@
                         <!-- Series Name -->
                         <td class="py-4 px-4 sm:px-6 font-bold text-white flex items-center gap-3">
                             {% if s.cover_url %}
-                            <img src="/api/covers?url={{ s.cover_url|urlencode }}" alt="Cover" loading="lazy" class="w-8 h-11 object-cover rounded shadow flex-shrink-0 border border-slate-800">
+                            <img src="/api/covers?url={{ s.cover_url|urlencode }}" alt="Cover" loading="lazy" onclick="openImageModal(this.src, '{{ s.name|escape }}')" class="w-8 h-11 object-cover rounded shadow flex-shrink-0 border border-slate-800 cursor-pointer hover:opacity-80 hover:scale-105 transition-all" title="Click to enlarge thumbnail">
                             {% else %}
                             <div class="w-8 h-11 rounded-lg bg-slate-800 flex items-center justify-center text-brand-400 flex-shrink-0">
                                 <i data-lucide="book-marked" class="w-4 h-4"></i>
                             </div>
                             {% endif %}
-                            <div>
+                            <div class="min-w-0">
                                 <span class="text-sm font-bold text-white hover:text-brand-400 transition-colors">{{ s.name }}</span>
                                 {% if s.description %}
-                                <p class="text-[11px] text-slate-400 line-clamp-1 max-w-xs font-normal mt-0.5" title="{{ s.description }}">{{ s.description }}</p>
+                                <div class="max-h-16 overflow-y-auto pr-1 text-[11px] text-slate-400 font-normal mt-1 leading-relaxed bg-slate-950/40 p-1.5 rounded-lg border border-slate-800/40 whitespace-pre-line custom-scrollbar max-w-sm" title="{{ s.description }}">{{ s.description }}</div>
                                 {% endif %}
                                 {% if s.calibre_series_id %}
-                                <span class="block text-[10px] text-slate-500 font-mono">Calibre ID: #{{ s.calibre_series_id }}</span>
+                                <span class="block text-[10px] text-slate-500 font-mono mt-0.5">Calibre ID: #{{ s.calibre_series_id }}</span>
                                 {% endif %}
                             </div>
                         </td>
