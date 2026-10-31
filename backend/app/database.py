@@ -404,6 +404,37 @@ class Database:
                 """, (limit, offset))
             return [dict(row) for row in cur.fetchall()]
 
+    def count_releases(self, status: Optional[str] = None) -> int:
+        """Returns total count of releases, optionally filtered by status."""
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            if status:
+                cur.execute("SELECT count(*) FROM releases WHERE status = ?;", (status,))
+            else:
+                cur.execute("SELECT count(*) FROM releases;")
+            row = cur.fetchone()
+            return row[0] if row else 0
+
+    def get_release_status_counts(self) -> Dict[str, int]:
+        """Returns total count and breakdowns for each release status."""
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT 
+                    count(*) as total,
+                    sum(CASE WHEN status = 'REQUESTED' THEN 1 ELSE 0 END) as requested,
+                    sum(CASE WHEN status = 'IN_CALIBRE' THEN 1 ELSE 0 END) as in_calibre,
+                    sum(CASE WHEN status = 'IGNORED' THEN 1 ELSE 0 END) as ignored
+                FROM releases;
+            """)
+            row = cur.fetchone()
+            return {
+                "ALL": row["total"] or 0,
+                "REQUESTED": row["requested"] or 0,
+                "IN_CALIBRE": row["in_calibre"] or 0,
+                "IGNORED": row["ignored"] or 0
+            }
+
     def get_pending_requests(self) -> List[Dict[str, Any]]:
         """Returns all releases currently marked as REQUESTED."""
         return self.get_releases(status="REQUESTED", limit=1000)
@@ -446,6 +477,13 @@ class Database:
                     check_interval_minutes = ?
                 WHERE id = ?;
             """, (name, feed_type, url, config_json, 1 if enabled else 0, 1 if auto_request else 0, interval, feed_id))
+            conn.commit()
+
+    def update_all_feed_intervals(self, interval: int):
+        """Updates check_interval_minutes across all configured feeds."""
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("UPDATE feeds SET check_interval_minutes = ?;", (interval,))
             conn.commit()
 
     def delete_feed(self, feed_id: int):
@@ -498,15 +536,7 @@ class Database:
             cur.execute("SELECT count(*) FROM feeds WHERE enabled = 1;")
             active_feeds = cur.fetchone()[0]
 
-            cur.execute("""
-                SELECT count(*) 
-                FROM releases r
-                WHERE (r.volume IS NULL OR r.volume = 1.0)
-                  AND r.status NOT IN ('IN_CALIBRE', 'BLACKLISTED')
-                  AND (r.series_name IS NULL OR lower(r.series_name) NOT IN (SELECT lower(name) FROM series_blacklist))
-                  AND (r.series_name IS NULL OR lower(r.series_name) NOT IN (SELECT lower(name) FROM series_tracking WHERE is_monitored = 1));
-            """)
-            discovered_count = cur.fetchone()[0]
+            discovered_count = self.count_discovery_releases()
 
             cur.execute("SELECT count(*) FROM series_blacklist;")
             blacklisted_count = cur.fetchone()[0]
@@ -574,7 +604,7 @@ class Database:
             return cur.fetchone() is not None
 
     # --- Discovery Operations ---
-    def get_discovery_releases(self, limit: int = 100) -> List[Dict[str, Any]]:
+    def get_discovery_releases(self, limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
         """
         Returns releases that are Volume 1 or unnumbered (standalone),
         which are NOT currently in Calibre, NOT in series_tracking, and NOT blacklisted.
@@ -604,8 +634,8 @@ class Database:
                 SELECT * FROM ranked_discovery
                 WHERE rn = 1
                 ORDER BY updated_at DESC, id DESC
-                LIMIT ?;
-            """, (limit,))
+                LIMIT ? OFFSET ?;
+            """, (limit, offset))
             items = []
             for row in cur.fetchall():
                 d = dict(row)
@@ -616,6 +646,33 @@ class Database:
                     d["title"] = NovelMetadataProvider.clean_novel_title(d["title"])
                 items.append(d)
             return items
+
+    def count_discovery_releases(self) -> int:
+        """
+        Returns total count of unique discovered series (Volume 1 or unnumbered standalones)
+        not in Calibre, tracking, or blacklist.
+        """
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                WITH ranked_discovery AS (
+                    SELECT r.id,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY lower(trim(
+                                   REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(r.series_name, ' (Light Novel)', ''), ' [Light Novel]', ''), ' (Novel)', ''), ' (Web Novel)', ''), ' (LN)', '')
+                               ))
+                               ORDER BY r.id DESC
+                           ) as rn
+                    FROM releases r
+                    WHERE (r.volume IS NULL OR r.volume = 1.0)
+                      AND r.status NOT IN ('IN_CALIBRE', 'BLACKLISTED', 'IGNORED')
+                      AND (r.series_name IS NULL OR lower(trim(r.series_name)) NOT IN (SELECT lower(trim(name)) FROM series_blacklist))
+                      AND (r.series_name IS NULL OR lower(trim(r.series_name)) NOT IN (SELECT lower(trim(name)) FROM series_tracking WHERE is_monitored = 1))
+                )
+                SELECT count(*) FROM ranked_discovery WHERE rn = 1;
+            """)
+            row = cur.fetchone()
+            return row[0] if row else 0
 
     def deduplicate_and_clean_discovery(self):
         """

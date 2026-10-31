@@ -28,18 +28,18 @@
     <div class="bg-slate-900/80 border border-slate-800 rounded-2xl p-4 flex flex-col sm:flex-row items-center justify-between gap-3">
         <div class="flex items-center space-x-1 sm:space-x-2 overflow-x-auto w-full sm:w-auto">
             <a href="/releases" class="text-xs px-3 py-1.5 rounded-lg {% if not current_status %}bg-slate-800 text-white border border-slate-700 font-semibold{% else %}text-slate-400 hover:text-white{% endif %} transition-colors">
-                All ({{ releases|length }})
+                All ({{ status_counts.ALL if status_counts else releases|length }})
             </a>
             <a href="/releases?status=REQUESTED" class="text-xs px-3 py-1.5 rounded-lg flex items-center gap-1.5 {% if current_status == 'REQUESTED' %}bg-amber-500/20 text-amber-300 border border-amber-500/30 font-semibold{% else %}text-slate-400 hover:text-amber-400{% endif %} transition-colors">
                 <span class="w-2 h-2 rounded-full bg-amber-400"></span>
-                Requested / Missing
+                Requested ({{ status_counts.REQUESTED if status_counts else '' }})
             </a>
             <a href="/releases?status=IN_CALIBRE" class="text-xs px-3 py-1.5 rounded-lg flex items-center gap-1.5 {% if current_status == 'IN_CALIBRE' %}bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 font-semibold{% else %}text-slate-400 hover:text-emerald-400{% endif %} transition-colors">
                 <span class="w-2 h-2 rounded-full bg-emerald-400"></span>
-                In Calibre
+                In Calibre ({{ status_counts.IN_CALIBRE if status_counts else '' }})
             </a>
             <a href="/releases?status=IGNORED" class="text-xs px-3 py-1.5 rounded-lg flex items-center gap-1.5 {% if current_status == 'IGNORED' %}bg-slate-800 text-slate-300 border border-slate-700 font-semibold{% else %}text-slate-400 hover:text-white{% endif %} transition-colors">
-                Ignored
+                Ignored ({{ status_counts.IGNORED if status_counts else '' }})
             </a>
         </div>
         <div class="relative w-full sm:w-72">
@@ -172,6 +172,53 @@
             </table>
         </div>
     </div>
+
+    <!-- Pagination Bar -->
+    {% if total_pages and total_pages > 1 %}
+    <div class="bg-slate-900/80 border border-slate-800 rounded-2xl p-4 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs text-slate-400">
+        <div>
+            Showing <strong class="text-white">{{ (current_page - 1) * page_size + 1 }}</strong> to <strong class="text-white">{{ [current_page * page_size, total_count]|min }}</strong> of <strong class="text-white">{{ total_count }}</strong> releases
+        </div>
+        <div class="flex items-center space-x-1.5">
+            <!-- First & Prev -->
+            {% if current_page > 1 %}
+            <a href="/releases?page=1{% if current_status %}&status={{ current_status }}{% endif %}" class="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition-colors flex items-center gap-1" title="First Page">
+                <i data-lucide="chevrons-left" class="w-3.5 h-3.5"></i>
+            </a>
+            <a href="/releases?page={{ current_page - 1 }}{% if current_status %}&status={{ current_status }}{% endif %}" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition-colors flex items-center gap-1">
+                <i data-lucide="chevron-left" class="w-3.5 h-3.5"></i>
+                <span>Previous</span>
+            </a>
+            {% else %}
+            <span class="px-3 py-1.5 rounded-lg bg-slate-900 text-slate-600 border border-slate-800 cursor-not-allowed flex items-center gap-1">
+                <i data-lucide="chevron-left" class="w-3.5 h-3.5"></i>
+                <span>Previous</span>
+            </span>
+            {% endif %}
+
+            <!-- Page Indicator -->
+            <span class="px-3 py-1.5 rounded-lg bg-brand-500/10 text-brand-300 border border-brand-500/20 font-bold">
+                Page {{ current_page }} of {{ total_pages }}
+            </span>
+
+            <!-- Next & Last -->
+            {% if current_page < total_pages %}
+            <a href="/releases?page={{ current_page + 1 }}{% if current_status %}&status={{ current_status }}{% endif %}" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition-colors flex items-center gap-1">
+                <span>Next</span>
+                <i data-lucide="chevron-right" class="w-3.5 h-3.5"></i>
+            </a>
+            <a href="/releases?page={{ total_pages }}{% if current_status %}&status={{ current_status }}{% endif %}" class="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition-colors flex items-center gap-1" title="Last Page">
+                <i data-lucide="chevrons-right" class="w-3.5 h-3.5"></i>
+            </a>
+            {% else %}
+            <span class="px-3 py-1.5 rounded-lg bg-slate-900 text-slate-600 border border-slate-800 cursor-not-allowed flex items-center gap-1">
+                <span>Next</span>
+                <i data-lucide="chevron-right" class="w-3.5 h-3.5"></i>
+            </span>
+            {% endif %}
+        </div>
+    </div>
+    {% endif %}
 
 </div>
 

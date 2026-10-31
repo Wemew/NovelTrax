@@ -571,7 +571,77 @@ def run_e2e_test():
     print(f"  ✓ CoverCache.clear_cache successfully purged {removed_files} cached image file")
 
     print("\n" + "=" * 60)
-    print("ALL TESTS (INCLUDING SECURITY & SYNOPSIS DISCOVERY) PASSED WITH 100% SUCCESS!")
+    print("STEP 11: TESTING PAGINATION, DYNAMIC RESCHEDULING & WEBHOOK DIAGNOSTICS")
+    print("=" * 60)
+    # 1. Release counts and pagination
+    tot_releases = app_db.count_releases()
+    status_counts = app_db.get_release_status_counts()
+    assert tot_releases >= 1
+    assert "ALL" in status_counts and "REQUESTED" in status_counts
+    page1 = app_db.get_releases(limit=2, offset=0)
+    page2 = app_db.get_releases(limit=2, offset=2)
+    assert len(page1) <= 2
+    if tot_releases > 2:
+        assert page1[0]["id"] != page2[0]["id"]
+    print(f"  ✓ Release pagination passed (Total: {tot_releases}, Page 1: {len(page1)}, Page 2: {len(page2)})")
+
+    # 2. Discovery pagination & counts
+    # Insert dummy discovery releases
+    app_db.upsert_release({
+        "guid": "disc_p1",
+        "title": "Discovery Novel Alpha Vol 1",
+        "series_name": "Discovery Novel Alpha",
+        "volume": 1.0,
+        "status": "NEW"
+    })
+    app_db.upsert_release({
+        "guid": "disc_p2",
+        "title": "Discovery Novel Beta Vol 1",
+        "series_name": "Discovery Novel Beta",
+        "volume": 1.0,
+        "status": "NEW"
+    })
+    disc_count = app_db.count_discovery_releases()
+    assert disc_count >= 2
+    d_page1 = app_db.get_discovery_releases(limit=1, offset=0)
+    d_page2 = app_db.get_discovery_releases(limit=1, offset=1)
+    assert len(d_page1) == 1
+    assert len(d_page2) == 1
+    assert d_page1[0]["id"] != d_page2[0]["id"]
+    print(f"  ✓ Discovery pagination passed (Total: {disc_count}, Offset 0: '{d_page1[0]['series_name']}', Offset 1: '{d_page2[0]['series_name']}')")
+
+    # 3. Dynamic feed interval updates
+    app_db.update_all_feed_intervals(42)
+    feeds = app_db.get_all_feeds()
+    for f in feeds:
+        assert f["check_interval_minutes"] == 42
+    print(f"  ✓ Feed interval dynamic synchronization verified across {len(feeds)} feeds")
+
+    # 4. TaskManager reschedule & backfill status
+    from app.scheduler import TaskManager
+    tm = TaskManager(app_db, os.path.dirname(calibre_db_file), data_dir=test_dir)
+    tm.start()
+    tm.reschedule_jobs(calibre_minutes=25, feed_minutes=45)
+    b_status = tm.get_backfill_status()
+    assert "delay_seconds" in b_status
+    assert "max_pages" in b_status
+    tm.stop()
+    print("  ✓ TaskManager live job rescheduling & backfill status metadata verified")
+
+    # 5. Webhook diagnostics
+    from app.notifier.webhook import NotificationService
+    ns = NotificationService()
+    empty_res = ns.test_webhook()
+    assert empty_res["status"] == "error"
+    # Test invalid connection gracefully handled
+    invalid_res = ns.test_webhook(discord_url="http://127.0.0.1:59999/nonexistent")
+    assert invalid_res["status"] == "error"
+    assert "discord" in invalid_res["results"]
+    assert invalid_res["results"]["discord"]["success"] is False
+    print("  ✓ Webhook diagnostics safely reported connection error without crashing")
+
+    print("\n" + "=" * 60)
+    print("ALL TESTS (INCLUDING SECURITY, SYNOPSIS DISCOVERY & PAGINATION) PASSED WITH 100% SUCCESS!")
     print("=" * 60)
 
 if __name__ == "__main__":

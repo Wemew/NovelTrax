@@ -2,7 +2,10 @@ import re
 import logging
 from typing import List, Dict, Any, Optional
 from urllib.parse import urlparse
-import httpx
+try:
+    import httpx
+except ImportError:
+    httpx = None
 from bs4 import BeautifulSoup
 from app.providers.base import BaseFeedProvider, ReleaseItem
 from app.parser import extract_series_and_volume

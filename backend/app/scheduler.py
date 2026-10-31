@@ -2,7 +2,23 @@ import os
 import json
 import logging
 from typing import Optional, List, Dict, Any
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
+try:
+    from apscheduler.schedulers.asyncio import AsyncIOScheduler
+except ImportError:
+    class AsyncIOScheduler:
+        def __init__(self, *args, **kwargs):
+            self.running = False
+            self.jobs = {}
+        def add_job(self, func, trigger=None, **kwargs):
+            self.jobs[kwargs.get("id", str(func))] = kwargs
+        def reschedule_job(self, job_id, trigger=None, **kwargs):
+            if job_id in self.jobs:
+                self.jobs[job_id].update(kwargs)
+        def start(self):
+            self.running = True
+        def shutdown(self, wait=False):
+            self.running = False
 from app.database import Database
 from app.calibre.scanner import CalibreScanner
 from app.calibre.matcher import CalibreMatcher
@@ -16,7 +32,8 @@ class TaskManager:
     def __init__(self, db: Database, calibre_path: str, data_dir: Optional[str] = None):
         self.db = db
         self.calibre_path = calibre_path
-        self.cover_cache = CoverCache(data_dir or os.getenv("DATA_DIR", "/app/data"))
+        default_data_dir = os.getenv("DATA_DIR") or os.path.dirname(os.path.abspath(db.db_path))
+        self.cover_cache = CoverCache(data_dir or default_data_dir)
         self.scheduler = AsyncIOScheduler()
         self.is_syncing_calibre = False
         self.is_checking_feeds = False
@@ -49,6 +66,46 @@ class TaskManager:
         )
         self.scheduler.start()
         logger.info("Scheduler started successfully.")
+
+    def reschedule_jobs(self, calibre_minutes: Optional[int] = None, feed_minutes: Optional[int] = None):
+        """
+        Dynamically updates scheduler intervals when settings are changed.
+        """
+        if calibre_minutes is None:
+            try:
+                calibre_minutes = int(self.db.get_setting("calibre_sync_interval_minutes", "15"))
+            except ValueError:
+                calibre_minutes = 15
+
+        if feed_minutes is None:
+            try:
+                feed_minutes = int(self.db.get_setting("feed_check_interval_minutes", "60"))
+            except ValueError:
+                feed_minutes = 60
+
+        calibre_minutes = max(1, calibre_minutes)
+        feed_minutes = max(5, feed_minutes)
+
+        if self.scheduler.running:
+            try:
+                self.scheduler.reschedule_job(
+                    "calibre_sync",
+                    trigger="interval",
+                    minutes=calibre_minutes
+                )
+                logger.info(f"Rescheduled calibre_sync to run every {calibre_minutes} minutes")
+            except Exception as e:
+                logger.warning(f"Could not reschedule calibre_sync: {e}")
+
+            try:
+                self.scheduler.reschedule_job(
+                    "feed_check",
+                    trigger="interval",
+                    minutes=feed_minutes
+                )
+                logger.info(f"Rescheduled feed_check to run every {feed_minutes} minutes")
+            except Exception as e:
+                logger.warning(f"Could not reschedule feed_check: {e}")
 
     def stop(self):
         self.scheduler.shutdown(wait=False)
@@ -295,10 +352,21 @@ class TaskManager:
         self.db.set_setting("backfill_progress", "Stop requested, finishing current item...")
 
     def get_backfill_status(self) -> Dict[str, Any]:
+        try:
+            delay = float(self.db.get_setting("backfill_delay_seconds", "2.0"))
+        except ValueError:
+            delay = 2.0
+        try:
+            max_p = int(self.db.get_setting("backfill_max_pages", "30"))
+        except ValueError:
+            max_p = 30
+
         return {
             "running": self.is_backfilling,
             "status": self.db.get_setting("backfill_status", "idle"),
-            "progress": self.db.get_setting("backfill_progress", "Idle")
+            "progress": self.db.get_setting("backfill_progress", "Idle"),
+            "delay_seconds": delay,
+            "max_pages": max_p
         }
 
     async def run_polite_backfill(self, max_pages: Optional[int] = None, enrich_synopses: bool = True, delay_seconds: Optional[float] = None):

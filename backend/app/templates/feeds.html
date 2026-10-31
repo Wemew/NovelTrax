@@ -89,6 +89,9 @@
                     Test Live Extraction
                 </button>
                 <div class="flex items-center gap-1.5">
+                    <button onclick="openEditFeedModal({{ feed.id }}, '{{ feed.name|escape }}', '{{ feed.feed_type }}', '{{ feed.url|escape }}', {{ feed.check_interval_minutes }}, {{ 'true' if feed.auto_request else 'false' }})" title="Edit feed interval & settings" class="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition-colors">
+                        <i data-lucide="pencil" class="w-4 h-4 text-brand-400"></i>
+                    </button>
                     <button onclick="checkSingleFeed({{ feed.id }})" title="Check this feed now" class="p-1.5 rounded-lg bg-brand-500/10 hover:bg-brand-500/20 text-brand-400 border border-brand-500/20 transition-colors">
                         <i data-lucide="play" class="w-4 h-4"></i>
                     </button>
@@ -190,6 +193,53 @@
         </div>
     </div>
 
+    <!-- Edit Feed Modal -->
+    <div id="edit-feed-modal" class="hidden fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
+        <div class="bg-slate-900 border border-slate-800 rounded-2xl max-w-lg w-full flex flex-col shadow-2xl">
+            <div class="p-4 sm:p-5 border-b border-slate-800 flex items-center justify-between">
+                <div class="flex items-center gap-2">
+                    <i data-lucide="pencil" class="w-5 h-5 text-brand-400"></i>
+                    <h3 class="font-bold text-white text-base">Edit Monitored Feed</h3>
+                </div>
+                <button onclick="closeEditModal()" class="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-slate-800">
+                    <i data-lucide="x" class="w-5 h-5"></i>
+                </button>
+            </div>
+            <form onsubmit="submitEditFeed(event)" class="p-5 space-y-4">
+                <input type="hidden" id="edit-feed-id">
+                <input type="hidden" id="edit-feed-type">
+
+                <div>
+                    <label class="block text-xs font-semibold text-slate-300 mb-1">Feed Name</label>
+                    <input type="text" id="edit-feed-name" required class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-brand-500">
+                </div>
+
+                <div>
+                    <label class="block text-xs font-semibold text-slate-300 mb-1">Website or Feed URL</label>
+                    <input type="url" id="edit-feed-url" required class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white font-mono focus:outline-none focus:border-brand-500">
+                </div>
+
+                <div class="grid grid-cols-2 gap-3">
+                    <div>
+                        <label class="block text-xs font-semibold text-slate-300 mb-1">Check Interval (Minutes)</label>
+                        <input type="number" id="edit-feed-interval" min="1" max="1440" required class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-brand-500">
+                    </div>
+                    <div class="flex items-center pt-5">
+                        <label class="flex items-center space-x-2 cursor-pointer">
+                            <input type="checkbox" id="edit-feed-autorequest" class="rounded bg-slate-950 border-slate-700 text-brand-500 focus:ring-0">
+                            <span class="text-xs text-slate-300 font-medium">Auto-Request</span>
+                        </label>
+                    </div>
+                </div>
+
+                <div class="pt-4 border-t border-slate-800 flex items-center justify-end gap-2">
+                    <button type="button" onclick="closeEditModal()" class="text-xs px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-white font-medium">Cancel</button>
+                    <button type="submit" class="text-xs px-4 py-2 rounded-xl bg-brand-600 hover:bg-brand-500 text-white font-medium">Save Changes</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
 </div>
 
 <script>
@@ -198,6 +248,49 @@
     }
     function closeAddModal() {
         document.getElementById('add-feed-modal').classList.add('hidden');
+    }
+
+    function openEditFeedModal(id, name, type, url, interval, autoRequest) {
+        document.getElementById('edit-feed-id').value = id;
+        document.getElementById('edit-feed-name').value = name;
+        document.getElementById('edit-feed-type').value = type;
+        document.getElementById('edit-feed-url').value = url;
+        document.getElementById('edit-feed-interval').value = interval;
+        document.getElementById('edit-feed-autorequest').checked = autoRequest;
+        document.getElementById('edit-feed-modal').classList.remove('hidden');
+    }
+    function closeEditModal() {
+        document.getElementById('edit-feed-modal').classList.add('hidden');
+    }
+
+    async function submitEditFeed(e) {
+        e.preventDefault();
+        const feedId = document.getElementById('edit-feed-id').value;
+        const payload = {
+            name: document.getElementById('edit-feed-name').value,
+            feed_type: document.getElementById('edit-feed-type').value,
+            url: document.getElementById('edit-feed-url').value,
+            interval: parseInt(document.getElementById('edit-feed-interval').value) || 60,
+            auto_request: document.getElementById('edit-feed-autorequest').checked
+        };
+
+        try {
+            const res = await fetch(`/api/feeds/${feedId}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+            const data = await res.json();
+            if (data.status === 'success') {
+                showToast('Feed updated successfully!');
+                closeEditModal();
+                setTimeout(() => location.reload(), 600);
+            } else {
+                showToast(`Failed to update feed: ${data.message}`, 'error');
+            }
+        } catch (err) {
+            showToast(`Error updating feed: ${err}`, 'error');
+        }
     }
 
     function onFeedTypeChange() {

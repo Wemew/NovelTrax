@@ -1,5 +1,6 @@
 import os
 import json
+import math
 import logging
 from typing import Dict, Any, Optional
 from contextlib import asynccontextmanager
@@ -101,15 +102,31 @@ async def series_view(request: Request):
     )
 
 @app.get("/releases", response_class=HTMLResponse)
-async def releases_view(request: Request, status: Optional[str] = None):
-    releases = db.get_releases(status=status, limit=500)
+async def releases_view(
+    request: Request,
+    status: Optional[str] = None,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=10, le=200)
+):
+    total_count = db.count_releases(status=status)
+    total_pages = max(1, math.ceil(total_count / page_size))
+    current_page = min(page, total_pages) if total_count > 0 else 1
+    offset = (current_page - 1) * page_size
+    releases = db.get_releases(status=status, limit=page_size, offset=offset)
+    status_counts = db.get_release_status_counts()
+
     return templates.TemplateResponse(
         request=request,
         name="releases.html",
         context={
             "active_page": "releases",
             "releases": releases,
-            "current_status": status
+            "current_status": status,
+            "current_page": current_page,
+            "page_size": page_size,
+            "total_pages": total_pages,
+            "total_count": total_count,
+            "status_counts": status_counts
         }
     )
 
@@ -138,16 +155,31 @@ async def logs_view(request: Request):
     )
 
 @app.get("/discovery", response_class=HTMLResponse)
-async def discovery_view(request: Request):
-    discovered = db.get_discovery_releases(limit=100)
+async def discovery_view(
+    request: Request,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(30, ge=6, le=120)
+):
+    total_count = db.count_discovery_releases()
+    total_pages = max(1, math.ceil(total_count / page_size))
+    current_page = min(page, total_pages) if total_count > 0 else 1
+    offset = (current_page - 1) * page_size
+    discovered = db.get_discovery_releases(limit=page_size, offset=offset)
     blacklisted = db.get_blacklisted_series()
+    settings = db.get_all_settings()
+
     return templates.TemplateResponse(
         request=request,
         name="discovery.html",
         context={
             "active_page": "discovery",
             "discovered_releases": discovered,
-            "blacklisted_series": blacklisted
+            "blacklisted_series": blacklisted,
+            "settings": settings,
+            "current_page": current_page,
+            "page_size": page_size,
+            "total_pages": total_pages,
+            "total_count": total_count
         }
     )
 
@@ -278,6 +310,34 @@ async def api_delete_feed(feed_id: int):
     db.delete_feed(feed_id)
     return JSONResponse({"status": "success"})
 
+@app.post("/api/feeds/{feed_id}")
+async def api_update_feed(feed_id: int, payload: Dict[str, Any]):
+    """Update an existing feed configuration."""
+    feed = db.get_feed(feed_id)
+    if not feed:
+        raise HTTPException(status_code=404, detail="Feed not found")
+
+    name = payload.get("name", feed["name"])
+    feed_type = payload.get("feed_type", feed["feed_type"])
+    url = payload.get("url", feed["url"])
+    interval = int(payload.get("interval", feed["check_interval_minutes"]))
+    auto_request = bool(payload.get("auto_request", feed["auto_request"]))
+    config = payload.get("config")
+    config_json = json.dumps(config) if config is not None else feed["config_json"]
+
+    db.update_feed(
+        feed_id=feed_id,
+        name=name,
+        feed_type=feed_type,
+        url=url,
+        config_json=config_json,
+        enabled=bool(feed["enabled"]),
+        auto_request=auto_request,
+        interval=interval
+    )
+    db.log_activity("FEED_UPDATED", f"Updated feed: {name}", f"Interval: {interval}m, URL: {url}")
+    return JSONResponse({"status": "success"})
+
 @app.post("/api/series/{series_id}/toggle")
 async def api_toggle_series(series_id: int):
     """Toggle monitored status for a series."""
@@ -346,11 +406,58 @@ async def api_discovery_blacklist(payload: Dict[str, Any]):
 
 @app.post("/api/settings")
 async def api_save_settings(payload: Dict[str, Any]):
-    """Save application settings."""
+    """Save application settings and dynamically reschedule background jobs."""
     for k, v in payload.items():
         db.set_setting(k, str(v))
-    db.log_activity("SETTINGS_UPDATED", "Application settings updated")
+
+    # Synchronize feed interval across all existing feeds if updated
+    if "feed_check_interval_minutes" in payload:
+        try:
+            feed_interval = int(payload["feed_check_interval_minutes"])
+            db.update_all_feed_intervals(feed_interval)
+        except (ValueError, TypeError):
+            pass
+
+    # Update Calibre library path if changed
+    if "calibre_path" in payload:
+        task_manager.calibre_path = str(payload["calibre_path"])
+
+    # Dynamically reschedule APScheduler tasks
+    calibre_min = None
+    if "calibre_sync_interval_minutes" in payload:
+        try:
+            calibre_min = int(payload["calibre_sync_interval_minutes"])
+        except (ValueError, TypeError):
+            pass
+
+    feed_min = None
+    if "feed_check_interval_minutes" in payload:
+        try:
+            feed_min = int(payload["feed_check_interval_minutes"])
+        except (ValueError, TypeError):
+            pass
+
+    task_manager.reschedule_jobs(calibre_minutes=calibre_min, feed_minutes=feed_min)
+    db.log_activity("SETTINGS_UPDATED", "Application settings and automation intervals updated")
     return JSONResponse({"status": "success"})
+
+@app.post("/api/settings/test-webhook")
+async def api_test_webhook(payload: Optional[Dict[str, Any]] = None):
+    """Sends a live test notification to Discord and/or generic webhook."""
+    p = payload or {}
+    discord_url = p.get("discord_webhook_url")
+    apprise_url = p.get("apprise_url")
+
+    # If not passed in body, fall back to current saved settings
+    if discord_url is None:
+        discord_url = db.get_setting("discord_webhook_url", "")
+    if apprise_url is None:
+        apprise_url = db.get_setting("apprise_url", "")
+
+    notifier = task_manager.get_notifier()
+    result = notifier.test_webhook(discord_url=discord_url, apprise_url=apprise_url)
+    status_code = 200 if result.get("status") == "success" else 400
+    return JSONResponse(result, status_code=status_code)
 
 # --- Historical Backfill & Synopsis Endpoints ---
 

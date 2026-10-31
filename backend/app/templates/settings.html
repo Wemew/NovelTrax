@@ -113,7 +113,13 @@
                     <label class="block text-xs font-semibold text-slate-300 mb-1">
                         Discord Webhook URL
                     </label>
-                    <input type="url" id="setting-discord-url" value="{{ settings.discord_webhook_url }}" placeholder="https://discord.com/api/webhooks/..." class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white font-mono focus:outline-none focus:border-brand-500">
+                    <div class="flex gap-2">
+                        <input type="url" id="setting-discord-url" value="{{ settings.discord_webhook_url }}" placeholder="https://discord.com/api/webhooks/..." class="flex-1 bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white font-mono focus:outline-none focus:border-brand-500">
+                        <button type="button" onclick="testSingleWebhook('discord')" id="btn-test-discord" class="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold flex items-center gap-1.5 transition-colors">
+                            <i data-lucide="send" class="w-3.5 h-3.5 text-brand-400"></i>
+                            Test Discord
+                        </button>
+                    </div>
                     <p class="text-[11px] text-slate-500 mt-1">Sends rich embed cards when a new release is requested or acquired into Calibre.</p>
                 </div>
 
@@ -121,8 +127,17 @@
                     <label class="block text-xs font-semibold text-slate-300 mb-1">
                         Generic Webhook / Apprise Endpoint
                     </label>
-                    <input type="url" id="setting-apprise-url" value="{{ settings.apprise_url }}" placeholder="http://gotify:80/message or https://my-webhook.com" class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white font-mono focus:outline-none focus:border-brand-500">
+                    <div class="flex gap-2">
+                        <input type="url" id="setting-apprise-url" value="{{ settings.apprise_url }}" placeholder="http://gotify:80/message or https://my-webhook.com" class="flex-1 bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white font-mono focus:outline-none focus:border-brand-500">
+                        <button type="button" onclick="testSingleWebhook('generic')" id="btn-test-apprise" class="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold flex items-center gap-1.5 transition-colors">
+                            <i data-lucide="send" class="w-3.5 h-3.5 text-brand-400"></i>
+                            Test Generic
+                        </button>
+                    </div>
+                    <p class="text-[11px] text-slate-500 mt-1">Sends JSON event payloads for Gotify, Ntfy, Home Assistant, or Apprise.</p>
                 </div>
+
+                <div id="webhook-test-result" class="hidden p-3 rounded-xl text-xs font-mono"></div>
             </div>
         </div>
 
@@ -223,6 +238,66 @@
         } catch (err) {
             box.className = 'p-3 rounded-xl text-xs font-mono bg-rose-500/10 text-rose-300 border border-rose-500/20';
             box.innerHTML = `✗ Connection error: ${err}`;
+        }
+    }
+
+    async function testSingleWebhook(type) {
+        const box = document.getElementById('webhook-test-result');
+        const discordUrl = document.getElementById('setting-discord-url').value.trim();
+        const appriseUrl = document.getElementById('setting-apprise-url').value.trim();
+
+        if (type === 'discord' && !discordUrl) {
+            box.classList.remove('hidden');
+            box.className = 'p-3 rounded-xl text-xs font-mono bg-rose-500/10 text-rose-300 border border-rose-500/20';
+            box.innerHTML = '✗ Please enter a Discord Webhook URL first.';
+            return;
+        }
+        if (type === 'generic' && !appriseUrl) {
+            box.classList.remove('hidden');
+            box.className = 'p-3 rounded-xl text-xs font-mono bg-rose-500/10 text-rose-300 border border-rose-500/20';
+            box.innerHTML = '✗ Please enter a Generic Webhook / Apprise URL first.';
+            return;
+        }
+
+        const payload = {};
+        if (type === 'discord') payload.discord_webhook_url = discordUrl;
+        if (type === 'generic') payload.apprise_url = appriseUrl;
+
+        const btn = document.getElementById(type === 'discord' ? 'btn-test-discord' : 'btn-test-apprise');
+        const originalText = btn.innerHTML;
+        btn.disabled = true;
+        btn.innerHTML = '<i data-lucide="loader-2" class="w-3.5 h-3.5 animate-spin text-brand-400"></i> Testing...';
+        lucide.createIcons();
+
+        box.classList.remove('hidden');
+        box.className = 'p-3 rounded-xl text-xs font-mono bg-slate-800 text-slate-300 border border-slate-700 flex items-center gap-2';
+        box.innerHTML = '<i data-lucide="loader-2" class="w-4 h-4 animate-spin text-brand-400"></i> Dispatching test notification...';
+        lucide.createIcons();
+
+        try {
+            const res = await fetch('/api/settings/test-webhook', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+            const data = await res.json();
+            if (data.status === 'success') {
+                box.className = 'p-3 rounded-xl text-xs font-mono bg-emerald-500/10 text-emerald-400 border border-emerald-500/20';
+                box.innerHTML = `✓ ${data.message || 'Notification sent successfully!'}`;
+                showToast('Webhook notification delivered!', 'success');
+            } else {
+                box.className = 'p-3 rounded-xl text-xs font-mono bg-rose-500/10 text-rose-300 border border-rose-500/20';
+                box.innerHTML = `✗ ${data.message || 'Delivery failed'}`;
+                showToast('Webhook delivery failed', 'error');
+            }
+        } catch (err) {
+            box.className = 'p-3 rounded-xl text-xs font-mono bg-rose-500/10 text-rose-300 border border-rose-500/20';
+            box.innerHTML = `✗ Connection error: ${err}`;
+            showToast(`Webhook error: ${err}`, 'error');
+        } finally {
+            btn.disabled = false;
+            btn.innerHTML = originalText;
+            lucide.createIcons();
         }
     }
 

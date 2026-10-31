@@ -41,7 +41,7 @@
             <div>
                 <p class="text-xs font-bold text-white flex items-center gap-2">
                     <span>Polite Historical Backfill in Progress</span>
-                    <span class="text-[10px] px-2 py-0.5 rounded-full bg-brand-500/20 text-brand-300">Rate Limited &bull; 2s Delay</span>
+                    <span id="backfill-rate-badge" class="text-[10px] px-2 py-0.5 rounded-full bg-brand-500/20 text-brand-300">Rate Limited &bull; {{ settings.backfill_delay_seconds or '2.0' }}s Delay{% if settings.backfill_max_pages == '0' %} &bull; Unlimited Pages{% else %} &bull; Max {{ settings.backfill_max_pages or '30' }} Pages{% endif %}</span>
                 </p>
                 <p class="text-[11px] text-slate-400 mt-0.5" id="backfill-status-text">
                     Initializing...
@@ -59,7 +59,7 @@
         <button onclick="switchTab('discovery')" id="tab-btn-discovery" class="pb-3 border-b-2 border-brand-500 text-brand-400 flex items-center gap-2 transition-colors">
             <i data-lucide="sparkles" class="w-4 h-4"></i>
             <span>Discovered Releases (Vol. 1 & Standalones)</span>
-            <span class="px-2 py-0.5 rounded-full text-xs bg-brand-500/15 text-brand-300 border border-brand-500/20" id="discovery-badge">{{ discovered_releases|length }}</span>
+            <span class="px-2 py-0.5 rounded-full text-xs bg-brand-500/15 text-brand-300 border border-brand-500/20" id="discovery-badge">{{ total_count or discovered_releases|length }}</span>
         </button>
         <button onclick="switchTab('blacklist')" id="tab-btn-blacklist" class="pb-3 border-b-2 border-transparent text-slate-400 hover:text-slate-200 flex items-center gap-2 transition-colors">
             <i data-lucide="ban" class="w-4 h-4 text-rose-400"></i>
@@ -77,7 +77,7 @@
                 <input type="text" id="discovery-search" oninput="filterDiscovery()" placeholder="Filter discovered releases..." class="w-full bg-slate-950/70 border border-slate-700/80 rounded-xl pl-10 pr-4 py-2 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-brand-500">
             </div>
             <p class="text-xs text-slate-400 hidden sm:block">
-                Showing {{ discovered_releases|length }} potential new series
+                Showing {{ (current_page - 1) * page_size + 1 }} to {{ [current_page * page_size, total_count]|min }} of {{ total_count }} potential new series
             </p>
         </div>
 
@@ -164,6 +164,53 @@
             </div>
             {% endfor %}
         </div>
+
+        <!-- Pagination Bar -->
+        {% if total_pages and total_pages > 1 %}
+        <div class="bg-slate-900/80 border border-slate-800 rounded-2xl p-4 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs text-slate-400">
+            <div>
+                Showing <strong class="text-white">{{ (current_page - 1) * page_size + 1 }}</strong> to <strong class="text-white">{{ [current_page * page_size, total_count]|min }}</strong> of <strong class="text-white">{{ total_count }}</strong> series
+            </div>
+            <div class="flex items-center space-x-1.5">
+                <!-- First & Prev -->
+                {% if current_page > 1 %}
+                <a href="/discovery?page=1" class="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition-colors flex items-center gap-1" title="First Page">
+                    <i data-lucide="chevrons-left" class="w-3.5 h-3.5"></i>
+                </a>
+                <a href="/discovery?page={{ current_page - 1 }}" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition-colors flex items-center gap-1">
+                    <i data-lucide="chevron-left" class="w-3.5 h-3.5"></i>
+                    <span>Previous</span>
+                </a>
+                {% else %}
+                <span class="px-3 py-1.5 rounded-lg bg-slate-900 text-slate-600 border border-slate-800 cursor-not-allowed flex items-center gap-1">
+                    <i data-lucide="chevron-left" class="w-3.5 h-3.5"></i>
+                    <span>Previous</span>
+                </span>
+                {% endif %}
+
+                <!-- Page Indicator -->
+                <span class="px-3 py-1.5 rounded-lg bg-brand-500/10 text-brand-300 border border-brand-500/20 font-bold">
+                    Page {{ current_page }} of {{ total_pages }}
+                </span>
+
+                <!-- Next & Last -->
+                {% if current_page < total_pages %}
+                <a href="/discovery?page={{ current_page + 1 }}" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition-colors flex items-center gap-1">
+                    <span>Next</span>
+                    <i data-lucide="chevron-right" class="w-3.5 h-3.5"></i>
+                </a>
+                <a href="/discovery?page={{ total_pages }}" class="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition-colors flex items-center gap-1" title="Last Page">
+                    <i data-lucide="chevrons-right" class="w-3.5 h-3.5"></i>
+                </a>
+                {% else %}
+                <span class="px-3 py-1.5 rounded-lg bg-slate-900 text-slate-600 border border-slate-800 cursor-not-allowed flex items-center gap-1">
+                    <span>Next</span>
+                    <i data-lucide="chevron-right" class="w-3.5 h-3.5"></i>
+                </span>
+                {% endif %}
+            </div>
+        </div>
+        {% endif %}
         {% else %}
         <div class="bg-slate-900/60 border border-slate-800/80 rounded-2xl p-12 text-center">
             <div class="w-14 h-14 rounded-2xl bg-brand-500/10 text-brand-400 border border-brand-500/20 flex items-center justify-center mx-auto mb-3">
@@ -426,6 +473,11 @@
                 banner.classList.remove('hidden');
                 statusText.innerText = data.progress || 'Running polite backfill...';
                 btnText.innerText = 'Backfilling...';
+                const rateBadge = document.getElementById('backfill-rate-badge');
+                if (rateBadge && data.delay_seconds !== undefined) {
+                    const pagesText = data.max_pages === 0 ? 'Unlimited Pages' : `Max ${data.max_pages} Pages`;
+                    rateBadge.innerHTML = `Rate Limited &bull; ${data.delay_seconds}s Delay &bull; ${pagesText}`;
+                }
                 if (!backfillPollInterval) {
                     backfillPollInterval = setInterval(checkBackfillStatus, 2500);
                 }
