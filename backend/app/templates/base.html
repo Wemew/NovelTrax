@@ -185,40 +185,52 @@
         }
 
         async function triggerCalibreSync() {
-            const icon = document.getElementById('icon-calibre-sync');
-            icon.classList.add('animate-spin');
+            const btns = document.querySelectorAll('#btn-sync-calibre, .btn-calibre-sync');
+            const icons = document.querySelectorAll('#icon-calibre-sync, .icon-calibre-sync');
+            icons.forEach(i => i.classList.add('animate-spin'));
+            btns.forEach(b => b.disabled = true);
+            showToast('Syncing Calibre library in background...', 'info');
             try {
                 const res = await fetch('/api/calibre/sync', { method: 'POST' });
                 const data = await res.json();
                 if (data.status === 'success') {
                     showToast(`Calibre Synced! ${data.series_count} series, resolved ${data.resolved_requests} requests.`, 'success');
                     setTimeout(() => location.reload(), 1200);
+                } else if (data.status === 'in_progress') {
+                    showToast('Calibre sync is already running in background.', 'info');
                 } else {
                     showToast(`Calibre Sync Error: ${data.message}`, 'error');
                 }
             } catch (err) {
                 showToast(`Failed to trigger Calibre sync: ${err}`, 'error');
             } finally {
-                icon.classList.remove('animate-spin');
+                icons.forEach(i => i.classList.remove('animate-spin'));
+                btns.forEach(b => b.disabled = false);
             }
         }
 
         async function triggerFeedCheck() {
-            const icon = document.getElementById('icon-feed-check');
-            icon.classList.add('animate-spin');
+            const btns = document.querySelectorAll('#btn-check-feeds, .btn-feed-check');
+            const icons = document.querySelectorAll('#icon-feed-check, .icon-feed-check');
+            icons.forEach(i => i.classList.add('animate-spin'));
+            btns.forEach(b => b.disabled = true);
+            showToast('Scanning feeds in background...', 'info');
             try {
                 const res = await fetch('/api/feeds/check', { method: 'POST' });
                 const data = await res.json();
                 if (data.status === 'success') {
                     showToast(`Feeds checked! Found ${data.total_found} items, ${data.total_requested} new requests.`, 'success');
                     setTimeout(() => location.reload(), 1200);
+                } else if (data.status === 'in_progress') {
+                    showToast('Feed scan is already running in background.', 'info');
                 } else {
                     showToast(`Feed check error: ${data.message}`, 'error');
                 }
             } catch (err) {
                 showToast(`Failed to trigger feed check: ${err}`, 'error');
             } finally {
-                icon.classList.remove('animate-spin');
+                icons.forEach(i => i.classList.remove('animate-spin'));
+                btns.forEach(b => b.disabled = false);
             }
         }
 

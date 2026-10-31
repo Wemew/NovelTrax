@@ -312,14 +312,18 @@ async def settings_view(request: Request):
 @app.post("/api/calibre/sync")
 async def api_calibre_sync():
     """Trigger manual Calibre library rescan and request resolution."""
-    res = task_manager.sync_calibre()
+    import asyncio
+    res = await asyncio.to_thread(task_manager.sync_calibre)
     return JSONResponse(res)
 
 @app.get("/api/calibre/test")
 async def api_calibre_test(path: str = Query(...)):
     """Test connection to Calibre library at given path."""
-    scanner = CalibreScanner(path)
-    summary = scanner.get_library_summary()
+    import asyncio
+    def _test():
+        scanner = CalibreScanner(path)
+        return scanner.get_library_summary()
+    summary = await asyncio.to_thread(_test)
     return JSONResponse(summary)
 
 FALLBACK_COVER_SVG = """<svg xmlns="http://www.w3.org/2000/svg" width="100" height="150" viewBox="0 0 100 150"><rect width="100" height="150" rx="8" fill="#1e293b" stroke="#334155" stroke-width="2"/><path d="M35 55h30M35 70h30M35 85h20" stroke="#64748b" stroke-width="2" stroke-linecap="round"/><text x="50" y="115" font-family="system-ui,-apple-system,sans-serif" font-size="10" font-weight="600" fill="#94a3b8" text-anchor="middle">EPUB</text></svg>"""
@@ -350,24 +354,28 @@ async def api_get_cover(url: str = Query(...)):
 @app.post("/api/feeds/check")
 async def api_feeds_check():
     """Trigger check for all enabled feeds."""
-    res = task_manager.check_feeds()
+    import asyncio
+    res = await asyncio.to_thread(task_manager.check_feeds)
     return JSONResponse(res)
 
 @app.post("/api/feeds/check/{feed_id}")
 async def api_check_single_feed(feed_id: int):
     """Check a specific feed by id."""
+    import asyncio
     feed = db.get_feed(feed_id)
     if not feed:
         raise HTTPException(status_code=404, detail="Feed not found")
 
     try:
-        provider = create_provider(
-            feed["feed_type"],
-            feed["name"],
-            feed["url"],
-            json.loads(feed["config_json"] or "{}")
-        )
-        releases = provider.fetch_releases()
+        def _fetch():
+            provider = create_provider(
+                feed["feed_type"],
+                feed["name"],
+                feed["url"],
+                json.loads(feed["config_json"] or "{}")
+            )
+            return provider.fetch_releases()
+        releases = await asyncio.to_thread(_fetch)
         db.update_feed_status(feed_id, "OK")
         return JSONResponse({"status": "success", "items_found": len(releases)})
     except Exception as e:
@@ -377,6 +385,7 @@ async def api_check_single_feed(feed_id: int):
 @app.post("/api/feeds/test")
 async def api_feeds_test(payload: Dict[str, Any]):
     """Live test a feed or scraper extraction without saving to database."""
+    import asyncio
     feed_type = payload.get("feed_type", "jnovels")
     url = payload.get("url", "")
     config = payload.get("config", {})
@@ -385,8 +394,10 @@ async def api_feeds_test(payload: Dict[str, Any]):
         return JSONResponse({"status": "error", "message": "URL is required"}, status_code=400)
 
     try:
-        provider = create_provider(feed_type, "Test Provider", url, config)
-        releases = provider.fetch_releases()
+        def _test():
+            provider = create_provider(feed_type, "Test Provider", url, config)
+            return provider.fetch_releases()
+        releases = await asyncio.to_thread(_test)
         items = [r.to_dict() for r in releases]
         return JSONResponse({"status": "success", "count": len(items), "items": items})
     except Exception as e:

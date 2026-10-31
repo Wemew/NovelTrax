@@ -1,12 +1,13 @@
 import os
 import json
 import logging
+import concurrent.futures
 from typing import Optional, List, Dict, Any
 
 try:
-    from apscheduler.schedulers.asyncio import AsyncIOScheduler
+    from apscheduler.schedulers.background import BackgroundScheduler
 except ImportError:
-    class AsyncIOScheduler:
+    class BackgroundScheduler:
         def __init__(self, *args, **kwargs):
             self.running = False
             self.jobs = {}
@@ -34,7 +35,8 @@ class TaskManager:
         self.calibre_path = calibre_path
         default_data_dir = os.getenv("DATA_DIR") or os.path.dirname(os.path.abspath(db.db_path))
         self.cover_cache = CoverCache(data_dir or default_data_dir)
-        self.scheduler = AsyncIOScheduler()
+        self.scheduler = BackgroundScheduler()
+        self._cover_executor = concurrent.futures.ThreadPoolExecutor(max_workers=3, thread_name_prefix="noveltrax-covers")
         self.is_syncing_calibre = False
         self.is_checking_feeds = False
         self.is_backfilling = False
@@ -109,6 +111,7 @@ class TaskManager:
 
     def stop(self):
         self.scheduler.shutdown(wait=False)
+        self._cover_executor.shutdown(wait=False)
 
     def sync_calibre(self) -> Dict[str, Any]:
         """
@@ -257,9 +260,12 @@ class TaskManager:
 
                         is_new, rel_id = self.db.upsert_release(rel_dict)
 
-                        # Pre-cache cover image locally in background
+                        # Pre-cache cover image asynchronously without blocking feed scanning
                         if r.cover_url:
-                            self.cover_cache.cache_sync(r.cover_url)
+                            try:
+                                self._cover_executor.submit(self.cover_cache.cache_sync, r.cover_url)
+                            except Exception:
+                                pass
 
                         if is_new and status == "REQUESTED":
                             total_requested += 1

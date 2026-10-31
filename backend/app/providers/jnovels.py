@@ -489,91 +489,91 @@ class JNovelsProvider(BaseFeedProvider):
             if not html_text:
                 break
 
-                soup = BeautifulSoup(html_text, "html.parser")
+            soup = BeautifulSoup(html_text, "html.parser")
 
-                # Typical WordPress themes enclose search results in <article> elements
-                articles = soup.find_all("article")
-                if not articles:
-                    articles = soup.select(".post, .type-post, .entry, .search-entry")
+            # Typical WordPress themes enclose search results in <article> elements
+            articles = soup.find_all("article")
+            if not articles:
+                articles = soup.select(".post, .type-post, .entry, .search-entry")
 
-                if not articles:
-                    logger.info(f"No more articles found on page {page_num}. Ending pagination.")
-                    break
+            if not articles:
+                logger.info(f"No more articles found on page {page_num}. Ending pagination.")
+                break
 
-                page_new_count = 0
-                for art in articles:
-                    # Title & Link
-                    title_tag = art.select_one(".entry-title a, h2 a, h1 a, .post-title a")
-                    if not title_tag:
-                        continue
-
-                    raw_title = title_tag.get_text(strip=True)
-                    link = title_tag.get("href", "").strip()
-                    if not raw_title or not link or link in seen_links:
-                        continue
-
-                    # Strictly ignore PDF releases
-                    if is_pdf_release(raw_title, link):
-                        continue
-
-                    seen_links.add(link)
-                    page_new_count += 1
-
-                    # Cover Image
-                    img_tag = art.select_one("img.wp-post-image, img.attachment-post-thumbnail, .post-thumbnail img, img")
-                    cover_url = None
-                    if img_tag:
-                        cover_url = img_tag.get("src") or img_tag.get("data-src") or img_tag.get("data-lazy-src")
-
-                    # Date
-                    date_tag = art.select_one("time.entry-date, time.published, time")
-                    pub_date = None
-                    if date_tag:
-                        pub_date = date_tag.get("datetime") or date_tag.get_text(strip=True)
-
-                    # Summary / Description
-                    summary_tag = art.select_one(".entry-summary, .entry-content, p")
-                    desc = summary_tag.get_text(strip=True) if summary_tag else ""
-
-                    # Extract series name and volume number
-                    parsed = extract_series_and_volume(raw_title)
-                    series_name = parsed["series_name"]
-
-                    # Determine series link on J-Novels
-                    series_link = None
-                    cat_tag = art.select_one(".cat-links a, .entry-categories a, a[rel='category tag'], .tags-links a")
-                    if cat_tag and cat_tag.get("href"):
-                        cat_text = cat_tag.get_text(strip=True).lower()
-                        # Avoid generic tags
-                        if cat_text not in ["epub", "light novel", "pdf", "web novel", "uncategorized", "novels"]:
-                            series_link = cat_tag.get("href")
-
-                    if not series_link and series_name:
-                        from urllib.parse import quote_plus
-                        series_link = f"https://jnovels.com/?s={quote_plus(series_name)}"
-
-                    results.append(ReleaseItem(
-                        title=raw_title,
-                        link=link,
-                        series_name=series_name,
-                        volume=parsed["volume"],
-                        pub_date=pub_date,
-                        cover_url=cover_url,
-                        description=desc,
-                        series_link=series_link,
-                        raw_data={"confidence": parsed["confidence"], "subtitle": parsed["subtitle"]}
-                    ))
-
-                # Find link to the next page
-                next_tag = soup.select_one("a.next, a.next.page-numbers, link[rel='next'], .nav-previous a")
-                if next_tag and next_tag.get("href"):
-                    current_url = next_tag.get("href")
-                else:
-                    page_num += 1
-                    current_url = self._build_paged_url(self.url, page_num)
+            page_new_count = 0
+            for art in articles:
+                # Title & Link
+                title_tag = art.select_one(".entry-title a, h2 a, h1 a, .post-title a")
+                if not title_tag:
                     continue
 
+                raw_title = title_tag.get_text(strip=True)
+                link = title_tag.get("href", "").strip()
+                if not raw_title or not link or link in seen_links:
+                    continue
+
+                # Strictly ignore PDF releases
+                if is_pdf_release(raw_title, link):
+                    continue
+
+                seen_links.add(link)
+                page_new_count += 1
+
+                # Cover Image
+                img_tag = art.select_one("img.wp-post-image, img.attachment-post-thumbnail, .post-thumbnail img, img")
+                cover_url = None
+                if img_tag:
+                    cover_url = img_tag.get("src") or img_tag.get("data-src") or img_tag.get("data-lazy-src")
+
+                # Date
+                date_tag = art.select_one("time.entry-date, time.published, time")
+                pub_date = None
+                if date_tag:
+                    pub_date = date_tag.get("datetime") or date_tag.get_text(strip=True)
+
+                # Summary / Description
+                summary_tag = art.select_one(".entry-summary, .entry-content, p")
+                desc = summary_tag.get_text(strip=True) if summary_tag else ""
+
+                # Extract series name and volume number
+                parsed = extract_series_and_volume(raw_title)
+                series_name = parsed["series_name"]
+
+                # Determine series link on J-Novels
+                series_link = None
+                cat_tag = art.select_one(".cat-links a, .entry-categories a, a[rel='category tag'], .tags-links a")
+                if cat_tag and cat_tag.get("href"):
+                    cat_text = cat_tag.get_text(strip=True).lower()
+                    # Avoid generic tags
+                    if cat_text not in ["epub", "light novel", "pdf", "web novel", "uncategorized", "novels"]:
+                        series_link = cat_tag.get("href")
+
+                if not series_link and series_name:
+                    from urllib.parse import quote_plus
+                    series_link = f"https://jnovels.com/?s={quote_plus(series_name)}"
+
+                results.append(ReleaseItem(
+                    title=raw_title,
+                    link=link,
+                    series_name=series_name,
+                    volume=parsed["volume"],
+                    pub_date=pub_date,
+                    cover_url=cover_url,
+                    description=desc,
+                    series_link=series_link,
+                    raw_data={"confidence": parsed["confidence"], "subtitle": parsed["subtitle"]}
+                ))
+
+            # Find link to the next page
+            next_tag = soup.select_one("a.next, a.next.page-numbers, link[rel='next'], .nav-previous a")
+            if next_tag and next_tag.get("href"):
+                current_url = next_tag.get("href")
+            else:
                 page_num += 1
+                current_url = self._build_paged_url(self.url, page_num)
+                continue
+
+            page_num += 1
 
         return results
 
