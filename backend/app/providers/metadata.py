@@ -43,6 +43,14 @@ class NovelMetadataProvider:
         t = re.sub(r'\s+', ' ', t).strip(' :–—-_()[]')
         return t
 
+    @staticmethod
+    def clean_novel_title(t: str) -> str:
+        """Removes '(Novel)' or '(Light Novel)' suffixes from canonical titles."""
+        if not t:
+            return ""
+        t = re.sub(r'\s*\((Novel|Light Novel)\)', '', t, flags=re.I)
+        return t.strip()
+
     @classmethod
     def query_kitsu(cls, cleaned_title: str) -> Optional[Dict[str, Any]]:
         """Queries Kitsu JSON:API for light novels and translated web novels."""
@@ -72,11 +80,17 @@ class NovelMetadataProvider:
         synopsis = attr.get("synopsis")
         poster = attr.get("posterImage", {})
         cover = poster.get("large") or poster.get("original") or poster.get("medium")
+        titles_obj = attr.get("titles", {})
+        en_title = titles_obj.get("en") or titles_obj.get("en_us")
         canonical_title = attr.get("canonicalTitle")
+
+        preferred_title = cls.clean_novel_title(en_title or canonical_title)
+        clean_en = cls.clean_novel_title(en_title) if en_title else None
 
         if synopsis and len(synopsis.strip()) > 20:
             return {
-                "title": canonical_title,
+                "title": preferred_title,
+                "english_title": clean_en,
                 "synopsis": synopsis.strip(),
                 "cover_url": cover,
                 "source": "Kitsu"
@@ -132,11 +146,16 @@ class NovelMetadataProvider:
         cover_img = media.get("coverImage", {})
         cover = cover_img.get("large") or cover_img.get("extraLarge")
         title_obj = media.get("title", {})
-        canonical_title = title_obj.get("english") or title_obj.get("romaji")
+        en_title = title_obj.get("english")
+        romaji_title = title_obj.get("romaji")
+
+        preferred_title = cls.clean_novel_title(en_title or romaji_title)
+        clean_en = cls.clean_novel_title(en_title) if en_title else None
 
         if desc and len(desc) > 20:
             return {
-                "title": canonical_title,
+                "title": preferred_title,
+                "english_title": clean_en,
                 "synopsis": desc,
                 "cover_url": cover,
                 "source": "AniList"
@@ -148,29 +167,43 @@ class NovelMetadataProvider:
         """
         Unified metadata fetcher:
         1. Normalizes novel title.
-        2. Tries Kitsu API (covers both Light Novels & Web Novels).
-        3. Falls back to AniList GraphQL API (Japanese Light Novels).
+        2. Queries AniList and Kitsu.
+        3. Prioritizes English title if multiple are available.
         """
         cleaned = cls.clean_search_title(raw_title)
         if not cleaned:
             return None
 
-        # 1. Try Kitsu
-        try:
-            kitsu_res = cls.query_kitsu(cleaned)
-            if kitsu_res and kitsu_res.get("synopsis"):
-                logger.info(f"Retrieved novel metadata for '{cleaned}' from Kitsu.")
-                return kitsu_res
-        except Exception as e:
-            logger.debug(f"Kitsu metadata query failed for '{cleaned}': {e}")
-
-        # 2. Try AniList fallback
+        # 1. Try AniList first (official curated English titles for light novels)
+        anilist_res = None
         try:
             anilist_res = cls.query_anilist(cleaned)
-            if anilist_res and anilist_res.get("synopsis"):
-                logger.info(f"Retrieved novel metadata for '{cleaned}' from AniList.")
-                return anilist_res
         except Exception as e:
-            logger.debug(f"AniList metadata query failed for '{cleaned}': {e}")
+            logger.debug(f"AniList query failed for '{cleaned}': {e}")
+
+        # If AniList has an English title and synopsis, return it
+        if anilist_res and anilist_res.get("english_title") and anilist_res.get("synopsis"):
+            logger.info(f"Retrieved novel metadata for '{cleaned}' from AniList with English title '{anilist_res['english_title']}'.")
+            return anilist_res
+
+        # 2. Try Kitsu (covers web novels, manhwa, danmei, and light novels)
+        kitsu_res = None
+        try:
+            kitsu_res = cls.query_kitsu(cleaned)
+        except Exception as e:
+            logger.debug(f"Kitsu query failed for '{cleaned}': {e}")
+
+        # If Kitsu has an English title and synopsis, return it
+        if kitsu_res and kitsu_res.get("english_title") and kitsu_res.get("synopsis"):
+            logger.info(f"Retrieved novel metadata for '{cleaned}' from Kitsu with English title '{kitsu_res['english_title']}'.")
+            return kitsu_res
+
+        # If neither had an explicit English title, return whichever found a synopsis
+        if anilist_res and anilist_res.get("synopsis"):
+            return anilist_res
+        if kitsu_res and kitsu_res.get("synopsis"):
+            return kitsu_res
+
+        return None
 
         return None

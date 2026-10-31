@@ -432,6 +432,7 @@ async def api_fetch_synopsis(release_id: int):
         details = {
             "synopsis": meta.get("synopsis") if meta else None,
             "cover_url": meta.get("cover_url") if meta else None,
+            "english_title": meta.get("title") if meta else None,
             "series_link": None
         }
     else:
@@ -441,11 +442,24 @@ async def api_fetch_synopsis(release_id: int):
             series_name=row["series_name"] or row["title"]
         )
 
+    new_series_name = details.get("english_title") or row["series_name"]
+    new_title = None
+    if details.get("english_title") and row.get("title"):
+        if any(v in row["title"].lower() for v in ("volume", "vol.", "vol ")):
+            from app.parser import extract_series_and_volume
+            parsed = extract_series_and_volume(row["title"])
+            vol = parsed.get("volume")
+            new_title = f"{new_series_name} Vol. {vol}" if vol is not None else f"{new_series_name} (Light Novel)"
+        else:
+            new_title = f"{new_series_name} (Light Novel)"
+
     db.update_release_details(
         release_id,
         description=details.get("synopsis"),
         series_link=details.get("series_link"),
-        cover_url=details.get("cover_url")
+        cover_url=details.get("cover_url"),
+        series_name=new_series_name,
+        title=new_title
     )
     if details.get("cover_url"):
         task_manager.cover_cache.cache_sync(details["cover_url"])
@@ -454,7 +468,9 @@ async def api_fetch_synopsis(release_id: int):
         "status": "success",
         "synopsis": details.get("synopsis"),
         "series_link": details.get("series_link"),
-        "cover_url": details.get("cover_url")
+        "cover_url": details.get("cover_url"),
+        "series_name": new_series_name,
+        "title": new_title or row.get("title")
     })
 
 @app.post("/api/series/{series_id}/fetch-info")

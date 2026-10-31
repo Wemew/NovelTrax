@@ -275,35 +275,40 @@ class JNovelsProvider(BaseFeedProvider):
         # If url itself was already the main series page, orig_link is url
         final_series_link = orig_link or (url if not any(v in url.lower() for v in ('volume', 'vol-', 'vol.')) else None)
 
-        # 4. Fallback to Kitsu / AniList community novel databases if synopsis or cover is missing
-        if not synopsis or not cover_url:
-            search_title = series_name
-            if not search_title and soup:
-                title_tag = soup.select_one("h1.entry-title, h1.post-title, h1, title")
-                if title_tag:
-                    search_title = title_tag.get_text(strip=True)
-            if not search_title and url:
-                parsed_slug = re.sub(r'https?://[^/]+/', '', url).replace('-', ' ').strip('/')
-                search_title = parsed_slug
+        # 4. PRIMARY: Query AniList & Kitsu for official metadata (prioritizing English title)
+        search_title = series_name
+        if not search_title and soup:
+            title_tag = soup.select_one("h1.entry-title, h1.post-title, h1, title")
+            if title_tag:
+                search_title = title_tag.get_text(strip=True)
+        if not search_title and url:
+            parsed_slug = re.sub(r'https?://[^/]+/', '', url).replace('-', ' ').strip('/')
+            search_title = parsed_slug
 
-            if search_title:
-                try:
-                    from app.providers.metadata import NovelMetadataProvider
-                    meta = NovelMetadataProvider.fetch_novel_metadata(search_title)
-                    if meta:
-                        if not synopsis and meta.get("synopsis"):
-                            synopsis = meta["synopsis"]
-                            logger.info(f"Enriched synopsis for '{search_title}' using {meta.get('source')}.")
-                        if not cover_url and meta.get("cover_url"):
-                            cover_url = meta["cover_url"]
-                            logger.info(f"Enriched cover for '{search_title}' using {meta.get('source')}.")
-                except Exception as e:
-                    logger.debug(f"External metadata query failed for '{search_title}': {e}")
+        meta = None
+        if search_title:
+            try:
+                from app.providers.metadata import NovelMetadataProvider
+                meta = NovelMetadataProvider.fetch_novel_metadata(search_title)
+            except Exception as e:
+                logger.debug(f"External metadata query failed for '{search_title}': {e}")
+
+        # Use AniList/Kitsu metadata if found; otherwise retain source scraped values as fallback
+        if meta and meta.get("synopsis"):
+            synopsis = meta["synopsis"]
+            logger.info(f"Enriched synopsis for '{search_title}' using {meta.get('source')}.")
+        if meta and meta.get("cover_url"):
+            cover_url = meta["cover_url"]
+            logger.info(f"Enriched cover for '{search_title}' using {meta.get('source')}.")
+
+        english_title = meta.get("title") if meta else None
 
         return {
             "series_link": final_series_link,
             "synopsis": synopsis,
-            "cover_url": cover_url
+            "cover_url": cover_url,
+            "english_title": english_title,
+            "metadata_source": meta.get("source") if meta else None
         }
 
     @staticmethod

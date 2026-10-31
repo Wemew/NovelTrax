@@ -88,7 +88,7 @@
                 <div>
                     <!-- Top series & volume badge -->
                     <div class="flex items-start justify-between gap-2 mb-2">
-                        <span class="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-bold bg-amber-500/10 text-amber-400 border border-amber-500/20">
+                        <span id="series-badge-{{ item.id }}" class="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-bold bg-amber-500/10 text-amber-400 border border-amber-500/20">
                             {{ item.series_name or 'Standalone Novel' }}
                         </span>
                         <span class="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-bold {% if item.volume == 1.0 %}bg-brand-500/15 text-brand-300 border border-brand-500/30{% else %}bg-slate-800 text-slate-300 border border-slate-700{% endif %}">
@@ -108,7 +108,7 @@
                         {% endif %}
 
                         <div class="min-w-0 flex-1">
-                            <h3 class="text-sm font-bold text-white line-clamp-2 group-hover:text-brand-400 transition-colors" title="{{ item.title }}">
+                            <h3 id="title-heading-{{ item.id }}" class="text-sm font-bold text-white line-clamp-2 group-hover:text-brand-400 transition-colors" title="{{ item.title }}">
                                 {{ item.title }}
                             </h3>
                             <p class="text-[11px] text-slate-400 mt-1 flex items-center gap-1">
@@ -151,11 +151,11 @@
                     </div>
 
                     <div class="grid grid-cols-2 gap-2">
-                        <button data-series-name="{{ item.series_name }}" data-release-id="{{ item.id }}" onclick="handleTrackBtn(this)" class="w-full px-3 py-2 rounded-xl bg-brand-600 hover:bg-brand-500 text-white font-bold text-xs flex items-center justify-center gap-1.5 transition-all shadow-md shadow-brand-600/20 active:scale-95" title="Track this series and add to Calibre wishlist">
+                        <button id="track-btn-{{ item.id }}" data-series-name="{{ item.series_name }}" data-release-id="{{ item.id }}" onclick="handleTrackBtn(this)" class="w-full px-3 py-2 rounded-xl bg-brand-600 hover:bg-brand-500 text-white font-bold text-xs flex items-center justify-center gap-1.5 transition-all shadow-md shadow-brand-600/20 active:scale-95" title="Track this series and add to Calibre wishlist">
                             <i data-lucide="bookmark-plus" class="w-3.5 h-3.5"></i>
                             Track Series
                         </button>
-                        <button data-series-name="{{ item.series_name }}" onclick="handleBlacklistBtn(this)" class="w-full px-3 py-2 rounded-xl bg-slate-800 hover:bg-rose-500/20 text-slate-300 hover:text-rose-400 border border-slate-700 hover:border-rose-500/30 font-bold text-xs flex items-center justify-center gap-1.5 transition-all active:scale-95" title="Blacklist series: never track or notify for future releases">
+                        <button id="blacklist-btn-{{ item.id }}" data-series-name="{{ item.series_name }}" onclick="handleBlacklistBtn(this)" class="w-full px-3 py-2 rounded-xl bg-slate-800 hover:bg-rose-500/20 text-slate-300 hover:text-rose-400 border border-slate-700 hover:border-rose-500/30 font-bold text-xs flex items-center justify-center gap-1.5 transition-all active:scale-95" title="Blacklist series: never track or notify for future releases">
                             <i data-lucide="ban" class="w-3.5 h-3.5 text-rose-400"></i>
                             Blacklist
                         </button>
@@ -494,7 +494,22 @@
                         coverBox.outerHTML = `<img src="/api/covers?url=${encodeURIComponent(data.cover_url)}" alt="Cover" loading="lazy" onclick="openImageModal(this.src, '')" class="w-16 h-24 object-cover rounded-lg border border-slate-800 flex-shrink-0 shadow-md cursor-pointer hover:opacity-85 hover:scale-[1.03] transition-all" title="Click to enlarge thumbnail">`;
                     }
                 }
-                showToast('Description updated successfully!', 'success');
+                if (data.series_name) {
+                    const badge = document.getElementById(`series-badge-${releaseId}`);
+                    if (badge) badge.textContent = data.series_name;
+                    const trackBtn = document.getElementById(`track-btn-${releaseId}`);
+                    if (trackBtn) trackBtn.dataset.seriesName = data.series_name;
+                    const blBtn = document.getElementById(`blacklist-btn-${releaseId}`);
+                    if (blBtn) blBtn.dataset.seriesName = data.series_name;
+                }
+                if (data.title) {
+                    const heading = document.getElementById(`title-heading-${releaseId}`);
+                    if (heading) {
+                        heading.textContent = data.title;
+                        heading.title = data.title;
+                    }
+                }
+                showToast('Description & English title updated successfully!', 'success');
             } else {
                 btn.innerHTML = '<span class="text-slate-500">Not found on page</span>';
             }

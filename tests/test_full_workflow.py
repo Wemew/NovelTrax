@@ -444,7 +444,36 @@ def run_e2e_test():
     assert NovelMetadataProvider.clean_search_title("DanMachi Volume 19 Epub") == "DanMachi"
     assert NovelMetadataProvider.clean_search_title("Overlord Volume 16") == "Overlord"
     assert NovelMetadataProvider.clean_search_title("Solo Leveling Volume 1 Epub") == "Solo Leveling"
-    print("  ✓ NovelMetadataProvider: title normalizer cleanly strips release cruft")
+    assert NovelMetadataProvider.clean_novel_title("The Disabled Tyrant's Beloved Pet Fish (Novel)") == "The Disabled Tyrant's Beloved Pet Fish"
+    print("  ✓ NovelMetadataProvider: title normalizer cleanly strips release cruft and prioritizes clean English titles")
+
+    # Verify release details update with English series name and title
+    app_db.update_release_details(
+        6,
+        description="Official English synopsis from AniList.",
+        series_name="Is It Wrong to Try to Pick Up Girls in a Dungeon?",
+        title="Is It Wrong to Try to Pick Up Girls in a Dungeon? (Light Novel)",
+        cover_url="https://s4.anilist.co/danmachi-large.jpg"
+    )
+    with app_db.get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT series_name, title, description, cover_url FROM releases WHERE id = 6;")
+        r6 = cur.fetchone()
+        assert r6["series_name"] == "Is It Wrong to Try to Pick Up Girls in a Dungeon?"
+        assert r6["title"] == "Is It Wrong to Try to Pick Up Girls in a Dungeon? (Light Novel)"
+        assert r6["description"] == "Official English synopsis from AniList."
+    print("  ✓ Database correctly stores English series_name, title, and synopsis")
+
+    # Verify tracking carries over description and cover
+    app_db.track_discovered_series("Is It Wrong to Try to Pick Up Girls in a Dungeon?", release_id=6)
+    with app_db.get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT description, cover_url FROM series_tracking WHERE name = 'Is It Wrong to Try to Pick Up Girls in a Dungeon?';")
+        st = cur.fetchone()
+        assert st is not None
+        assert st["description"] == "Official English synopsis from AniList."
+        assert st["cover_url"] == "https://s4.anilist.co/danmachi-large.jpg"
+    print("  ✓ track_discovered_series carries over metadata description and cover into series_tracking")
 
     # Verify fallback integration when post has no synopsis
     sample_empty_post = """

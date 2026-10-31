@@ -556,7 +556,7 @@ class Database:
             """, (limit,))
             return [dict(row) for row in cur.fetchall()]
 
-    def update_release_details(self, release_id: int, description: Optional[str] = None, series_link: Optional[str] = None, cover_url: Optional[str] = None):
+    def update_release_details(self, release_id: int, description: Optional[str] = None, series_link: Optional[str] = None, cover_url: Optional[str] = None, title: Optional[str] = None, series_name: Optional[str] = None):
         with self.get_connection() as conn:
             cur = conn.cursor()
             cur.execute("""
@@ -564,16 +564,18 @@ class Database:
                 SET description = COALESCE(?, description),
                     series_link = COALESCE(?, series_link),
                     cover_url = COALESCE(?, cover_url),
+                    title = COALESCE(?, title),
+                    series_name = COALESCE(?, series_name),
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?;
-            """, (description, series_link, cover_url, release_id))
+            """, (description, series_link, cover_url, title, series_name, release_id))
             conn.commit()
 
     def track_discovered_series(self, series_name: str, release_id: Optional[int] = None) -> bool:
         """
         Adds a discovered series to series_tracking (monitored = 1) and
         updates associated release status to REQUESTED.
-        Preserves canonical series hub link if present.
+        Preserves canonical series hub link, synopsis, and cover if present.
         """
         clean_name = series_name.strip()
         if not clean_name:
@@ -582,21 +584,28 @@ class Database:
         with self.get_connection() as conn:
             cur = conn.cursor()
             default_link = f"https://jnovels.com/?s={quote_plus(clean_name)}"
+            desc = None
+            cover = None
 
-            # If release has a canonical series_link, use it
+            # If release has a canonical series_link, description, or cover, carry them over
             if release_id:
-                cur.execute("SELECT series_link FROM releases WHERE id = ?;", (release_id,))
+                cur.execute("SELECT series_link, description, cover_url FROM releases WHERE id = ?;", (release_id,))
                 row = cur.fetchone()
-                if row and row["series_link"]:
-                    default_link = row["series_link"]
+                if row:
+                    if row["series_link"]:
+                        default_link = row["series_link"]
+                    desc = row["description"]
+                    cover = row["cover_url"]
 
             cur.execute("""
-                INSERT INTO series_tracking (name, book_count, latest_index, is_monitored, website_url, last_sync)
-                VALUES (?, 0, 0.0, 1, ?, CURRENT_TIMESTAMP)
+                INSERT INTO series_tracking (name, book_count, latest_index, is_monitored, website_url, description, cover_url, last_sync)
+                VALUES (?, 0, 0.0, 1, ?, ?, ?, CURRENT_TIMESTAMP)
                 ON CONFLICT(name) DO UPDATE SET 
                     is_monitored = 1,
+                    description = COALESCE(excluded.description, series_tracking.description),
+                    cover_url = COALESCE(excluded.cover_url, series_tracking.cover_url),
                     website_url = CASE WHEN series_tracking.website_url = '' OR series_tracking.website_url IS NULL OR series_tracking.website_url LIKE '%?s=%' THEN excluded.website_url ELSE series_tracking.website_url END;
-            """, (clean_name, default_link))
+            """, (clean_name, default_link, desc, cover))
 
             if release_id:
                 cur.execute("UPDATE releases SET status = 'REQUESTED', updated_at = CURRENT_TIMESTAMP WHERE id = ?;", (release_id,))

@@ -350,23 +350,35 @@ class TaskManager:
                     if self.stop_backfill_requested:
                         break
 
-                    target_url = d.get("series_link") or d.get("link")
-                    if target_url:
-                        self.db.set_setting("backfill_progress", f"Enriching synopsis {idx}/{total_to_enrich}: {d.get('series_name')}")
-                        details = await asyncio.to_thread(
-                            JNovelsProvider.extract_synopsis_and_original_link, 
-                            target_url, 
-                            series_name=d.get('series_name')
+                    target_url = d.get("series_link") or d.get("link") or ""
+                    self.db.set_setting("backfill_progress", f"Enriching synopsis {idx}/{total_to_enrich}: {d.get('series_name')}")
+                    details = await asyncio.to_thread(
+                        JNovelsProvider.extract_synopsis_and_original_link, 
+                        target_url, 
+                        series_name=d.get('series_name')
+                    )
+                    new_series_name = details.get("english_title") or d.get("series_name")
+                    new_title = None
+                    if details.get("english_title") and d.get("title"):
+                        if any(v in d["title"].lower() for v in ("volume", "vol.", "vol ")):
+                            from app.parser import extract_series_and_volume
+                            parsed = extract_series_and_volume(d["title"])
+                            vol = parsed.get("volume")
+                            new_title = f"{new_series_name} Vol. {vol}" if vol is not None else f"{new_series_name} (Light Novel)"
+                        else:
+                            new_title = f"{new_series_name} (Light Novel)"
+
+                    if details.get("synopsis") or details.get("series_link") or details.get("cover_url") or (new_series_name and new_series_name != d.get("series_name")):
+                        self.db.update_release_details(
+                            d["id"],
+                            description=details.get("synopsis"),
+                            series_link=details.get("series_link"),
+                            cover_url=details.get("cover_url"),
+                            series_name=new_series_name,
+                            title=new_title
                         )
-                        if details.get("synopsis") or details.get("series_link") or details.get("cover_url"):
-                            self.db.update_release_details(
-                                d["id"],
-                                description=details.get("synopsis"),
-                                series_link=details.get("series_link"),
-                                cover_url=details.get("cover_url")
-                            )
-                            if details.get("cover_url"):
-                                self.cover_cache.cache_sync(details["cover_url"])
+                        if details.get("cover_url"):
+                            self.cover_cache.cache_sync(details["cover_url"])
 
                     await asyncio.sleep(delay_seconds)
 
