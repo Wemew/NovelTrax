@@ -8,7 +8,7 @@ except ImportError:
     httpx = None
 from bs4 import BeautifulSoup
 from app.providers.base import BaseFeedProvider, ReleaseItem
-from app.parser import extract_series_and_volume
+from app.parser import extract_series_and_volume, is_pdf_release
 
 logger = logging.getLogger("noveltrax.providers.html_scraper")
 
@@ -88,6 +88,10 @@ class HtmlScraperProvider(BaseFeedProvider):
                     if not link or link in seen_links:
                         continue
                     seen_links.add(link)
+
+                    # Strictly reject PDF releases
+                    if is_pdf_release(raw_title, link):
+                        continue
 
                     # Cover image
                     cover_url = None

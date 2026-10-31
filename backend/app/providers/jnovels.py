@@ -9,7 +9,7 @@ except ImportError:
     httpx = None
 from bs4 import BeautifulSoup
 from app.providers.base import BaseFeedProvider, ReleaseItem
-from app.parser import extract_series_and_volume
+from app.parser import extract_series_and_volume, is_pdf_release
 
 logger = logging.getLogger("noveltrax.providers.jnovels")
 
@@ -401,6 +401,10 @@ class JNovelsProvider(BaseFeedProvider):
                     if not raw_title or not link or link in seen_links:
                         continue
 
+                    # Strictly ignore PDF releases
+                    if is_pdf_release(raw_title, link):
+                        continue
+
                     seen_links.add(link)
                     page_new_count += 1
 
@@ -479,6 +483,10 @@ class JNovelsProvider(BaseFeedProvider):
             raw_title = entry.get("title", "")
             link = entry.get("link", "")
             if not raw_title or not link:
+                continue
+
+            # Strictly ignore PDF releases
+            if is_pdf_release(raw_title, link):
                 continue
 
             pub_date = entry.get("published") or entry.get("updated")

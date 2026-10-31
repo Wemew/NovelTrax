@@ -28,12 +28,73 @@ def string_similarity(a: str, b: str) -> float:
         return 1.0
     return SequenceMatcher(None, norm_a, norm_b).ratio()
 
+def is_pdf_release(raw_title: Optional[str] = None, link: Optional[str] = None, guid: Optional[str] = None) -> bool:
+    """
+    Determines if a release is a PDF release based on title, URL, or guid.
+    NovelTrax tracks digital novels/EPUBs and strictly ignores PDF releases.
+    """
+    text_to_check = f"{raw_title or ''} {link or ''} {guid or ''}".lower()
+    if not text_to_check.strip():
+        return False
+    # Check if ends with .pdf or has .pdf in extension
+    if re.search(r'\.pdf(?:\?|#|$)', text_to_check):
+        return True
+    # Check if contains /pdf/ or format=pdf in url
+    if link and ('/pdf/' in link.lower() or 'format=pdf' in link.lower()):
+        return True
+    # Check for PDF tag in parens or brackets: (PDF), [PDF], (PDF+EPUB), etc.
+    if raw_title and re.search(r'[\(\[]\s*pdf\s*[\)\]]', raw_title, re.I):
+        return True
+    # Check for standalone word "pdf"
+    if raw_title and re.search(r'\bpdf\b', raw_title, re.I):
+        return True
+    return False
+
+def should_merge_series(name_a: str, name_b: str) -> bool:
+    """
+    Determines if two series names refer to the same underlying series
+    (e.g., '86' and '86-Eighty Six', or 'Tenkyou no Alderamin' and 'Tenkyou no Alderamin (Alderamin On The Sky)').
+    """
+    if not name_a or not name_b:
+        return False
+    norm_a = normalize_text(name_a)
+    norm_b = normalize_text(name_b)
+    if not norm_a or not norm_b:
+        return False
+    if norm_a == norm_b:
+        return True
+
+    # Check high string similarity
+    if string_similarity(norm_a, norm_b) >= 0.85:
+        return True
+
+    # Check word token subset / containment (e.g. '86' and '86 eighty six')
+    tokens_a = set(norm_a.split())
+    tokens_b = set(norm_b.split())
+
+    stopwords = {"the", "a", "an", "in", "to", "of", "and", "is", "no", "on", "for"}
+    sig_a = tokens_a - stopwords
+    sig_b = tokens_b - stopwords
+
+    if sig_a and sig_b:
+        # If the significant words of one is entirely contained in the other
+        if sig_a.issubset(sig_b) or sig_b.issubset(sig_a):
+            # Ensure at least one token is distinctive (digits or length >= 2)
+            shorter = sig_a if len(sig_a) <= len(sig_b) else sig_b
+            if any(t.isdigit() or len(t) >= 2 for t in shorter):
+                return True
+
+    return False
+
 def clean_feed_title(raw_title: str) -> str:
     """Strip web novel / download tags like [EPUB], (PDF), Free Download, etc. while preserving volume markers."""
     if not raw_title:
         return ""
     
     cleaned = raw_title.strip()
+
+    # Strip leading download / site prefixes
+    cleaned = re.sub(r'^(?:\s*download|\s*free\s+download|\s*read|\s*get)\s*[:\-–—]?\s*', '', cleaned, flags=re.IGNORECASE)
 
     # Strip file extensions if present
     cleaned = re.sub(r"\.(?:epub|pdf|mobi|azw3|zip|rar)$", "", cleaned, flags=re.IGNORECASE)
@@ -48,7 +109,7 @@ def clean_feed_title(raw_title: str) -> str:
         # If it's a year or year range like (2020), (2020-2022)
         if re.match(r"^(?:19|20)\d{2}(?:\s*[-–—~to]+\s*(?:19|20)\d{2})?$", unbracketed):
             return " "
-        has_vol = re.search(r"(?:vol\.?|volume|v|books?)\s*\d+", unbracketed, re.IGNORECASE)
+        has_vol = re.search(r"(?:vol\.?|volume|v|books?|part|pt\.?)\s*\d+", unbracketed, re.IGNORECASE)
         has_range = re.search(r"\b\d+\s*[-–—~to]+\s*\d+\b", unbracketed, re.IGNORECASE)
         if has_vol or (has_range and not re.search(r"(?:19|20)\d{2}", unbracketed)):
             return f" {unbracketed} "
@@ -67,6 +128,9 @@ def clean_feed_title(raw_title: str) -> str:
     ]
     for bw in buzzwords:
         cleaned = re.sub(bw, " ", cleaned, flags=re.IGNORECASE)
+
+    # Strip bundle suffixes like 'all volumes', 'complete series'
+    cleaned = re.sub(r'\b(?:all\s+volumes?|complete\s+(?:series|collection|set)?|box\s*set)\b', ' ', cleaned, flags=re.IGNORECASE)
     
     # Clean leading and trailing punctuation & spaces
     cleaned = re.sub(r"^[\s\-–—:;,|]+|[\s\-–—:;,|]+$", "", cleaned)
@@ -170,19 +234,20 @@ def extract_series_and_volume(raw_title: str) -> Dict[str, Any]:
                 "confidence": 0.95
             }
 
-    # Pattern 1: Explicit volume/book keywords:
-    # e.g., "DanMachi Volume 19", "Overlord Vol. 16", "The Eminence in Shadow v6", "Dungeon Crawler Carl Book 7: Subtitle"
-    # Matches: Series + [delimiter] + (Volume|Vol|v|Book) + Number + [optional subtitle]
+    # Pattern 1: Explicit volume/book/part keywords:
+    # e.g., "DanMachi Volume 19", "Overlord Vol. 16", "The Eminence in Shadow v6", "Dungeon Crawler Carl Book 7: Subtitle", "Avatar Korra Turf Wars Part 1"
+    # Matches: Series + [delimiter] + (Volume|Vol|v|Book|Part|Pt) + Number + [optional subtitle]
     p1 = re.compile(
         r"^(?P<series>.+?)\s*(?:[-–—:,]\s*)?"
-        r"(?:\b(?:volume|vol|book)\b|\bvol\.|\bv)(?:\s*|\.)(?P<vol>\d+(?:\.\d+)?)"
+        r"(?:\b(?:volume|vol|book|part|pt)\b\.?|\bv\.?)(?:\s*|\.)(?P<vol>\d+(?:\.\d+)?)"
         r"(?:\s*[:\-–—]\s*(?P<subtitle>.*))?$",
         re.IGNORECASE
     )
     m1 = p1.match(cleaned)
     if m1:
         series = m1.group("series").strip(" -–—:,|")
-        series = re.sub(r"(?i)\b(?:volume|vol\.?|book)\b$", "", series).strip(" -–—:,|")
+        series = re.sub(r"(?i)\b(?:volume|vol\.?|book|part|pt\.?)\b$", "", series).strip(" -–—:,|")
+        series = re.sub(r'^(?:\s*download|\s*free\s+download|\s*read|\s*get)\s*[:\-–—]?\s*', '', series, flags=re.IGNORECASE).strip(" -–—:,|")
         vol_str = m1.group("vol")
         subtitle = (m1.group("subtitle") or "").strip(" -–—:,|")
         try:
@@ -213,6 +278,7 @@ def extract_series_and_volume(raw_title: str) -> Dict[str, Any]:
     m2 = p2.match(cleaned)
     if m2:
         series = m2.group("series").strip(" -–—:,|")
+        series = re.sub(r'^(?:\s*download|\s*free\s+download|\s*read|\s*get)\s*[:\-–—]?\s*', '', series, flags=re.IGNORECASE).strip(" -–—:,|")
         vol_str = m2.group("vol")
         subtitle = (m2.group("subtitle") or "").strip(" -–—:,|")
         try:
@@ -236,13 +302,14 @@ def extract_series_and_volume(raw_title: str) -> Dict[str, Any]:
 
     # Pattern 3: Chapter / Volume hybrid: "Series Name - Volume 3 Chapter 12"
     p3 = re.compile(
-        r"^(?P<series>.+?)\s*[-–—:]\s*(?:Volume|Vol\.?|v)\s*(?P<vol>\d+(?:\.\d+)?)"
+        r"^(?P<series>.+?)\s*[-–—:]\s*(?:Volume|Vol\.?|v|Book|Part)\s*(?P<vol>\d+(?:\.\d+)?)"
         r"(?:\s*(?:Chapter|c)\s*(?P<chap>\d+(?:\.\d+)?))?",
         re.IGNORECASE
     )
     m3 = p3.match(cleaned)
     if m3:
         series = m3.group("series").strip(" -–—:,|")
+        series = re.sub(r'^(?:\s*download|\s*free\s+download|\s*read|\s*get)\s*[:\-–—]?\s*', '', series, flags=re.IGNORECASE).strip(" -–—:,|")
         vol_str = m3.group("vol")
         try:
             vol = float(vol_str)
@@ -262,10 +329,39 @@ def extract_series_and_volume(raw_title: str) -> Dict[str, Any]:
         except ValueError:
             pass
 
-    # Ensure series_name and clean_title have no dangling light novel / novel keywords
-    clean_series = re.sub(r'(?i)\s*\(?\b(light\s+novel|web\s+novel|novel|ln|wn)\b\)?', '', result["series_name"]).strip(" -–—:,|")
+    # Check if raw_title is an 'all volumes' / bundle release
+    if re.search(r'(?i)\b(?:all\s+volumes?|complete\s+(?:series|collection)?|box\s*set)\b', raw_title):
+        result["is_bundle"] = True
+        if result["volume"] is None:
+            result["volume"] = 1.0
+            result["volume_start"] = 1.0
+
+    # Fallback: if volume is still None and not a bundle, search for explicit volume keyword anywhere in raw_title
+    if result["volume"] is None and not result["is_bundle"]:
+        m_fallback = re.search(r'(?i)\b(?:volume|vol|book|part|pt)\b\.?\s*(\d+(?:\.\d+)?)', raw_title)
+        if m_fallback:
+            try:
+                v = float(m_fallback.group(1))
+                result["volume"] = v
+                result["volume_start"] = v
+                result["volume_end"] = v
+                result["volumes"] = [v]
+                result["confidence"] = 0.85
+                extracted_prefix = re.split(r'(?i)\b(?:volume|vol|book|part|pt)\b', result["series_name"])[0]
+                if extracted_prefix.strip(" -–—:,|"):
+                    result["series_name"] = extracted_prefix.strip(" -–—:,|")
+            except ValueError:
+                pass
+
+    # Ensure series_name and clean_title have no dangling light novel / novel / download / all volumes keywords
+    clean_series = result["series_name"]
+    clean_series = re.sub(r'^(?:\s*download|\s*free\s+download|\s*read|\s*get)\s*[:\-–—]?\s*', '', clean_series, flags=re.IGNORECASE)
+    clean_series = re.sub(r'(?i)\b(?:all\s+volumes?|complete\s+(?:series|collection|set)?|box\s*set)\b', '', clean_series)
+    clean_series = re.sub(r'(?i)\s*\(?\b(light\s+novel|web\s+novel|novel|ln|wn|epub|pdf)\b\)?', '', clean_series)
+    clean_series = re.sub(r'(?i)\s*\[?\b(light\s+novel|web\s+novel|novel|ln|wn|epub|pdf)\b\]?', '', clean_series)
+    clean_series = re.sub(r"(?i)\b(?:volume|vol\.?|book|part|pt\.?)\b$", "", clean_series).strip(" -–—:,|")
     result["series_name"] = clean_series
-    result["clean_title"] = re.sub(r'(?i)\s*\(?\b(light\s+novel|web\s+novel|novel|ln|wn)\b\)?', '', result["clean_title"]).strip(" -–—:,|")
+    result["clean_title"] = re.sub(r'(?i)\s*\(?\b(light\s+novel|web\s+novel|novel|ln|wn|epub|pdf)\b\)?', '', result["clean_title"]).strip(" -–—:,|")
     return result
 
 def match_series_in_calibre(extracted_series: str, calibre_series_list: list, threshold: float = 0.80) -> Optional[dict]:

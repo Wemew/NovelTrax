@@ -91,8 +91,8 @@
                         <span id="series-badge-{{ item.id }}" class="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-bold bg-amber-500/10 text-amber-400 border border-amber-500/20">
                             {{ item.series_name or 'Standalone Novel' }}
                         </span>
-                        <span class="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-bold {% if item.volume == 1.0 %}bg-brand-500/15 text-brand-300 border border-brand-500/30{% else %}bg-slate-800 text-slate-300 border border-slate-700{% endif %}">
-                            {{ 'Vol. 1' if item.volume == 1.0 else 'Standalone' }}
+                        <span class="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-bold {% if item.is_bundle %}bg-purple-500/15 text-purple-300 border border-purple-500/30{% elif item.volume == 1.0 %}bg-brand-500/15 text-brand-300 border border-brand-500/30{% else %}bg-slate-800 text-slate-300 border border-slate-700{% endif %}">
+                            {{ 'Bundle' if item.is_bundle else ('Vol. 1' if item.volume == 1.0 else 'Standalone') }}
                         </span>
                     </div>
 

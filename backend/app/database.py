@@ -1,8 +1,11 @@
 import os
 import sqlite3
 import json
+import logging
 from datetime import datetime
 from typing import List, Dict, Any, Optional, Tuple
+
+logger = logging.getLogger("noveltrax.database")
 
 class Database:
     def __init__(self, db_path: str):
@@ -276,11 +279,36 @@ class Database:
             conn.commit()
 
     # --- Release Operations ---
+    def purge_pdf_releases(self) -> int:
+        """
+        Permanently deletes any PDF releases from the database.
+        NovelTrax strictly monitors digital novels/EPUBs and rejects PDFs.
+        """
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                DELETE FROM releases 
+                WHERE lower(title) LIKE '%pdf%' 
+                   OR lower(link) LIKE '%.pdf%' 
+                   OR lower(link) LIKE '%/pdf/%'
+                   OR lower(guid) LIKE '%pdf%';
+            """)
+            deleted_count = cur.rowcount
+            conn.commit()
+            if deleted_count > 0:
+                logger.info(f"Purged {deleted_count} PDF release(s) from database.")
+            return deleted_count
+
     def upsert_release(self, release_data: Dict[str, Any]) -> Tuple[bool, int]:
         """
         Inserts or updates a release.
         Returns (is_new, release_id).
         """
+        from app.parser import is_pdf_release
+        if is_pdf_release(release_data.get("title"), release_data.get("link"), release_data.get("guid")):
+            logger.debug(f"Rejecting PDF release: {release_data.get('title')}")
+            return False, -1
+
         from app.providers.metadata import NovelMetadataProvider
         if release_data.get("series_name"):
             release_data["series_name"] = NovelMetadataProvider.clean_novel_title(release_data["series_name"])
@@ -292,27 +320,36 @@ class Database:
             cur = conn.cursor()
 
             # Deduplication for discovery (status == 'NEW') releases
-            if release_data.get("status") == "NEW" and release_data.get("series_name"):
+            # Only merge if incoming release is a discovery candidate (volume is None or volume == 1.0)
+            incoming_vol = release_data.get("volume")
+            is_discovery_cand = (incoming_vol is None or incoming_vol == 1.0)
+            if release_data.get("status") == "NEW" and release_data.get("series_name") and is_discovery_cand:
                 cur.execute("""
-                    SELECT id, description, cover_url, series_link FROM releases 
-                    WHERE status = 'NEW' AND lower(trim(series_name)) = lower(trim(?));
+                    SELECT id, description, cover_url, series_link, title, volume FROM releases 
+                    WHERE status = 'NEW' 
+                      AND (volume IS NULL OR volume = 1.0)
+                      AND lower(trim(series_name)) = lower(trim(?));
                 """, (release_data["series_name"],))
                 dup = cur.fetchone()
                 if dup:
                     rel_id = dup["id"]
+                    new_title = release_data.get("title")
+                    existing_title = dup["title"]
+                    # Do not overwrite clean existing title if incoming title has volume noise
+                    use_title = existing_title if (existing_title and "volume" not in existing_title.lower() and new_title and "volume" in new_title.lower()) else (new_title or existing_title)
                     cur.execute("""
                         UPDATE releases SET
                             description = COALESCE(?, description),
                             cover_url = COALESCE(?, cover_url),
                             series_link = COALESCE(?, series_link),
-                            title = COALESCE(?, title),
+                            title = ?,
                             updated_at = CURRENT_TIMESTAMP
                         WHERE id = ?;
                     """, (
                         release_data.get("description"),
                         release_data.get("cover_url"),
                         release_data.get("series_link"),
-                        release_data.get("title"),
+                        use_title,
                         rel_id
                     ))
                     conn.commit()
@@ -776,6 +813,7 @@ class Database:
         Returns releases that are Volume 1 or unnumbered (standalone),
         which are NOT currently in Calibre, NOT in series_tracking, and NOT blacklisted.
         Deduplicates by series name so each series appears at most once.
+        Strictly excludes PDF releases.
         """
         with self.get_connection() as conn:
             cur = conn.cursor()
@@ -795,6 +833,9 @@ class Database:
                     FROM releases r
                     WHERE (r.volume IS NULL OR r.volume = 1.0)
                       AND r.status NOT IN ('IN_CALIBRE', 'BLACKLISTED', 'IGNORED')
+                      AND COALESCE(lower(r.title), '') NOT LIKE '%pdf%'
+                      AND COALESCE(lower(r.link), '') NOT LIKE '%.pdf%'
+                      AND COALESCE(lower(r.guid), '') NOT LIKE '%pdf%'
                       AND (r.series_name IS NULL OR lower(trim(r.series_name)) NOT IN (SELECT lower(trim(name)) FROM series_blacklist))
                       AND (r.series_name IS NULL OR lower(trim(r.series_name)) NOT IN (SELECT lower(trim(name)) FROM series_tracking WHERE is_monitored = 1))
                 )
@@ -818,6 +859,7 @@ class Database:
         """
         Returns total count of unique discovered series (Volume 1 or unnumbered standalones)
         not in Calibre, tracking, or blacklist.
+        Strictly excludes PDF releases.
         """
         with self.get_connection() as conn:
             cur = conn.cursor()
@@ -833,6 +875,9 @@ class Database:
                     FROM releases r
                     WHERE (r.volume IS NULL OR r.volume = 1.0)
                       AND r.status NOT IN ('IN_CALIBRE', 'BLACKLISTED', 'IGNORED')
+                      AND COALESCE(lower(r.title), '') NOT LIKE '%pdf%'
+                      AND COALESCE(lower(r.link), '') NOT LIKE '%.pdf%'
+                      AND COALESCE(lower(r.guid), '') NOT LIKE '%pdf%'
                       AND (r.series_name IS NULL OR lower(trim(r.series_name)) NOT IN (SELECT lower(trim(name)) FROM series_blacklist))
                       AND (r.series_name IS NULL OR lower(trim(r.series_name)) NOT IN (SELECT lower(trim(name)) FROM series_tracking WHERE is_monitored = 1))
                 )
@@ -844,12 +889,39 @@ class Database:
     def deduplicate_and_clean_discovery(self):
         """
         Cleans existing release records in database:
-        1. Strips dangling '(Light Novel)', '(Novel)', '[Light Novel]', '(LN)' from series_name and title.
-        2. Merges and deduplicates 'NEW' discovery releases with identical normalized series_names.
+        1. Purges all historical PDF releases.
+        2. Fixes falsely classified standalones / unnumbered releases by re-parsing titles (ensures Volume 4 etc. are not marked as Standalone).
+        3. Strips dangling '(Light Novel)', '(Novel)', '[Light Novel]', '(LN)' from series_name and title.
+        4. Merges and deduplicates 'NEW' discovery releases with identical, alias, or fuzzy-matching series_names.
         """
+        # 1. Purge all PDF releases
+        self.purge_pdf_releases()
+
+        from app.parser import extract_series_and_volume, should_merge_series
+        from app.providers.metadata import NovelMetadataProvider
+
         with self.get_connection() as conn:
             cur = conn.cursor()
-            # 1. Clean '(Light Novel)', '(Novel)', etc. from series_name and title in releases
+
+            # 2. Re-parse releases with volume IS NULL or status = 'NEW'
+            cur.execute("""
+                SELECT id, title, series_name, volume 
+                FROM releases 
+                WHERE volume IS NULL OR status = 'NEW';
+            """)
+            rows = [dict(r) for r in cur.fetchall()]
+            for r in rows:
+                r_id = r["id"]
+                t = r.get("title") or ""
+                p = extract_series_and_volume(t)
+                clean_s = NovelMetadataProvider.clean_novel_title(p["series_name"] or r.get("series_name") or "")
+
+                if p["volume"] is not None and p["volume"] > 1.0:
+                    cur.execute("UPDATE releases SET volume = ?, series_name = ? WHERE id = ?;", (p["volume"], clean_s, r_id))
+                elif clean_s and clean_s != r.get("series_name"):
+                    cur.execute("UPDATE releases SET series_name = ? WHERE id = ?;", (clean_s, r_id))
+
+            # 3. Clean '(Light Novel)', '(Novel)', etc. from series_name and title in releases
             cur.execute("""
                 UPDATE releases 
                 SET series_name = trim(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(series_name, ' (Light Novel)', ''), ' [Light Novel]', ''), ' (Novel)', ''), ' (Web Novel)', ''), ' (LN)', '')),
@@ -866,45 +938,46 @@ class Database:
                    OR title LIKE '%(LN)%';
             """)
 
-            # 2. Find any duplicate 'NEW' status releases sharing identical normalized series_name
+            # 4. Alias & fuzzy deduplication for 'NEW' status discovery releases
             cur.execute("""
-                SELECT lower(trim(series_name)) as norm_name, count(*) as cnt
+                SELECT id, title, series_name, volume, description, cover_url, series_link, updated_at
                 FROM releases
-                WHERE status = 'NEW' AND series_name IS NOT NULL AND series_name != ''
-                GROUP BY lower(trim(series_name))
-                HAVING cnt > 1;
+                WHERE status = 'NEW' AND (volume IS NULL OR volume = 1.0) AND series_name IS NOT NULL AND series_name != ''
+                ORDER BY 
+                    (CASE WHEN description IS NOT NULL AND length(trim(description)) > 0 THEN 1 ELSE 0 END) DESC,
+                    (CASE WHEN cover_url IS NOT NULL AND length(trim(cover_url)) > 0 THEN 1 ELSE 0 END) DESC,
+                    updated_at DESC, id DESC;
             """)
-            dup_series = cur.fetchall()
-            for dup in dup_series:
-                norm = dup["norm_name"]
-                cur.execute("""
-                    SELECT * FROM releases 
-                    WHERE status = 'NEW' AND lower(trim(series_name)) = ?
-                    ORDER BY 
-                        (CASE WHEN description IS NOT NULL AND length(trim(description)) > 0 THEN 1 ELSE 0 END) DESC,
-                        (CASE WHEN cover_url IS NOT NULL AND length(trim(cover_url)) > 0 THEN 1 ELSE 0 END) DESC,
-                        updated_at DESC, id DESC;
-                """, (norm,))
-                matching = cur.fetchall()
-                if len(matching) > 1:
-                    primary = matching[0]
-                    merged_desc = primary["description"]
-                    merged_cover = primary["cover_url"]
-                    merged_link = primary["series_link"]
-                    for other in matching[1:]:
-                        if not merged_desc and other["description"]:
-                            merged_desc = other["description"]
-                        if not merged_cover and other["cover_url"]:
-                            merged_cover = other["cover_url"]
-                        if not merged_link and other["series_link"]:
-                            merged_link = other["series_link"]
-                        cur.execute("DELETE FROM releases WHERE id = ?;", (other["id"],))
+            disc_records = [dict(r) for r in cur.fetchall()]
+            merged_ids = set()
 
-                    cur.execute("""
-                        UPDATE releases 
-                        SET description = ?, cover_url = ?, series_link = ?, updated_at = CURRENT_TIMESTAMP
-                        WHERE id = ?;
-                    """, (merged_desc, merged_cover, merged_link, primary["id"]))
+            for i in range(len(disc_records)):
+                rec_a = disc_records[i]
+                if rec_a["id"] in merged_ids:
+                    continue
+
+                for j in range(i + 1, len(disc_records)):
+                    rec_b = disc_records[j]
+                    if rec_b["id"] in merged_ids:
+                        continue
+
+                    if should_merge_series(rec_a["series_name"], rec_b["series_name"]):
+                        m_desc = rec_a["description"] or rec_b["description"]
+                        m_cover = rec_a["cover_url"] or rec_b["cover_url"]
+                        m_link = rec_a["series_link"] or rec_b["series_link"]
+
+                        cur.execute("DELETE FROM releases WHERE id = ?;", (rec_b["id"],))
+                        merged_ids.add(rec_b["id"])
+
+                        cur.execute("""
+                            UPDATE releases 
+                            SET description = ?, cover_url = ?, series_link = ?, updated_at = CURRENT_TIMESTAMP
+                            WHERE id = ?;
+                        """, (m_desc, m_cover, m_link, rec_a["id"]))
+
+                        rec_a["description"] = m_desc
+                        rec_a["cover_url"] = m_cover
+                        rec_a["series_link"] = m_link
 
             conn.commit()
 

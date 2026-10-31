@@ -160,7 +160,7 @@
             </p>
         </div>
 
-        <div class="grid grid-cols-1 sm:grid-cols-3 gap-3.5 pt-2">
+        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5 pt-2">
             <!-- Clear Descriptions -->
             <div class="bg-slate-950/60 border border-slate-800 rounded-xl p-4 flex flex-col justify-between">
                 <div>
@@ -209,6 +209,23 @@
                 <button type="button" onclick="debugAction('clear-thumbnails')" id="btn-clear-thumbs" class="mt-4 w-full px-3 py-2 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 border border-rose-500/30 text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors active:scale-95">
                     <i data-lucide="flame" class="w-3.5 h-3.5"></i>
                     <span>Clear Image Cache</span>
+                </button>
+            </div>
+
+            <!-- Purge PDF Releases -->
+            <div class="bg-slate-950/60 border border-slate-800 rounded-xl p-4 flex flex-col justify-between">
+                <div>
+                    <h4 class="text-xs font-bold text-white flex items-center gap-1.5">
+                        <i data-lucide="file-x" class="w-4 h-4 text-indigo-400"></i>
+                        Purge PDF Releases
+                    </h4>
+                    <p class="text-[11px] text-slate-400 mt-1.5 leading-relaxed">
+                        Permanently deletes any PDF releases and deduplicates series. NovelTrax strictly monitors digital novel EPUBs.
+                    </p>
+                </div>
+                <button type="button" onclick="debugAction('purge-pdf')" id="btn-purge-pdf" class="mt-4 w-full px-3 py-2 rounded-xl bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors active:scale-95">
+                    <i data-lucide="shield-alert" class="w-3.5 h-3.5"></i>
+                    <span>Purge PDF Releases</span>
                 </button>
             </div>
         </div>
@@ -338,6 +355,8 @@
             msg = 'Are you sure you want to clear all unreviewed series from the Discovery page?\n\nThis will not delete your active wishlist requests or Calibre tracked series.';
         } else if (action === 'clear-thumbnails') {
             msg = 'Are you sure you want to purge the cached cover image thumbnails from disk?\n\nImages will be safely re-downloaded when viewed.';
+        } else if (action === 'purge-pdf') {
+            msg = 'Are you sure you want to purge all PDF releases from the database? NovelTrax is dedicated to digital novel EPUBs only.';
         }
 
         if (!confirm(msg)) return;

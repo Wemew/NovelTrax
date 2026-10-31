@@ -40,6 +40,13 @@ task_manager = TaskManager(db, CALIBRE_DIR)
 async def lifespan(app: FastAPI):
     logger.info("Starting NovelTrax application...")
     task_manager.start()
+    # Trigger initial database cleanup (PDF purge and discovery deduplication)
+    try:
+        db.deduplicate_and_clean_discovery()
+        logger.info("Startup database maintenance completed: PDF releases purged and series deduplicated.")
+    except Exception as e:
+        logger.warning(f"Startup database maintenance warning: {e}")
+
     # Trigger initial Calibre sync if available
     scanner = CalibreScanner(db.get_setting("calibre_path", CALIBRE_DIR))
     if scanner.is_available():
@@ -515,6 +522,10 @@ async def api_debug_action(payload: Dict[str, Any]):
     elif action == "clear-thumbnails":
         count = task_manager.cover_cache.clear_cache()
         return JSONResponse({"status": "success", "message": f"Purged {count} cached cover images from disk."})
+    elif action == "purge-pdf":
+        count = db.purge_pdf_releases()
+        db.deduplicate_and_clean_discovery()
+        return JSONResponse({"status": "success", "message": f"Purged {count} PDF release(s) and deduplicated discovery series."})
     else:
         return JSONResponse({"status": "error", "message": f"Unknown action: {action}"}, status_code=400)
 

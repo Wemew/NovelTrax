@@ -710,7 +710,124 @@ def run_e2e_test():
     print(f"    - Overlord Group: {overlord_group['releases_count']} releases, {len(overlord_group['all_volumes'])} detected volumes")
 
     print("\n" + "=" * 60)
-    print("ALL TESTS (INCLUDING SECURITY, SYNOPSIS, PAGINATION & BUNDLES) PASSED WITH 100% SUCCESS!")
+    print("STEP 13: TESTING PDF REJECTION, PURGE & ADVANCED SERIES DEDUPLICATION")
+    print("=" * 60)
+    from app.parser import is_pdf_release, should_merge_series
+
+    # 1. Test PDF detection
+    assert is_pdf_release("DOWNLOAD AVATAR KORRA TURF WARS PART 1 PDF") is True
+    assert is_pdf_release("Tenkyou no Alderamin (Alderamin On The Sky) ALL VOLUMES PDF") is True
+    assert is_pdf_release("Download 86 All Volumes Pdf") is True
+    assert is_pdf_release("Download 86-Eighty Six Volume 1 Pdf") is True
+    assert is_pdf_release("Some Novel", link="https://example.com/book.pdf") is True
+    assert is_pdf_release("Her Royal Highness Seems to Be Angry Volume 4 Epub") is False
+    assert is_pdf_release("The Tale of a Little Alchemist Blessed by the Spirits Volume 4 Epub") is False
+    print("  ✓ is_pdf_release accurately flags PDF titles and URLs while allowing EPUBs")
+
+    # 2. Ingestion rejection
+    is_new, rel_id = app_db.upsert_release({
+        "guid": "pdf_blocked_1",
+        "title": "Download 86 All Volumes Pdf",
+        "series_name": "86",
+        "volume": 1.0,
+        "link": "https://jnovels.com/86-pdf/",
+        "status": "NEW"
+    })
+    assert is_new is False and rel_id == -1
+    print("  ✓ upsert_release actively blocked PDF release from database insertion")
+
+    # 3. Purging legacy PDF releases
+    with app_db.get_connection() as conn:
+        conn.execute("INSERT INTO releases (guid, title, link, status) VALUES ('legacy_pdf_1', 'Tenkyou no Alderamin ALL VOLUMES PDF', 'https://example.com/alderamin.pdf', 'NEW');")
+        conn.execute("INSERT INTO releases (guid, title, link, status) VALUES ('legacy_pdf_2', 'DOWNLOAD AVATAR KORRA TURF WARS PART 1 PDF', 'https://example.com/korra.pdf', 'NEW');")
+        conn.commit()
+
+    purged_count = app_db.purge_pdf_releases()
+    assert purged_count >= 2
+    with app_db.get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT count(*) FROM releases WHERE lower(title) LIKE '%pdf%' OR lower(link) LIKE '%.pdf%';")
+        remaining_pdfs = cur.fetchone()[0]
+        assert remaining_pdfs == 0
+    print(f"  ✓ purge_pdf_releases successfully purged {purged_count} legacy PDF records")
+
+    # 4. Volume 4 parsing & Discovery exclusion
+    p_vol4 = extract_series_and_volume("Her Royal Highness Seems to Be Angry Volume 4 Epub")
+    assert p_vol4["volume"] == 4.0
+    assert p_vol4["series_name"] == "Her Royal Highness Seems to Be Angry"
+    
+    p_vol4_2 = extract_series_and_volume("The Tale of a Little Alchemist Blessed by the Spirits Volume 4 Epub")
+    assert p_vol4_2["volume"] == 4.0
+    assert p_vol4_2["series_name"] == "The Tale of a Little Alchemist Blessed by the Spirits"
+    print("  ✓ Volume 4 correctly extracted as 4.0 (never parsed as standalone None)")
+
+    # Simulate legacy row where volume was mistakenly NULL
+    with app_db.get_connection() as conn:
+        conn.execute("""
+            INSERT INTO releases (guid, title, series_name, volume, status)
+            VALUES ('vol4_legacy', 'The Tale of a Little Alchemist Blessed by the Spirits Volume 4 Epub', 'The Tale of a Little Alchemist Blessed by the Spirits', NULL, 'NEW');
+        """)
+        conn.commit()
+
+    # Run deduplicate_and_clean_discovery
+    app_db.deduplicate_and_clean_discovery()
+
+    with app_db.get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT volume FROM releases WHERE guid = 'vol4_legacy';")
+        updated_vol = cur.fetchone()["volume"]
+        assert updated_vol == 4.0
+    print("  ✓ deduplicate_and_clean_discovery re-evaluated title and corrected volume to 4.0")
+
+    # Check that Volume 4 does not leak into discovery
+    disc_items = app_db.get_discovery_releases(limit=100)
+    assert not any(d.get("guid") == "vol4_legacy" for d in disc_items)
+    print("  ✓ Discovery page strictly excludes non-Volume 1 releases")
+
+    # 5. Advanced series deduplication & alias merging
+    assert should_merge_series("86", "86-Eighty Six") is True
+    assert should_merge_series("Tenkyou no Alderamin", "Tenkyou no Alderamin (Alderamin On The Sky)") is True
+    assert should_merge_series("Mushoku Tensei", "Overlord") is False
+
+    # Insert two alias discovery records
+    app_db.upsert_release({
+        "guid": "disc_alias_86_1",
+        "title": "86 Volume 1",
+        "series_name": "86",
+        "volume": 1.0,
+        "description": "Rich description from AniList",
+        "cover_url": "https://example.com/86_cover.jpg",
+        "status": "NEW"
+    })
+    app_db.upsert_release({
+        "guid": "disc_alias_86_2",
+        "title": "86-Eighty Six Volume 1",
+        "series_name": "86-Eighty Six",
+        "volume": 1.0,
+        "description": "",
+        "cover_url": "",
+        "status": "NEW"
+    })
+
+    app_db.deduplicate_and_clean_discovery()
+
+    with app_db.get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM releases WHERE status = 'NEW' AND (series_name = '86' OR series_name = '86-Eighty Six');")
+        remaining_86 = cur.fetchall()
+        assert len(remaining_86) == 1
+        assert remaining_86[0]["description"] == "Rich description from AniList"
+        assert remaining_86[0]["cover_url"] == "https://example.com/86_cover.jpg"
+    print("  ✓ Series alias deduplication merged '86' and '86-Eighty Six' into a single rich discovery card")
+
+    # 6. Part keyword parsing
+    p_part = extract_series_and_volume("DOWNLOAD AVATAR KORRA TURF WARS PART 1")
+    assert p_part["volume"] == 1.0
+    assert p_part["series_name"] == "AVATAR KORRA TURF WARS"
+    print("  ✓ 'Part 1' parsed cleanly without contaminating series name")
+
+    print("\n" + "=" * 60)
+    print("ALL TESTS (INCLUDING SECURITY, SYNOPSIS, PAGINATION, BUNDLES & PDF PURGE) PASSED WITH 100% SUCCESS!")
     print("=" * 60)
 
 if __name__ == "__main__":
