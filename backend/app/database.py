@@ -532,10 +532,24 @@ class Database:
             """, (limit,))
             return [dict(row) for row in cur.fetchall()]
 
+    def update_release_details(self, release_id: int, description: Optional[str] = None, series_link: Optional[str] = None, cover_url: Optional[str] = None):
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                UPDATE releases 
+                SET description = COALESCE(?, description),
+                    series_link = COALESCE(?, series_link),
+                    cover_url = COALESCE(?, cover_url),
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?;
+            """, (description, series_link, cover_url, release_id))
+            conn.commit()
+
     def track_discovered_series(self, series_name: str, release_id: Optional[int] = None) -> bool:
         """
         Adds a discovered series to series_tracking (monitored = 1) and
         updates associated release status to REQUESTED.
+        Preserves canonical series hub link if present.
         """
         clean_name = series_name.strip()
         if not clean_name:
@@ -544,10 +558,20 @@ class Database:
         with self.get_connection() as conn:
             cur = conn.cursor()
             default_link = f"https://jnovels.com/?s={quote_plus(clean_name)}"
+
+            # If release has a canonical series_link, use it
+            if release_id:
+                cur.execute("SELECT series_link FROM releases WHERE id = ?;", (release_id,))
+                row = cur.fetchone()
+                if row and row["series_link"]:
+                    default_link = row["series_link"]
+
             cur.execute("""
                 INSERT INTO series_tracking (name, book_count, latest_index, is_monitored, website_url, last_sync)
                 VALUES (?, 0, 0.0, 1, ?, CURRENT_TIMESTAMP)
-                ON CONFLICT(name) DO UPDATE SET is_monitored = 1;
+                ON CONFLICT(name) DO UPDATE SET 
+                    is_monitored = 1,
+                    website_url = CASE WHEN series_tracking.website_url = '' OR series_tracking.website_url IS NULL OR series_tracking.website_url LIKE '%?s=%' THEN excluded.website_url ELSE series_tracking.website_url END;
             """, (clean_name, default_link))
 
             if release_id:

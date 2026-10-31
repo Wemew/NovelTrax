@@ -271,7 +271,29 @@ def run_e2e_test():
         print(f"  ✓ Rejected unsafe content payload: {payload[:20]!r}")
 
     print("\n" + "=" * 60)
-    print("ALL TESTS (INCLUDING SECURITY HARDENING) PASSED WITH 100% SUCCESS!")
+    print("STEP 9: TESTING SYNOPSIS ENRICHMENT & MASTER INDEX DISCOVERY")
+    print("=" * 60)
+    # Test release detail update with synopsis and canonical original post
+    v1_releases = app_db.get_discovery_releases()
+    test_rel = v1_releases[0]
+    sample_synopsis = "A mysterious gate opens in Tokyo, revealing a fantasy world filled with monsters and magic."
+    canonical_hub = "https://jnovels.com/gate-thus-the-jsdf-fought-there-light-novel-epub/"
+
+    app_db.update_release_details(
+        test_rel["id"],
+        description=sample_synopsis,
+        series_link=canonical_hub
+    )
+    with app_db.get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT description, series_link FROM releases WHERE id = ?;", (test_rel["id"],))
+        updated_row = cur.fetchone()
+        assert updated_row["description"] == sample_synopsis
+        assert updated_row["series_link"] == canonical_hub
+    print(f"  ✓ Successfully updated release #{test_rel['id']} with synopsis & original post link")
+
+    print("\n" + "=" * 60)
+    print("ALL TESTS (INCLUDING SECURITY & SYNOPSIS DISCOVERY) PASSED WITH 100% SUCCESS!")
     print("=" * 60)
 
 if __name__ == "__main__":

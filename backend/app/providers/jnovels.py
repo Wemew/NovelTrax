@@ -57,6 +57,137 @@ class JNovelsProvider(BaseFeedProvider):
         new_path = f"{path}/page/{page_num}/" if path else f"/page/{page_num}/"
         return urlunparse((parsed.scheme, parsed.netloc, new_path, '', parsed.query, ''))
 
+    @staticmethod
+    def extract_synopsis_and_original_link(url: str) -> Dict[str, Optional[str]]:
+        """
+        Visits a J-Novels post or series page:
+        1. Detects canonical 'Refer to original post' link.
+        2. Extracts real novel synopsis from the 'Synopsis' section.
+        3. Extracts high-resolution cover image.
+        """
+        orig_link = None
+        synopsis = None
+        cover_url = None
+
+        def parse_synopsis_from_soup(target_soup):
+            syn_header = target_soup.find(
+                lambda tag: tag.name in ('h1', 'h2', 'h3', 'h4', 'strong', 'b', 'p') 
+                and 'synopsis' in tag.get_text(strip=True).lower()
+            )
+            if not syn_header:
+                return None
+            
+            paragraphs = []
+            curr = syn_header.find_next_sibling()
+            while curr and curr.name not in ('ol', 'ul', 'h1', 'h2', 'h3'):
+                if curr.name == 'p':
+                    p_text = curr.get_text(strip=True)
+                    if p_text:
+                        p_clean = re.sub(r'^(DIGITAL EXCLUSIVE!?|AVAILABLE IN ZEROBOOKS APP.*?)\s*', '', p_text, flags=re.I).strip()
+                        if p_clean and not p_clean.lower().startswith('download'):
+                            paragraphs.append(p_clean)
+                elif curr.name == 'div' and any(c in (curr.get('class') or []) for c in ('share', 'sharedaddy', 'related')):
+                    break
+                curr = curr.find_next_sibling()
+            
+            return '\n\n'.join(paragraphs) if paragraphs else None
+
+        with httpx.Client(headers=DEFAULT_HEADERS, timeout=12.0, follow_redirects=True) as client:
+            try:
+                resp = client.get(url)
+                if resp.status_code == 200:
+                    soup = BeautifulSoup(resp.text, "html.parser")
+                    
+                    # 1. Search for "Refer to original post" link
+                    for a in soup.find_all("a"):
+                        text = a.get_text(strip=True)
+                        if re.search(r'refer\s+to\s+original\s+post', text, re.I):
+                            orig_link = a.get("href")
+                            break
+                    
+                    # 2. Extract synopsis
+                    synopsis = parse_synopsis_from_soup(soup)
+
+                    # 3. Extract cover image
+                    article = soup.select_one("article, .post-content, .entry-content")
+                    if article:
+                        for img in article.find_all("img"):
+                            src = img.get("src") or img.get("data-src") or img.get("data-lazy-src")
+                            if src and not any(bad in src.lower() for bad in ("gravatar", "cbz-reader", "download.jpg", "zerobooks", "logo")):
+                                cover_url = src
+                                break
+
+                    # If volume post didn't have synopsis but has orig_link, fetch orig_link
+                    if not synopsis and orig_link:
+                        try:
+                            resp_orig = client.get(orig_link)
+                            if resp_orig.status_code == 200:
+                                soup_orig = BeautifulSoup(resp_orig.text, "html.parser")
+                                synopsis = parse_synopsis_from_soup(soup_orig)
+                                if not cover_url:
+                                    art_orig = soup_orig.select_one("article, .post-content, .entry-content")
+                                    if art_orig:
+                                        for img in art_orig.find_all("img"):
+                                            src = img.get("src") or img.get("data-src")
+                                            if src and not any(bad in src.lower() for bad in ("gravatar", "cbz-reader", "download.jpg", "zerobooks")):
+                                                cover_url = src
+                                                break
+                        except Exception as e:
+                            logger.debug(f"Error fetching canonical series link {orig_link}: {e}")
+
+            except Exception as e:
+                logger.debug(f"Error extracting details from {url}: {e}")
+
+        return {
+            "series_link": orig_link,
+            "synopsis": synopsis,
+            "cover_url": cover_url
+        }
+
+    def fetch_master_index(self, index_url: str = "https://jnovels.com/light-novel-epub-jp/") -> List[ReleaseItem]:
+        """
+        Parses the complete series directory from J-Novels index page.
+        Yields canonical light novel series directly with their main series URLs.
+        """
+        results = []
+        seen_links = set()
+        with httpx.Client(headers=DEFAULT_HEADERS, timeout=20.0, follow_redirects=True) as client:
+            resp = client.get(index_url)
+            resp.raise_for_status()
+            soup = BeautifulSoup(resp.text, "html.parser")
+            content = soup.select_one(".entry-content, article, .post-content")
+            if not content:
+                return results
+
+            for a in content.find_all("a"):
+                href = (a.get("href") or "").strip()
+                raw_text = a.get_text(strip=True)
+                if not href or not raw_text or not href.startswith("https://jnovels.com/"):
+                    continue
+                if any(bad in href for bad in ("mode=", "app.adjust", "/faq", "/category/", "/tag/", "/contact", "/author/")):
+                    continue
+                if href == "https://jnovels.com/" or href in seen_links:
+                    continue
+
+                seen_links.add(href)
+                parsed = extract_series_and_volume(raw_text)
+                series_name = parsed["series_name"]
+                if not series_name:
+                    continue
+
+                results.append(ReleaseItem(
+                    title=f"{series_name} (Light Novel)",
+                    link=href,
+                    series_name=series_name,
+                    volume=parsed["volume"] or 1.0,
+                    series_link=href,
+                    source_feed_name="J-Novels Master Index",
+                    raw_data={"is_master_index": True}
+                ))
+
+        logger.info(f"Fetched {len(results)} series from J-Novels Master Index ({index_url}).")
+        return results
+
     def _fetch_via_html(self) -> List[ReleaseItem]:
         results = []
         seen_links = set()

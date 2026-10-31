@@ -352,6 +352,79 @@ async def api_save_settings(payload: Dict[str, Any]):
     db.log_activity("SETTINGS_UPDATED", "Application settings updated")
     return JSONResponse({"status": "success"})
 
+# --- Historical Backfill & Synopsis Endpoints ---
+
+@app.post("/api/backfill/index")
+async def api_backfill_index():
+    """Immediately populates Discovery from J-Novels Complete Series Index."""
+    import asyncio
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, task_manager.ingest_master_index)
+    return JSONResponse(result)
+
+@app.post("/api/backfill/start")
+async def api_backfill_start(payload: Optional[Dict[str, Any]] = None):
+    """Starts the polite historical backfill (Master index + synopses + pagination)."""
+    import asyncio
+    if task_manager.is_backfilling:
+        return JSONResponse({"status": "in_progress", "message": "Backfill already running"})
+
+    p = payload or {}
+    max_pages = int(p.get("max_pages", 30))
+    delay = float(p.get("delay", 2.0))
+    enrich = bool(p.get("enrich_synopses", True))
+
+    asyncio.create_task(task_manager.run_polite_backfill(
+        max_pages=max_pages,
+        enrich_synopses=enrich,
+        delay_seconds=delay
+    ))
+    return JSONResponse({"status": "started", "message": "Polite backfill started in background"})
+
+@app.post("/api/backfill/stop")
+async def api_backfill_stop():
+    """Signals the running backfiller to stop gracefully."""
+    task_manager.stop_backfill()
+    return JSONResponse({"status": "stopping", "message": "Backfill stopping"})
+
+@app.get("/api/backfill/status")
+async def api_backfill_status():
+    """Returns current backfill progress and state."""
+    return JSONResponse(task_manager.get_backfill_status())
+
+@app.post("/api/releases/{release_id}/synopsis")
+async def api_fetch_synopsis(release_id: int):
+    """On-demand synopsis and canonical series link extraction for a release."""
+    with db.get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM releases WHERE id = ?;", (release_id,))
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Release not found")
+
+    target_url = row["series_link"] or row["link"]
+    if not target_url:
+        return JSONResponse({"status": "error", "message": "No link available"}, status_code=400)
+
+    from app.providers.jnovels import JNovelsProvider
+    details = JNovelsProvider.extract_synopsis_and_original_link(target_url)
+
+    db.update_release_details(
+        release_id,
+        description=details.get("synopsis"),
+        series_link=details.get("series_link"),
+        cover_url=details.get("cover_url")
+    )
+    if details.get("cover_url"):
+        task_manager.cover_cache.cache_sync(details["cover_url"])
+
+    return JSONResponse({
+        "status": "success",
+        "synopsis": details.get("synopsis"),
+        "series_link": details.get("series_link"),
+        "cover_url": details.get("cover_url")
+    })
+
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", 8080))

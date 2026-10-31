@@ -20,6 +20,8 @@ class TaskManager:
         self.scheduler = AsyncIOScheduler()
         self.is_syncing_calibre = False
         self.is_checking_feeds = False
+        self.is_backfilling = False
+        self.stop_backfill_requested = False
 
     def get_notifier(self) -> NotificationService:
         discord_url = self.db.get_setting("discord_webhook_url", "")
@@ -223,3 +225,175 @@ class TaskManager:
             return {"status": "error", "message": str(e)}
         finally:
             self.is_checking_feeds = False
+
+    def ingest_master_index(self) -> Dict[str, Any]:
+        """
+        Ingests the complete series index from J-Novels (https://jnovels.com/light-novel-epub-jp/).
+        1. Auto-links canonical series hubs for Calibre series.
+        2. Populates Discovery panel with 1,300+ unreviewed series.
+        """
+        from app.providers.jnovels import JNovelsProvider
+        import hashlib
+        provider = JNovelsProvider()
+        try:
+            items = provider.fetch_master_index()
+            calibre_dir = self.db.get_setting("calibre_path", self.calibre_path)
+            scanner = CalibreScanner(calibre_dir)
+            calibre_series = {s["series_name"].lower(): s for s in scanner.get_all_series()} if scanner.is_available() else {}
+            blacklisted = {b["name"].lower() for b in self.db.get_blacklisted_series()}
+
+            linked_calibre = 0
+            new_discoveries = 0
+
+            for item in items:
+                s_name = item.series_name or ""
+                s_lower = s_name.lower()
+
+                if s_lower in blacklisted:
+                    continue
+
+                if s_lower in calibre_series:
+                    with self.db.get_connection() as conn:
+                        cur = conn.cursor()
+                        cur.execute("""
+                            UPDATE series_tracking 
+                            SET website_url = ? 
+                            WHERE lower(name) = lower(?) AND (website_url IS NULL OR website_url = '' OR website_url LIKE '%?s=%');
+                        """, (item.series_link, s_name))
+                        conn.commit()
+                    linked_calibre += 1
+                else:
+                    guid = hashlib.sha256(item.link.encode("utf-8")).hexdigest()[:16]
+                    rel_dict = {
+                        "guid": guid,
+                        "title": item.title,
+                        "series_name": s_name,
+                        "volume": 1.0,
+                        "link": item.link,
+                        "series_link": item.series_link,
+                        "source_feed_name": "J-Novels Master Index",
+                        "status": "NEW"
+                    }
+                    is_new, _ = self.db.upsert_release(rel_dict)
+                    if is_new:
+                        new_discoveries += 1
+
+            msg = f"Master Index Ingestion: Processed {len(items)} series. Linked {linked_calibre} Calibre hubs, added {new_discoveries} new discoveries."
+            logger.info(msg)
+            self.db.log_activity("MASTER_INDEX_INGEST", "Imported J-Novels Complete Series Index", msg)
+            return {"status": "success", "total_indexed": len(items), "linked_calibre": linked_calibre, "new_discoveries": new_discoveries}
+        except Exception as e:
+            logger.error(f"Master index ingest error: {e}", exc_info=True)
+            self.db.log_activity("ERROR", "Master Index Ingestion Failed", str(e))
+            return {"status": "error", "message": str(e)}
+
+    def stop_backfill(self):
+        """Signals the running backfiller to gracefully stop."""
+        self.stop_backfill_requested = True
+        self.db.set_setting("backfill_status", "stopping")
+        self.db.set_setting("backfill_progress", "Stop requested, finishing current item...")
+
+    def get_backfill_status(self) -> Dict[str, Any]:
+        return {
+            "running": self.is_backfilling,
+            "status": self.db.get_setting("backfill_status", "idle"),
+            "progress": self.db.get_setting("backfill_progress", "Idle")
+        }
+
+    async def run_polite_backfill(self, max_pages: int = 30, enrich_synopses: bool = True, delay_seconds: float = 2.0):
+        """
+        Runs the polite historical backfill:
+        1. Ingests Master Index.
+        2. Slowly enriches discovery synopses & covers with polite rate-limiting.
+        3. Paginates backwards through J-Novels for older volume releases.
+        """
+        import asyncio
+        if self.is_backfilling:
+            return {"status": "in_progress", "message": "Backfill already running"}
+
+        self.is_backfilling = True
+        self.stop_backfill_requested = False
+        self.db.set_setting("backfill_status", "running")
+        self.db.set_setting("backfill_progress", "Ingesting J-Novels Complete Series Index...")
+
+        try:
+            # 1. Master Index
+            self.ingest_master_index()
+            if self.stop_backfill_requested:
+                return
+
+            # 2. Enrich Synopses for Discovery items
+            if enrich_synopses:
+                from app.providers.jnovels import JNovelsProvider
+                discovery_items = self.db.get_discovery_releases(limit=300)
+                needs_enrichment = [d for d in discovery_items if not d.get("description") or len(d.get("description", "")) < 30]
+                total_to_enrich = len(needs_enrichment)
+
+                for idx, d in enumerate(needs_enrichment, 1):
+                    if self.stop_backfill_requested:
+                        break
+
+                    target_url = d.get("series_link") or d.get("link")
+                    if target_url:
+                        self.db.set_setting("backfill_progress", f"Enriching synopsis {idx}/{total_to_enrich}: {d.get('series_name')}")
+                        details = JNovelsProvider.extract_synopsis_and_original_link(target_url)
+                        if details.get("synopsis") or details.get("series_link") or details.get("cover_url"):
+                            self.db.update_release_details(
+                                d["id"],
+                                description=details.get("synopsis"),
+                                series_link=details.get("series_link"),
+                                cover_url=details.get("cover_url")
+                            )
+                            if details.get("cover_url"):
+                                self.cover_cache.cache_sync(details["cover_url"])
+
+                    await asyncio.sleep(delay_seconds)
+
+            # 3. Deep Pagination for historical volumes
+            if not self.stop_backfill_requested and max_pages > 0:
+                from app.providers.jnovels import JNovelsProvider
+                provider = JNovelsProvider(config={"max_pages": 1})
+                calibre_dir = self.db.get_setting("calibre_path", self.calibre_path)
+                scanner = CalibreScanner(calibre_dir)
+                calibre_series = scanner.get_all_series() if scanner.is_available() else []
+                calibre_books = scanner.get_all_books() if scanner.is_available() else []
+                matcher = CalibreMatcher(calibre_series, calibre_books)
+                monitored = {s["name"].lower(): s for s in self.db.get_all_series(monitored_only=True)}
+
+                for page_num in range(1, max_pages + 1):
+                    if self.stop_backfill_requested:
+                        break
+
+                    self.db.set_setting("backfill_progress", f"Checking historical feed page {page_num}/{max_pages}...")
+                    paged_url = provider._build_paged_url("https://jnovels.com/?s=epub", page_num)
+                    page_provider = JNovelsProvider(url=paged_url, config={"max_pages": 1})
+                    releases = page_provider.fetch_releases()
+                    if not releases:
+                        break
+
+                    for r in releases:
+                        s_name = r.series_name or ""
+                        if s_name.lower() in monitored:
+                            m_res = matcher.check_release(r.to_dict(), auto_request_monitored=True)
+                            rel_dict = r.to_dict()
+                            rel_dict.update({
+                                "status": m_res["status"],
+                                "calibre_matched_book_id": m_res.get("matched_book_id")
+                            })
+                            is_new, _ = self.db.upsert_release(rel_dict)
+                            if r.cover_url:
+                                self.cover_cache.cache_sync(r.cover_url)
+
+                    await asyncio.sleep(delay_seconds)
+
+            self.db.set_setting("backfill_status", "completed")
+            self.db.set_setting("backfill_progress", "Historical backfill finished successfully!")
+            self.db.log_activity("BACKFILL_FINISHED", "Polite backfill completed")
+
+        except Exception as e:
+            logger.error(f"Backfill error: {e}", exc_info=True)
+            self.db.set_setting("backfill_status", "error")
+            self.db.set_setting("backfill_progress", f"Error: {e}")
+            self.db.log_activity("ERROR", "Backfill error", str(e))
+        finally:
+            self.is_backfilling = False
