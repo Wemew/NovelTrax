@@ -334,7 +334,54 @@ def run_e2e_test():
     assert cover_result == "https://jnovels.com/wp-content/uploads/2019/06/heroine-cover.jpg"
     print("  ✓ JNovelsProvider correctly extracts full description from #editdescription and novel cover image")
 
-    # Test series_tracking description and cover_url update
+    # Test edge case 1: unlabelled narrative description paragraphs
+    sample_edge_1 = """
+    <article class="post">
+    <p>You can now download YAKIMOCHI NO KOTAE light novel in (.epub) Format</p>
+    <p>A novel adaption of HoneyWorks “Yakimochi no Kotae (A Solution for Jealousy)“ about Mochizuki Souta (nickname: Mochita), a third-year at Sakuragaoka High School, who holds long-standing unrequited feelings for her the air-headed pretty girl, Akari, who’s the president of the Art Club.</p>
+    <p>As the Art Club helps the Film Club with making a movie, he musters up the courage to confess and she actually accepts?! But when they accidentally witness Natsuki and Haruki’s “confession,” things start to get complicated….?<br/>
+    <b>Associated Names –</b><br/>Confession Rehearsal<br/>A Solution for Jealousy</p>
+    <p><b>Genre –<br/>Romance, School Life.</b></p>
+    <ol><li><b>VOLUME 01 — DOWNLOAD</b></li></ol>
+    </article>
+    """
+    desc_1 = JNovelsProvider.parse_description_from_soup(BeautifulSoup(sample_edge_1, "html.parser"))
+    assert desc_1 is not None
+    assert "Mochizuki Souta" in desc_1
+    assert "Associated Names" not in desc_1
+    print("  ✓ Edge case 1 passed: narrative paragraph detection cleanly isolates synopsis without associated names")
+
+    # Test edge case 2: <b>Description</b><br/> with <b>Associated Names</b> in next <p>
+    sample_edge_2 = """
+    <article class="post">
+    <p><b>Description</b><br/>
+    Due to the schemes of the mysterious existence “Demon God”, a young man, Nakajima Ryou, was reincarnated in another world as the Demon King Vermudol. However, the place that he had gotten down to was, a Mazoku continent that had grown wild at the height of chaos.</p>
+    <p><b>Associated Names</b><br/>
+    An Easy Job of Only Needing to be Defeated by the Hero<br/>
+    YHKO</p>
+    </article>
+    """
+    desc_2 = JNovelsProvider.parse_description_from_soup(BeautifulSoup(sample_edge_2, "html.parser"))
+    assert desc_2 is not None
+    assert "Demon God" in desc_2
+    assert "Nakajima Ryou" in desc_2
+    assert "Associated Names" not in desc_2
+    print("  ✓ Edge case 2 passed: inline <b>Description</b><br/> correctly parsed without picking up Associated Names")
+
+    # Test edge case 3: Nested <p><span><b>Synopsis</b></span><br/>...
+    sample_edge_3 = """
+    <article class="post">
+    <p><span style="color: #ff0000;"><b>Synopsis</b></span><br/>
+    A college student spends an evening out, unwittingly attracting the attention of various men whose paths she crosses. One in particular, an upperclassman who has been nursing a crush on her for some time, has chosen this night to make his true feelings known.<br/>
+    Will the two come together, or will this girl just keep on walking…?</p>
+    <p><b>Associated Titles</b><br/>The Night Is Short, Walk on Girl</p>
+    </article>
+    """
+    desc_3 = JNovelsProvider.parse_description_from_soup(BeautifulSoup(sample_edge_3, "html.parser"))
+    assert desc_3 is not None
+    assert "A college student spends an evening out" in desc_3
+    assert "Associated Titles" not in desc_3
+    print("  ✓ Edge case 3 passed: deeply nested span/b Synopsis heading correctly parsed")
     app_db.update_series_details(
         1,
         description="Bell Cranel is a solo adventurer in Orario.",

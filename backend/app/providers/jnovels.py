@@ -67,6 +67,9 @@ class JNovelsProvider(BaseFeedProvider):
         cleaned = re.sub(r'AVAILABLE IN ZEROBOOKS APP.*?(iOS|\n|$)', '', text, flags=re.I)
         cleaned = re.sub(r'DIGITAL EXCLUSIVE!?\s*', '', cleaned, flags=re.I)
         cleaned = re.sub(r'You can now Download .*? Epub', '', cleaned, flags=re.I)
+        cleaned = re.sub(r'You can now download .*? Format', '', cleaned, flags=re.I)
+        # Strip Associated Names / Related Series metadata from description body
+        cleaned = re.split(r'\n\s*(associated\s+(names|titles)|related\s+series|genre\s*[:\-–—])', cleaned, flags=re.I)[0]
         cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
         return cleaned
 
@@ -74,7 +77,8 @@ class JNovelsProvider(BaseFeedProvider):
     def parse_description_from_soup(soup: BeautifulSoup) -> Optional[str]:
         """
         Extracts novel description/synopsis from J-Novels or WordPress DOM.
-        Handles #editdescription, #description, and headings for Description/Synopsis/Plot/Summary.
+        Handles #editdescription, #description, headings, inline labels,
+        and fallback narrative paragraph detection.
         """
         # 1. Direct container match (#editdescription, #description, etc.)
         desc_container = soup.select_one("#editdescription, #description, .entry-description, div[id*='description']")
@@ -87,46 +91,53 @@ class JNovelsProvider(BaseFeedProvider):
                 if len(cleaned) > 20:
                     return cleaned
 
-        # 2. Look for headings or labels in entry content
         content = soup.select_one(".entry-content, article, .post-content") or soup
         keywords = ('description', 'synopsis', 'plot', 'summary', 'about the book', 'about the novel', 'story')
 
-        for tag in content.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'strong', 'b', 'p']):
+        # 2. Look for headings or labels in entry content
+        for tag in content.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'strong', 'b', 'span', 'p']):
             raw_t = tag.get_text(separator=' ', strip=True)
-            t_lower = raw_t.lower()
+            t_lower = raw_t.lower().strip()
 
             matched_kw = None
             for kw in keywords:
-                if t_lower == kw or t_lower.startswith(f"{kw}:") or t_lower.startswith(f"{kw} :") or t_lower.startswith(f"**{kw}"):
+                if t_lower == kw or t_lower.startswith(f"{kw}:") or t_lower.startswith(f"{kw} :") or t_lower.startswith(f"**{kw}") or t_lower.startswith(f"{kw} -") or t_lower.startswith(f"{kw} –"):
                     matched_kw = kw
                     break
 
             if matched_kw:
                 paragraphs = []
-                inline_body = re.sub(rf'^\s*(\*\*)?{matched_kw}(\*\*)?\s*[:\-–—]?\s*', '', raw_t, flags=re.I).strip()
-                if len(inline_body) > 30 and not inline_body.lower().startswith('download'):
-                    paragraphs.append(inline_body)
+                
+                # Find the containing block element (usually <p>, <div>, or heading)
+                block = tag.find_parent(['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
+                if not block:
+                    block = tag
 
-                parent = tag.parent if tag.name in ('strong', 'b') and tag.parent else tag
-                curr = parent.find_next_sibling()
+                # Check if block itself has text beyond the keyword
+                block_text = block.get_text(separator="\n", strip=True)
+                cleaned_block = re.sub(rf'^\s*(\*\*)?{matched_kw}(\*\*)?\s*[:\-–—]?\s*', '', block_text, flags=re.I).strip()
+                if len(cleaned_block) > 25 and not cleaned_block.lower().startswith('download'):
+                    if not re.match(r'^(associated\s+(names|titles)|genre)', cleaned_block, re.I):
+                        paragraphs.append(cleaned_block)
+
+                # Check subsequent siblings of the block
+                curr = block.find_next_sibling()
                 while curr and curr.name not in ('h1', 'h2', 'h3', 'h4', 'ol', 'ul'):
                     if curr.name == 'p':
                         ptxt = curr.get_text(separator="\n", strip=True)
-                        if ptxt and not ptxt.lower().startswith('download') and 'zerobooks' not in ptxt.lower():
+                        p_lower = ptxt.lower().strip()
+                        if any(p_lower.startswith(bad) for bad in ['download', 'zerobooks', 'associated names', 'associated titles', 'genre', 'related series']):
+                            break
+                        if ptxt:
                             paragraphs.append(ptxt)
                     elif curr.name == 'div':
                         c_id = (curr.get('id') or '').lower()
                         c_cls = " ".join(curr.get('class') or []).lower()
-                        if any(bad in c_cls for bad in ('share', 'sharedaddy', 'related', 'comments', 'meta')):
+                        if any(bad in c_cls for bad in ('share', 'sharedaddy', 'related', 'comments', 'meta', 'code-block')):
                             break
                         if c_id == 'editdescription' or 'description' in c_id:
                             paragraphs.append(curr.get_text(separator="\n", strip=True))
                             break
-                        div_ps = curr.find_all('p')
-                        for dp in div_ps:
-                            dp_txt = dp.get_text(separator="\n", strip=True)
-                            if dp_txt and not dp_txt.lower().startswith('download'):
-                                paragraphs.append(dp_txt)
                     curr = curr.find_next_sibling()
 
                 if paragraphs:
@@ -134,6 +145,30 @@ class JNovelsProvider(BaseFeedProvider):
                     cleaned = JNovelsProvider.clean_description_text(result)
                     if len(cleaned) > 25:
                         return cleaned
+
+        # 3. Fallback: Gather narrative paragraphs between intro/ads and download list
+        candidate_paragraphs = []
+        for p in content.find_all('p'):
+            ptxt = p.get_text(separator="\n", strip=True)
+            p_lower = ptxt.lower()
+            if not ptxt or len(ptxt) < 35:
+                continue
+            if any(p_lower.startswith(bad) for bad in [
+                'you can now download', 'you can download', 'download', 'available in zerobooks',
+                'share this', 'subscribe', 'genre', 'associated names', 'associated titles'
+            ]):
+                continue
+            if 'zerobooks' in p_lower:
+                continue
+            candidate_paragraphs.append(ptxt)
+            if len(candidate_paragraphs) >= 4:
+                break
+
+        if candidate_paragraphs:
+            result = "\n\n".join(candidate_paragraphs)
+            cleaned = JNovelsProvider.clean_description_text(result)
+            if len(cleaned) > 40:
+                return cleaned
 
         return None
 
