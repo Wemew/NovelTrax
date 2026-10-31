@@ -2,6 +2,7 @@ import re
 import logging
 from typing import List, Dict, Any, Optional
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+import urllib.request
 try:
     import httpx
 except ImportError:
@@ -204,56 +205,100 @@ class JNovelsProvider(BaseFeedProvider):
         return None
 
     @staticmethod
-    def extract_synopsis_and_original_link(url: str) -> Dict[str, Optional[str]]:
+    def extract_synopsis_and_original_link(url: str, series_name: Optional[str] = None) -> Dict[str, Optional[str]]:
         """
         Visits a J-Novels post or series page:
         1. Detects canonical 'Refer to original post' link if volume release.
-        2. Extracts real novel description/synopsis from #editdescription or content.
+        2. Extracts real novel description/synopsis from #editdescription, #synopsis, or content.
         3. Extracts high-resolution cover image.
+        4. If synopsis or cover is missing from post, falls back to Kitsu / AniList public databases.
         """
         orig_link = None
         synopsis = None
         cover_url = None
+        soup = None
 
-        with httpx.Client(headers=DEFAULT_HEADERS, timeout=15.0, follow_redirects=True) as client:
+        if httpx is not None:
             try:
-                resp = client.get(url)
-                if resp.status_code == 200:
-                    soup = BeautifulSoup(resp.text, "html.parser")
-                    
-                    # 1. Search for "Refer to original post" link
-                    for a in soup.find_all("a"):
-                        text = a.get_text(separator=' ', strip=True)
-                        href = (a.get("href") or "").strip()
-                        if re.search(r'refer\s+to\s+original\s+post|original\s+post|main\s+series\s+post|main\s+post', text, re.I):
-                            if href.startswith("http") and "jnovels.com" in href:
-                                orig_link = href
-                                break
+                with httpx.Client(headers=DEFAULT_HEADERS, timeout=15.0, follow_redirects=True) as client:
+                    resp = client.get(url)
+                    if resp.status_code == 200:
+                        soup = BeautifulSoup(resp.text, "html.parser")
+            except Exception as e:
+                logger.debug(f"Error fetching {url} with httpx: {e}")
+        else:
+            try:
+                req = urllib.request.Request(url, headers=DEFAULT_HEADERS)
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    soup = BeautifulSoup(resp.read().decode('utf-8', errors='ignore'), "html.parser")
+            except Exception as e:
+                logger.debug(f"Error fetching {url} with urllib: {e}")
 
-                    # 2. Extract description from page
-                    synopsis = JNovelsProvider.parse_description_from_soup(soup)
+        if soup:
+            # 1. Search for "Refer to original post" link
+            for a in soup.find_all("a"):
+                text = a.get_text(separator=' ', strip=True)
+                href = (a.get("href") or "").strip()
+                if re.search(r'refer\s+to\s+original\s+post|original\s+post|main\s+series\s+post|main\s+post', text, re.I):
+                    if href.startswith("http") and "jnovels.com" in href:
+                        orig_link = href
+                        break
 
-                    # 3. Extract cover image from page
-                    cover_url = JNovelsProvider.parse_cover_from_soup(soup)
+            # 2. Extract description from page
+            synopsis = JNovelsProvider.parse_description_from_soup(soup)
 
-                    # If volume post didn't have synopsis or cover, but has orig_link, fetch orig_link
-                    if (not synopsis or not cover_url) and orig_link and orig_link != url:
-                        try:
+            # 3. Extract cover image from page
+            cover_url = JNovelsProvider.parse_cover_from_soup(soup)
+
+            # If volume post didn't have synopsis or cover, but has orig_link, fetch orig_link
+            if (not synopsis or not cover_url) and orig_link and orig_link != url:
+                try:
+                    soup_orig = None
+                    if httpx is not None:
+                        with httpx.Client(headers=DEFAULT_HEADERS, timeout=15.0, follow_redirects=True) as client:
                             resp_orig = client.get(orig_link)
                             if resp_orig.status_code == 200:
                                 soup_orig = BeautifulSoup(resp_orig.text, "html.parser")
-                                if not synopsis:
-                                    synopsis = JNovelsProvider.parse_description_from_soup(soup_orig)
-                                if not cover_url:
-                                    cover_url = JNovelsProvider.parse_cover_from_soup(soup_orig)
-                        except Exception as e:
-                            logger.debug(f"Error fetching canonical series link {orig_link}: {e}")
+                    else:
+                        req_orig = urllib.request.Request(orig_link, headers=DEFAULT_HEADERS)
+                        with urllib.request.urlopen(req_orig, timeout=15) as resp_orig:
+                            soup_orig = BeautifulSoup(resp_orig.read().decode('utf-8', errors='ignore'), "html.parser")
 
-            except Exception as e:
-                logger.debug(f"Error extracting details from {url}: {e}")
+                    if soup_orig:
+                        if not synopsis:
+                            synopsis = JNovelsProvider.parse_description_from_soup(soup_orig)
+                        if not cover_url:
+                            cover_url = JNovelsProvider.parse_cover_from_soup(soup_orig)
+                except Exception as e:
+                    logger.debug(f"Error fetching canonical series link {orig_link}: {e}")
 
         # If url itself was already the main series page, orig_link is url
         final_series_link = orig_link or (url if not any(v in url.lower() for v in ('volume', 'vol-', 'vol.')) else None)
+
+        # 4. Fallback to Kitsu / AniList community novel databases if synopsis or cover is missing
+        if not synopsis or not cover_url:
+            search_title = series_name
+            if not search_title and soup:
+                title_tag = soup.select_one("h1.entry-title, h1.post-title, h1, title")
+                if title_tag:
+                    search_title = title_tag.get_text(strip=True)
+            if not search_title and url:
+                parsed_slug = re.sub(r'https?://[^/]+/', '', url).replace('-', ' ').strip('/')
+                search_title = parsed_slug
+
+            if search_title:
+                try:
+                    from app.providers.metadata import NovelMetadataProvider
+                    meta = NovelMetadataProvider.fetch_novel_metadata(search_title)
+                    if meta:
+                        if not synopsis and meta.get("synopsis"):
+                            synopsis = meta["synopsis"]
+                            logger.info(f"Enriched synopsis for '{search_title}' using {meta.get('source')}.")
+                        if not cover_url and meta.get("cover_url"):
+                            cover_url = meta["cover_url"]
+                            logger.info(f"Enriched cover for '{search_title}' using {meta.get('source')}.")
+                except Exception as e:
+                    logger.debug(f"External metadata query failed for '{search_title}': {e}")
 
         return {
             "series_link": final_series_link,

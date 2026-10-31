@@ -353,7 +353,11 @@ class TaskManager:
                     target_url = d.get("series_link") or d.get("link")
                     if target_url:
                         self.db.set_setting("backfill_progress", f"Enriching synopsis {idx}/{total_to_enrich}: {d.get('series_name')}")
-                        details = await asyncio.to_thread(JNovelsProvider.extract_synopsis_and_original_link, target_url)
+                        details = await asyncio.to_thread(
+                            JNovelsProvider.extract_synopsis_and_original_link, 
+                            target_url, 
+                            series_name=d.get('series_name')
+                        )
                         if details.get("synopsis") or details.get("series_link") or details.get("cover_url"):
                             self.db.update_release_details(
                                 d["id"],

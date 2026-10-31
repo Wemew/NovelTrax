@@ -424,11 +424,22 @@ async def api_fetch_synopsis(release_id: int):
             raise HTTPException(status_code=404, detail="Release not found")
 
     target_url = row["series_link"] or row["link"]
-    if not target_url:
-        return JSONResponse({"status": "error", "message": "No link available"}, status_code=400)
-
     from app.providers.jnovels import JNovelsProvider
-    details = await asyncio.to_thread(JNovelsProvider.extract_synopsis_and_original_link, target_url)
+
+    if not target_url:
+        from app.providers.metadata import NovelMetadataProvider
+        meta = await asyncio.to_thread(NovelMetadataProvider.fetch_novel_metadata, row["series_name"] or row["title"])
+        details = {
+            "synopsis": meta.get("synopsis") if meta else None,
+            "cover_url": meta.get("cover_url") if meta else None,
+            "series_link": None
+        }
+    else:
+        details = await asyncio.to_thread(
+            JNovelsProvider.extract_synopsis_and_original_link, 
+            target_url, 
+            series_name=row["series_name"] or row["title"]
+        )
 
     db.update_release_details(
         release_id,
@@ -470,11 +481,24 @@ async def api_fetch_series_info(series_id: int):
             if rel and rel["series_link"]:
                 target_url = rel["series_link"]
 
-    if not target_url:
-        return JSONResponse({"status": "error", "message": "No website URL configured for this series"}, status_code=400)
-
     from app.providers.jnovels import JNovelsProvider
-    details = await asyncio.to_thread(JNovelsProvider.extract_synopsis_and_original_link, target_url)
+
+    if not target_url:
+        from app.providers.metadata import NovelMetadataProvider
+        meta = await asyncio.to_thread(NovelMetadataProvider.fetch_novel_metadata, row["name"])
+        if not meta or (not meta.get("synopsis") and not meta.get("cover_url")):
+            return JSONResponse({"status": "error", "message": "No description found online"}, status_code=404)
+        details = {
+            "synopsis": meta.get("synopsis"),
+            "cover_url": meta.get("cover_url"),
+            "series_link": None
+        }
+    else:
+        details = await asyncio.to_thread(
+            JNovelsProvider.extract_synopsis_and_original_link, 
+            target_url, 
+            series_name=row["name"]
+        )
 
     db.update_series_details(
         series_id,

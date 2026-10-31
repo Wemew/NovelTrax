@@ -437,6 +437,29 @@ def run_e2e_test():
     assert "Pretty sure vol 2" not in desc_5
     assert "Associated Names" not in desc_5
     print("  ✓ Edge case 5 passed: expander div synopsis cleanly extracted without comments or leading newlines")
+
+    # STEP 9B: Test NovelMetadataProvider (Kitsu / AniList query and title cleaning)
+    from app.providers.metadata import NovelMetadataProvider
+    assert NovelMetadataProvider.clean_search_title("The Devil is a Part-Timer all volumes EPUB") == "The Devil is a Part-Timer"
+    assert NovelMetadataProvider.clean_search_title("DanMachi Volume 19 Epub") == "DanMachi"
+    assert NovelMetadataProvider.clean_search_title("Overlord Volume 16") == "Overlord"
+    assert NovelMetadataProvider.clean_search_title("Solo Leveling Volume 1 Epub") == "Solo Leveling"
+    print("  ✓ NovelMetadataProvider: title normalizer cleanly strips release cruft")
+
+    # Verify fallback integration when post has no synopsis
+    sample_empty_post = """
+    <article class="post">
+        <h1>The Devil is a Part-Timer all volumes EPUB</h1>
+        <div class="post-content">
+            <p>You can now download the novel.</p>
+        </div>
+    </article>
+    """
+    # Mock soup parser without network
+    soup_empty = BeautifulSoup(sample_empty_post, "html.parser")
+    assert JNovelsProvider.parse_description_from_soup(soup_empty) is None
+    print("  ✓ Empty post returns None from soup parser, ready for external metadata fallback")
+
     app_db.update_series_details(
         1,
         description="Bell Cranel is a solo adventurer in Orario.",
