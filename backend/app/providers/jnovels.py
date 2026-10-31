@@ -343,10 +343,12 @@ class JNovelsProvider(BaseFeedProvider):
                 if not series_name:
                     continue
 
+                from app.providers.metadata import NovelMetadataProvider
+                clean_series = NovelMetadataProvider.clean_novel_title(series_name)
                 results.append(ReleaseItem(
-                    title=f"{series_name} (Light Novel)",
+                    title=clean_series,
                     link=href,
-                    series_name=series_name,
+                    series_name=clean_series,
                     volume=parsed["volume"] or 1.0,
                     series_link=href,
                     source_feed_name="J-Novels Master Index",

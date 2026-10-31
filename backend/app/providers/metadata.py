@@ -28,7 +28,7 @@ class NovelMetadataProvider:
     def clean_search_title(raw_title: str) -> str:
         """
         Strips release noise (epub, pdf, volume numbers, subtitle cruft)
-        to form an accurate database search query.
+        to form an accurate database search query. Preserves colons in titles.
         """
         if not raw_title:
             return ""
@@ -37,19 +37,18 @@ class NovelMetadataProvider:
         t = re.sub(r'\(?\b(epub|pdf|cbr|cbz|format)\b\)?', '', t, flags=re.I)
         t = re.sub(r'\b(all\s+volumes|volume\s*\d+(\.\d+)?|vol\s*\d+(\.\d+)?|book\s*\d+)\b.*$', '', t, flags=re.I)
         t = re.sub(r'\(?\b(light\s+novel|web\s+novel|novel|ln|wn|jp|en|raw)\b\)?', '', t, flags=re.I)
-        # Strip trailing secondary subtitle after dash or separator if long
-        t = re.sub(r'\s+[\-\–—]\s+.*$', '', t)
-        t = re.sub(r'[:–—]\s+[A-Za-z\s]{15,}$', '', t)
+        t = re.sub(r'\[?\b(light\s+novel|web\s+novel|novel|ln|wn|jp|en|raw)\b\]?', '', t, flags=re.I)
         t = re.sub(r'\s+', ' ', t).strip(' :–—-_()[]')
         return t
 
     @staticmethod
     def clean_novel_title(t: str) -> str:
-        """Removes '(Novel)' or '(Light Novel)' suffixes from canonical titles."""
+        """Removes '(Novel)', '(Light Novel)', and bracketed format noise."""
         if not t:
             return ""
-        t = re.sub(r'\s*\((Novel|Light Novel)\)', '', t, flags=re.I)
-        return t.strip()
+        t = re.sub(r'\s*\(?\b(light\s+novel|web\s+novel|novel|ln|wn)\b\)?', '', t, flags=re.I)
+        t = re.sub(r'\s*\[?\b(light\s+novel|web\s+novel|novel|ln|wn)\b\]?', '', t, flags=re.I)
+        return t.strip(' :–—-_()[]')
 
     @classmethod
     def query_kitsu(cls, cleaned_title: str) -> Optional[Dict[str, Any]]:

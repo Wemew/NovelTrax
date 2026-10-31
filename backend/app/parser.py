@@ -35,6 +35,9 @@ def clean_feed_title(raw_title: str) -> str:
     
     cleaned = raw_title.strip()
     
+    # Remove format/type words enclosed in parens or brackets: (Light Novel), [Light Novel], etc.
+    cleaned = re.sub(r'[\(\[]\s*(?:light\s+novel|web\s+novel|novel|ln|wn|epub|pdf|mobi|azw3)\s*[\)\]]', ' ', cleaned, flags=re.IGNORECASE)
+    
     # Remove square brackets and parentheses tags like [EPUB], (Light Novel), [PDF+EPUB]
     cleaned = re.sub(r"\[.*?\]", " ", cleaned)
     cleaned = re.sub(r"\(.*?\)", " ", cleaned)
@@ -154,7 +157,10 @@ def extract_series_and_volume(raw_title: str) -> Dict[str, Any]:
         except ValueError:
             pass
 
-    # If no volume was recognized, treat cleaned as series name
+    # Ensure series_name and clean_title have no dangling light novel / novel keywords
+    clean_series = re.sub(r'(?i)\s*\(?\b(light\s+novel|web\s+novel|novel|ln|wn)\b\)?', '', result["series_name"]).strip(" -–—:,|")
+    result["series_name"] = clean_series
+    result["clean_title"] = re.sub(r'(?i)\s*\(?\b(light\s+novel|web\s+novel|novel|ln|wn)\b\)?', '', result["clean_title"]).strip(" -–—:,|")
     return result
 
 def match_series_in_calibre(extracted_series: str, calibre_series_list: list, threshold: float = 0.80) -> Optional[dict]:

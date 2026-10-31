@@ -442,16 +442,19 @@ async def api_fetch_synopsis(release_id: int):
             series_name=row["series_name"] or row["title"]
         )
 
-    new_series_name = details.get("english_title") or row["series_name"]
+    from app.providers.metadata import NovelMetadataProvider
+    new_series_name = NovelMetadataProvider.clean_novel_title(details.get("english_title") or row["series_name"])
     new_title = None
-    if details.get("english_title") and row.get("title"):
+    if row.get("title"):
         if any(v in row["title"].lower() for v in ("volume", "vol.", "vol ")):
             from app.parser import extract_series_and_volume
             parsed = extract_series_and_volume(row["title"])
             vol = parsed.get("volume")
-            new_title = f"{new_series_name} Vol. {vol}" if vol is not None else f"{new_series_name} (Light Novel)"
+            new_title = f"{new_series_name} Vol. {vol}" if vol is not None else new_series_name
         else:
-            new_title = f"{new_series_name} (Light Novel)"
+            new_title = new_series_name
+    else:
+        new_title = new_series_name
 
     db.update_release_details(
         release_id,

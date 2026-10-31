@@ -447,12 +447,12 @@ def run_e2e_test():
     assert NovelMetadataProvider.clean_novel_title("The Disabled Tyrant's Beloved Pet Fish (Novel)") == "The Disabled Tyrant's Beloved Pet Fish"
     print("  ✓ NovelMetadataProvider: title normalizer cleanly strips release cruft and prioritizes clean English titles")
 
-    # Verify release details update with English series name and title
+    # Verify release details update with English series name and title (no light novel suffix)
     app_db.update_release_details(
         6,
         description="Official English synopsis from AniList.",
         series_name="Is It Wrong to Try to Pick Up Girls in a Dungeon?",
-        title="Is It Wrong to Try to Pick Up Girls in a Dungeon? (Light Novel)",
+        title="Is It Wrong to Try to Pick Up Girls in a Dungeon?",
         cover_url="https://s4.anilist.co/danmachi-large.jpg"
     )
     with app_db.get_connection() as conn:
@@ -460,9 +460,37 @@ def run_e2e_test():
         cur.execute("SELECT series_name, title, description, cover_url FROM releases WHERE id = 6;")
         r6 = cur.fetchone()
         assert r6["series_name"] == "Is It Wrong to Try to Pick Up Girls in a Dungeon?"
-        assert r6["title"] == "Is It Wrong to Try to Pick Up Girls in a Dungeon? (Light Novel)"
+        assert r6["title"] == "Is It Wrong to Try to Pick Up Girls in a Dungeon?"
         assert r6["description"] == "Official English synopsis from AniList."
-    print("  ✓ Database correctly stores English series_name, title, and synopsis")
+    print("  ✓ Database correctly stores English series_name, title, and synopsis without (Light Novel) noise")
+
+    # STEP 9C: Test Discovery Series Deduplication & (Light Novel) Removal
+    app_db.upsert_release({
+        "guid": "test_kubishime_1",
+        "title": "Strangulation: Kubishime Romanticist (Light Novel)",
+        "series_name": "Strangulation: Kubishime Romanticist (Light Novel)",
+        "volume": 1.0,
+        "link": "https://jnovels.com/strangulation-1/",
+        "status": "NEW",
+        "description": "Synopsis 1"
+    })
+    app_db.upsert_release({
+        "guid": "test_kubishime_2",
+        "title": "Strangulation: Kubishime Romanticist",
+        "series_name": "Strangulation: Kubishime Romanticist",
+        "volume": 1.0,
+        "link": "https://jnovels.com/strangulation-2/",
+        "status": "NEW",
+        "cover_url": "https://jnovels.com/strangulation-cover.jpg"
+    })
+
+    disc_releases = app_db.get_discovery_releases()
+    kubishime_cards = [d for d in disc_releases if "strangulation" in (d.get("series_name") or "").lower()]
+    assert len(kubishime_cards) == 1, f"Expected exactly 1 deduplicated card for Kubishime, but got {len(kubishime_cards)}"
+    assert "(light novel)" not in kubishime_cards[0]["series_name"].lower()
+    assert "(light novel)" not in kubishime_cards[0]["title"].lower()
+    assert kubishime_cards[0]["series_name"] == "Strangulation: Kubishime Romanticist"
+    print("  ✓ Discovery deduplication passed: Duplicate series merged and (Light Novel) tags removed")
 
     # Verify tracking carries over description and cover
     app_db.track_discovered_series("Is It Wrong to Try to Pick Up Girls in a Dungeon?", release_id=6)
