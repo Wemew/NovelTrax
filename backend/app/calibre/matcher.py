@@ -63,6 +63,18 @@ class CalibreMatcher:
         title = release.get("title", "")
         clean_title = clean_feed_title(title)
 
+        # Check official translation policy: If release is tagged as unofficial, ignore it from tracking
+        is_official = release.get("is_official")
+        if is_official is not None and int(is_official) == 0:
+            return {
+                "status": "IGNORED",
+                "matched_book_id": None,
+                "matched_series": None,
+                "effective_volume": float(volume) if volume is not None else 1.0,
+                "missing_volumes": [],
+                "reason": "Unofficial or web novel fan translation ignored"
+            }
+
         # 1. Check title match directly
         norm_title = normalize_text(clean_title)
         if norm_title in self.clean_title_index:

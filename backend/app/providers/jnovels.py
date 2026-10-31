@@ -198,6 +198,69 @@ class JNovelsProvider(BaseFeedProvider):
         return None
 
     @staticmethod
+    def parse_hub_volumes(soup: BeautifulSoup, page_url: str, series_name: str = "", official_only: bool = False) -> List[Dict[str, Any]]:
+        """
+        Extracts sub-volume download links from a series hub page (e.g. Infinite Dendrogram Vol 1-23, Cheat Ability Vol 1-8).
+        Distinguishes between official translations and fan/web novel translations when labeled.
+        """
+        if not soup:
+            return []
+
+        content = soup.select_one(".post-content, .entry-content, article") or soup
+
+        official_marker = None
+        for el in content.find_all(['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'strong', 'b']):
+            txt = el.get_text(strip=True).lower()
+            if 'official translation' in txt:
+                official_marker = el
+                break
+
+        elements = content.find_all(['li', 'p'])
+        passed_official = (official_marker is None)
+
+        volumes = []
+        seen_keys = set()
+
+        for el in elements:
+            if official_marker and (el == official_marker or official_marker in el.parents):
+                passed_official = True
+                continue
+            if 'official translation' in el.get_text(strip=True).lower():
+                passed_official = True
+                continue
+
+            t = el.get_text(separator=' ', strip=True)
+            a = el.find("a")
+            href = a.get("href") if a else ""
+            if not href or not any(w in t.lower() for w in ['volume', 'vol', 'download']):
+                continue
+            if any(bad in href.lower() for bad in ['jnovels.com/faq', 'share=', 'facebook.com', 'twitter.com', '/tag/', 'adjust.com']):
+                continue
+
+            m = re.search(r'\b(?:volumes?|vols?|v)\.?\s*(\d+(?:\.\d+)?)\b', t, re.I)
+            if not m:
+                continue
+            vol = float(m.group(1))
+
+            key = (vol, passed_official)
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+
+            volumes.append({
+                "volume": vol,
+                "text": t,
+                "link": href,
+                "is_official": passed_official,
+                "series_name": series_name
+            })
+
+        if official_only and official_marker:
+            return [v for v in volumes if v["is_official"]]
+
+        return volumes
+
+    @staticmethod
     def parse_cover_from_soup(target_soup: BeautifulSoup) -> Optional[str]:
         """Extracts high-resolution novel cover image, filtering out ads and icons."""
         for selector in ("img.wp-post-image", "img.attachment-post-thumbnail", ".post-thumbnail img", ".entry-content img", "article img", "img"):
@@ -253,10 +316,10 @@ class JNovelsProvider(BaseFeedProvider):
             # 3. Extract cover image from page
             cover_url = JNovelsProvider.parse_cover_from_soup(soup)
 
-            # If volume post didn't have synopsis or cover, but has orig_link, fetch orig_link
-            if (not synopsis or not cover_url) and orig_link and orig_link != url:
+            # If volume post has an orig_link, fetch orig_link to extract full hub description and sub-volumes
+            soup_orig = None
+            if orig_link and orig_link != url:
                 try:
-                    soup_orig = None
                     if httpx is not None:
                         with httpx.Client(headers=DEFAULT_HEADERS, timeout=15.0, follow_redirects=True) as client:
                             resp_orig = client.get(orig_link)
@@ -278,7 +341,21 @@ class JNovelsProvider(BaseFeedProvider):
         # If url itself was already the main series page, orig_link is url
         final_series_link = orig_link or (url if not any(v in url.lower() for v in ('volume', 'vol-', 'vol.')) else None)
 
-        # 4. PRIMARY: Query AniList & Kitsu for official metadata (prioritizing English title)
+        # 4. Extract hub volumes if present (e.g. all 23 volumes on an "all-volumes" or series hub page)
+        hub_soup = soup_orig if ('soup_orig' in locals() and soup_orig) else soup
+        hub_volumes = []
+        if hub_soup:
+            try:
+                hub_volumes = JNovelsProvider.parse_hub_volumes(
+                    hub_soup,
+                    final_series_link or url,
+                    series_name=series_name or "",
+                    official_only=False
+                )
+            except Exception as e:
+                logger.debug(f"Error extracting hub volumes: {e}")
+
+        # 5. PRIMARY: Query AniList & Kitsu for official metadata (prioritizing English title)
         search_title = series_name
         if not search_title and soup:
             title_tag = soup.select_one("h1.entry-title, h1.post-title, h1, title")
@@ -311,7 +388,8 @@ class JNovelsProvider(BaseFeedProvider):
             "synopsis": synopsis,
             "cover_url": cover_url,
             "english_title": english_title,
-            "metadata_source": meta.get("source") if meta else None
+            "metadata_source": meta.get("source") if meta else None,
+            "hub_volumes": hub_volumes
         }
 
     @staticmethod

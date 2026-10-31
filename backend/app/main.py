@@ -439,6 +439,9 @@ async def api_save_settings(payload: Dict[str, Any]):
     if "calibre_path" in payload:
         task_manager.calibre_path = str(payload["calibre_path"])
 
+    if "track_official_only" in payload:
+        db.deduplicate_and_clean_discovery()
+
     # Dynamically reschedule APScheduler tasks
     calibre_min = None
     if "calibre_sync_interval_minutes" in payload:
@@ -595,6 +598,59 @@ async def api_fetch_synopsis(release_id: int):
     )
     if details.get("cover_url"):
         task_manager.cover_cache.cache_sync(details["cover_url"])
+
+    # Unpack sub-volume releases discovered on hub post (e.g. Infinite Dendrogram Vol 1-23, Cheat Ability)
+    hub_vols = details.get("hub_volumes", [])
+    if hub_vols:
+        import hashlib
+        from app.calibre.matcher import CalibreMatcher
+        track_official_only = db.get_setting("track_official_only", "true").lower() == "true"
+        matcher = None
+        try:
+            scanner = task_manager.scanner
+            if scanner and scanner.metadata_db_exists():
+                c_series = scanner.get_all_series()
+                c_books = scanner.get_all_books()
+                matcher = CalibreMatcher(c_series, c_books)
+        except Exception:
+            pass
+
+        for hv in hub_vols:
+            is_off = hv.get("is_official", True)
+            if track_official_only and not is_off:
+                continue
+
+            vol_num = hv["volume"]
+            vol_disp = int(vol_num) if vol_num.is_integer() else vol_num
+            hv_title = f"{new_series_name} Volume {vol_disp} Epub"
+            hv_guid = hashlib.sha256(f"{new_series_name}_{vol_num}_{hv['link']}".encode()).hexdigest()[:16]
+
+            st = "NEW"
+            matched_id = None
+            if matcher:
+                m_eval = matcher.check_release({
+                    "series_name": new_series_name,
+                    "volume": vol_num,
+                    "title": hv_title,
+                    "is_official": 1 if is_off else 0
+                }, auto_request_monitored=True)
+                st = m_eval["status"]
+                matched_id = m_eval.get("matched_book_id")
+
+            db.upsert_release({
+                "guid": hv_guid,
+                "title": hv_title,
+                "series_name": new_series_name,
+                "volume": vol_num,
+                "link": hv["link"],
+                "series_link": details.get("series_link") or target_url,
+                "source_feed_name": row.get("source_feed_name") or "J-Novels Hub",
+                "status": st,
+                "calibre_matched_book_id": matched_id,
+                "is_official": 1 if is_off else 0,
+                "cover_url": details.get("cover_url"),
+                "description": details.get("synopsis")
+            })
 
     return JSONResponse({
         "status": "success",

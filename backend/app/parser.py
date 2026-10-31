@@ -50,10 +50,74 @@ def is_pdf_release(raw_title: Optional[str] = None, link: Optional[str] = None, 
         return True
     return False
 
+SERIES_ALIASES = [
+    {
+        "canonical": "Alya Sometimes Hides Her Feelings in Russian",
+        "aliases": {
+            "alya sometimes hides her feelings in russian",
+            "the neighboring aarya san who sometimes acts affectionate and murmuring in russian",
+            "the neighboring aaryasan who sometimes acts affectionate and murmuring in russian",
+            "tokidoki bosotto russia go de dereru tonari no alya san",
+            "roshidere"
+        }
+    },
+    {
+        "canonical": "I Got a Cheat Ability in a Different World, and Become Extraordinary Even in the Real World",
+        "aliases": {
+            "i got a cheat skill in another world and became unrivaled in the real world too",
+            "i got a cheat ability in a different world and become extraordinary even in the real world",
+            "isekai de cheat skill wo te ni shita ore wa genjitsu sekai wo mo musou suru"
+        }
+    },
+    {
+        "canonical": "By the Grace of the Gods",
+        "aliases": {
+            "by the grace of the gods",
+            "kami tachi ni hirowareta otoko",
+            "kamitachi ni hirowareta otoko"
+        }
+    },
+    {
+        "canonical": "86-Eighty Six",
+        "aliases": {
+            "86",
+            "86 eighty six",
+            "eighty six"
+        }
+    },
+    {
+        "canonical": "Tenkyou no Alderamin (Alderamin On The Sky)",
+        "aliases": {
+            "tenkyou no alderamin",
+            "alderamin on the sky",
+            "tenkyou no alderamin alderamin on the sky"
+        }
+    },
+    {
+        "canonical": "Infinite Dendrogram",
+        "aliases": {
+            "infinite dendrogram",
+            "infinite dendrogram all volumes"
+        }
+    }
+]
+
+def get_canonical_series_name(name: str) -> str:
+    """Returns canonical series name if matched against known alias sets, otherwise original name."""
+    if not name:
+        return ""
+    norm = normalize_text(name)
+    for group in SERIES_ALIASES:
+        for alias in group["aliases"]:
+            if alias in norm or norm in alias:
+                return group["canonical"]
+    return name
+
 def should_merge_series(name_a: str, name_b: str) -> bool:
     """
     Determines if two series names refer to the same underlying series
-    (e.g., '86' and '86-Eighty Six', or 'Tenkyou no Alderamin' and 'Tenkyou no Alderamin (Alderamin On The Sky)').
+    (e.g., '86' and '86-Eighty Six', 'Alya Sometimes Hides Her Feelings in Russian' and
+    'The Neighboring Aarya-San Who Sometimes Acts Affectionate and Murmuring in Russian').
     """
     if not name_a or not name_b:
         return False
@@ -63,6 +127,13 @@ def should_merge_series(name_a: str, name_b: str) -> bool:
         return False
     if norm_a == norm_b:
         return True
+
+    # 1. Check known alias sets
+    for group in SERIES_ALIASES:
+        matches_a = any(alias in norm_a or norm_a in alias for alias in group["aliases"])
+        matches_b = any(alias in norm_b or norm_b in alias for alias in group["aliases"])
+        if matches_a and matches_b:
+            return True
 
     # Check high string similarity
     if string_similarity(norm_a, norm_b) >= 0.85:
@@ -235,18 +306,18 @@ def extract_series_and_volume(raw_title: str) -> Dict[str, Any]:
             }
 
     # Pattern 1: Explicit volume/book/part keywords:
-    # e.g., "DanMachi Volume 19", "Overlord Vol. 16", "The Eminence in Shadow v6", "Dungeon Crawler Carl Book 7: Subtitle", "Avatar Korra Turf Wars Part 1"
-    # Matches: Series + [delimiter] + (Volume|Vol|v|Book|Part|Pt) + Number + [optional subtitle]
+    # e.g., "DanMachi Volume 19", "Infinite Dendrogram Volumes 1", "Overlord Vol. 16", "The Eminence in Shadow v6", "Dungeon Crawler Carl Book 7: Subtitle", "Avatar Korra Turf Wars Part 1"
+    # Matches: Series + [delimiter] + (Volume|Volumes|Vol|Vols|v|Book|Books|Part|Parts|Pt|Pts) + Number + [optional subtitle]
     p1 = re.compile(
         r"^(?P<series>.+?)\s*(?:[-–—:,]\s*)?"
-        r"(?:\b(?:volume|vol|book|part|pt)\b\.?|\bv\.?)(?:\s*|\.)(?P<vol>\d+(?:\.\d+)?)"
+        r"(?:\b(?:volumes?|vols?|books?|parts?|pts?)\b\.?|\bv\.?)(?:\s*|\.)(?P<vol>\d+(?:\.\d+)?)"
         r"(?:\s*[:\-–—]\s*(?P<subtitle>.*))?$",
         re.IGNORECASE
     )
     m1 = p1.match(cleaned)
     if m1:
         series = m1.group("series").strip(" -–—:,|")
-        series = re.sub(r"(?i)\b(?:volume|vol\.?|book|part|pt\.?)\b$", "", series).strip(" -–—:,|")
+        series = re.sub(r"(?i)\b(?:volumes?|vols?\.?|books?|parts?|pts?\.?)\b$", "", series).strip(" -–—:,|")
         series = re.sub(r'^(?:\s*download|\s*free\s+download|\s*read|\s*get)\s*[:\-–—]?\s*', '', series, flags=re.IGNORECASE).strip(" -–—:,|")
         vol_str = m1.group("vol")
         subtitle = (m1.group("subtitle") or "").strip(" -–—:,|")
@@ -338,7 +409,7 @@ def extract_series_and_volume(raw_title: str) -> Dict[str, Any]:
 
     # Fallback: if volume is still None and not a bundle, search for explicit volume keyword anywhere in raw_title
     if result["volume"] is None and not result["is_bundle"]:
-        m_fallback = re.search(r'(?i)\b(?:volume|vol|book|part|pt)\b\.?\s*(\d+(?:\.\d+)?)', raw_title)
+        m_fallback = re.search(r'(?i)\b(?:volumes?|vols?|books?|parts?|pts?)\b\.?\s*(\d+(?:\.\d+)?)', raw_title)
         if m_fallback:
             try:
                 v = float(m_fallback.group(1))
@@ -347,7 +418,7 @@ def extract_series_and_volume(raw_title: str) -> Dict[str, Any]:
                 result["volume_end"] = v
                 result["volumes"] = [v]
                 result["confidence"] = 0.85
-                extracted_prefix = re.split(r'(?i)\b(?:volume|vol|book|part|pt)\b', result["series_name"])[0]
+                extracted_prefix = re.split(r'(?i)\b(?:volumes?|vols?|books?|parts?|pts?)\b', result["series_name"])[0]
                 if extracted_prefix.strip(" -–—:,|"):
                     result["series_name"] = extracted_prefix.strip(" -–—:,|")
             except ValueError:
@@ -359,7 +430,7 @@ def extract_series_and_volume(raw_title: str) -> Dict[str, Any]:
     clean_series = re.sub(r'(?i)\b(?:all\s+volumes?|complete\s+(?:series|collection|set)?|box\s*set)\b', '', clean_series)
     clean_series = re.sub(r'(?i)\s*\(?\b(light\s+novel|web\s+novel|novel|ln|wn|epub|pdf)\b\)?', '', clean_series)
     clean_series = re.sub(r'(?i)\s*\[?\b(light\s+novel|web\s+novel|novel|ln|wn|epub|pdf)\b\]?', '', clean_series)
-    clean_series = re.sub(r"(?i)\b(?:volume|vol\.?|book|part|pt\.?)\b$", "", clean_series).strip(" -–—:,|")
+    clean_series = re.sub(r"(?i)\b(?:volumes?|vols?\.?|books?|parts?|pts?\.?)\b$", "", clean_series).strip(" -–—:,|")
     result["series_name"] = clean_series
     result["clean_title"] = re.sub(r'(?i)\s*\(?\b(light\s+novel|web\s+novel|novel|ln|wn|epub|pdf)\b\)?', '', result["clean_title"]).strip(" -–—:,|")
     return result

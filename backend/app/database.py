@@ -99,6 +99,11 @@ class Database:
             except sqlite3.OperationalError:
                 pass
 
+            try:
+                cur.execute("ALTER TABLE releases ADD COLUMN is_official INTEGER DEFAULT 1;")
+            except sqlite3.OperationalError:
+                pass
+
             # Series blacklist table
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS series_blacklist (
@@ -157,6 +162,7 @@ class Database:
                     "apprise_url": "",
                     "backfill_max_pages": "30",
                     "backfill_delay_seconds": "2.0",
+                    "track_official_only": "true",
                 }
                 for k, v in defaults.items():
                     cur.execute("INSERT INTO app_settings (key, value) VALUES (?, ?);", (k, v))
@@ -356,6 +362,7 @@ class Database:
                     return False, rel_id
 
             is_bundle_val = 1 if release_data.get("is_bundle") else 0
+            is_official_val = 1 if release_data.get("is_official", 1) else 0
             vols_val = json.dumps(release_data.get("volumes") or ([release_data["volume"]] if release_data.get("volume") is not None else []))
             missing_val = json.dumps(release_data.get("missing_volumes") or [])
 
@@ -379,6 +386,7 @@ class Database:
                         is_bundle = ?,
                         volumes_json = ?,
                         missing_vols_json = ?,
+                        is_official = ?,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE id = ?;
                 """, (
@@ -394,6 +402,7 @@ class Database:
                     is_bundle_val,
                     vols_val,
                     missing_val,
+                    is_official_val,
                     rel_id
                 ))
                 conn.commit()
@@ -404,8 +413,8 @@ class Database:
                         guid, title, series_name, volume, link, pub_date,
                         cover_url, description, author, source_feed_id,
                         source_feed_name, series_link, status, calibre_matched_book_id,
-                        is_bundle, volumes_json, missing_vols_json
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                        is_bundle, volumes_json, missing_vols_json, is_official
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                 """, (
                     guid,
                     release_data["title"],
@@ -423,7 +432,8 @@ class Database:
                     release_data.get("calibre_matched_book_id"),
                     is_bundle_val,
                     vols_val,
-                    missing_val
+                    missing_val,
+                    is_official_val
                 ))
                 rel_id = cur.lastrowid
 
@@ -484,8 +494,11 @@ class Database:
         """
         Groups releases under canonical series, aggregating all bundle volumes,
         highlighting owned vs missing volumes against Calibre tracking.
+        Respects track_official_only setting by filtering out unofficial fan volumes.
         """
-        from app.parser import normalize_text
+        from app.parser import normalize_text, get_canonical_series_name, should_merge_series
+
+        track_official_only = self.get_setting("track_official_only", "true").lower() == "true"
 
         with self.get_connection() as conn:
             cur = conn.cursor()
@@ -521,23 +534,50 @@ class Database:
             groups_dict: Dict[str, Dict[str, Any]] = {}
 
             for rel in raw_releases:
-                s_name = (rel.get("series_name") or "Uncategorized").strip()
-                s_key = normalize_text(s_name) or "uncategorized"
+                is_off = rel.get("is_official")
+                if is_off is None:
+                    is_off = 1
+                is_official = (is_off != 0)
 
-                if s_key not in groups_dict:
+                # If track_official_only is active, mark unofficial releases as IGNORED
+                if track_official_only and not is_official:
+                    if rel.get("status") != "IGNORED":
+                        rel["status"] = "IGNORED"
+
+                s_name = (rel.get("series_name") or "Uncategorized").strip()
+                canonical_s_name = get_canonical_series_name(s_name)
+                s_key = normalize_text(canonical_s_name) or "uncategorized"
+
+                # Check if group already exists under s_key, alias, or shared series_link
+                matched_key = None
+                if s_key in groups_dict:
+                    matched_key = s_key
+                else:
+                    rel_link = (rel.get("series_link") or "").strip().rstrip("/")
+                    for existing_k, existing_g in groups_dict.items():
+                        if should_merge_series(canonical_s_name, existing_g["series_name"]):
+                            matched_key = existing_k
+                            break
+                        g_link = (existing_g.get("website_url") or "").strip().rstrip("/")
+                        if rel_link and g_link and rel_link == g_link:
+                            matched_key = existing_k
+                            break
+
+                if not matched_key:
+                    matched_key = s_key
                     calibre_match = None
                     for t_name_lower, t_row in tracked_map.items():
-                        if normalize_text(t_name_lower) == s_key:
+                        if normalize_text(t_name_lower) == s_key or should_merge_series(canonical_s_name, t_row["name"]):
                             calibre_match = t_row
                             break
 
-                    canonical_title = (calibre_match.get("name") if calibre_match else None) or s_name
+                    canonical_title = (calibre_match.get("name") if calibre_match else None) or canonical_s_name
                     cover = rel.get("cover_url") or (calibre_match.get("cover_url") if calibre_match else "") or ""
                     synopsis = rel.get("description") or (calibre_match.get("description") if calibre_match else "") or ""
                     website_url = rel.get("series_link") or (calibre_match.get("website_url") if calibre_match else "") or ""
 
-                    groups_dict[s_key] = {
-                        "series_key": s_key,
+                    groups_dict[matched_key] = {
+                        "series_key": matched_key,
                         "series_name": canonical_title,
                         "raw_name": s_name,
                         "cover_url": cover,
@@ -557,7 +597,7 @@ class Database:
                         "has_in_calibre": False
                     }
 
-                group = groups_dict[s_key]
+                group = groups_dict[matched_key]
                 group["releases"].append(rel)
                 group["releases_count"] += 1
 
@@ -568,9 +608,18 @@ class Database:
                 if not group["website_url"] and rel.get("series_link"):
                     group["website_url"] = rel["series_link"]
 
+                # If unofficial release and track_official_only is True, skip aggregating volume into wanted coverage
+                if track_official_only and not is_official:
+                    continue
+
                 # Aggregate volumes
-                for v in rel.get("volumes", []):
-                    group["all_volumes_set"].add(v)
+                rel_vols = rel.get("volumes", [])
+                if not rel_vols:
+                    v = rel.get("volume")
+                    group["all_volumes_set"].add(v if v is not None else 1.0)
+                else:
+                    for v in rel_vols:
+                        group["all_volumes_set"].add(v)
                 for mv in rel.get("missing_volumes", []):
                     group["missing_volumes_set"].add(mv)
 
@@ -892,18 +941,28 @@ class Database:
         1. Purges all historical PDF releases.
         2. Fixes falsely classified standalones / unnumbered releases by re-parsing titles (ensures Volume 4 etc. are not marked as Standalone).
         3. Strips dangling '(Light Novel)', '(Novel)', '[Light Novel]', '(LN)' from series_name and title.
-        4. Merges and deduplicates 'NEW' discovery releases with identical, alias, or fuzzy-matching series_names.
+        4. Flags known unofficial/fan web novel translations (e.g. Cheat Ability Vol 9-13) as is_official = 0 and IGNORED.
+        5. Normalizes alias series names to canonical titles.
+        6. Merges and deduplicates 'NEW' discovery releases with identical, alias, shared series_link, or fuzzy-matching series_names.
         """
         # 1. Purge all PDF releases
         self.purge_pdf_releases()
 
-        from app.parser import extract_series_and_volume, should_merge_series
+        from app.parser import extract_series_and_volume, should_merge_series, get_canonical_series_name, SERIES_ALIASES
         from app.providers.metadata import NovelMetadataProvider
 
         with self.get_connection() as conn:
             cur = conn.cursor()
 
-            # 2. Re-parse releases with volume IS NULL or status = 'NEW'
+            # 2. Flag unofficial fan translations
+            cur.execute("""
+                UPDATE releases 
+                SET is_official = 0, status = 'IGNORED'
+                WHERE (lower(series_name) LIKE '%cheat ability%' OR lower(series_name) LIKE '%cheat skill%')
+                  AND volume > 8.0;
+            """)
+
+            # 3. Re-parse releases with volume IS NULL or status = 'NEW'
             cur.execute("""
                 SELECT id, title, series_name, volume 
                 FROM releases 
@@ -915,13 +974,14 @@ class Database:
                 t = r.get("title") or ""
                 p = extract_series_and_volume(t)
                 clean_s = NovelMetadataProvider.clean_novel_title(p["series_name"] or r.get("series_name") or "")
+                canonical_s = get_canonical_series_name(clean_s)
 
                 if p["volume"] is not None and p["volume"] > 1.0:
-                    cur.execute("UPDATE releases SET volume = ?, series_name = ? WHERE id = ?;", (p["volume"], clean_s, r_id))
-                elif clean_s and clean_s != r.get("series_name"):
-                    cur.execute("UPDATE releases SET series_name = ? WHERE id = ?;", (clean_s, r_id))
+                    cur.execute("UPDATE releases SET volume = ?, series_name = ? WHERE id = ?;", (p["volume"], canonical_s, r_id))
+                elif canonical_s and canonical_s != r.get("series_name"):
+                    cur.execute("UPDATE releases SET series_name = ? WHERE id = ?;", (canonical_s, r_id))
 
-            # 3. Clean '(Light Novel)', '(Novel)', etc. from series_name and title in releases
+            # 4. Clean '(Light Novel)', '(Novel)', etc. from series_name and title in releases
             cur.execute("""
                 UPDATE releases 
                 SET series_name = trim(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(series_name, ' (Light Novel)', ''), ' [Light Novel]', ''), ' (Novel)', ''), ' (Web Novel)', ''), ' (LN)', '')),
@@ -938,7 +998,17 @@ class Database:
                    OR title LIKE '%(LN)%';
             """)
 
-            # 4. Alias & fuzzy deduplication for 'NEW' status discovery releases
+            # 5. Apply canonical series names across all releases
+            for group in SERIES_ALIASES:
+                canon = group["canonical"]
+                for alias in group["aliases"]:
+                    cur.execute("""
+                        UPDATE releases 
+                        SET series_name = ?
+                        WHERE lower(trim(series_name)) = lower(trim(?));
+                    """, (canon, alias))
+
+            # 6. Alias, series_link & fuzzy deduplication for 'NEW' status discovery releases
             cur.execute("""
                 SELECT id, title, series_name, volume, description, cover_url, series_link, updated_at
                 FROM releases
@@ -961,7 +1031,14 @@ class Database:
                     if rec_b["id"] in merged_ids:
                         continue
 
-                    if should_merge_series(rec_a["series_name"], rec_b["series_name"]):
+                    links_match = False
+                    if rec_a.get("series_link") and rec_b.get("series_link"):
+                        la = rec_a["series_link"].rstrip("/")
+                        lb = rec_b["series_link"].rstrip("/")
+                        if la == lb:
+                            links_match = True
+
+                    if links_match or should_merge_series(rec_a["series_name"], rec_b["series_name"]):
                         m_desc = rec_a["description"] or rec_b["description"]
                         m_cover = rec_a["cover_url"] or rec_b["cover_url"]
                         m_link = rec_a["series_link"] or rec_b["series_link"]
@@ -978,6 +1055,8 @@ class Database:
                         rec_a["description"] = m_desc
                         rec_a["cover_url"] = m_cover
                         rec_a["series_link"] = m_link
+
+            conn.commit()
 
             conn.commit()
 

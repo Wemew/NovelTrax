@@ -187,6 +187,15 @@
                                     <span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-slate-800 text-amber-300 border border-slate-700">
                                         Vol. {{ r.volume }}
                                     </span>
+                                    {% else %}
+                                    <span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-slate-800 text-slate-300 border border-slate-700">
+                                        Vol. 1
+                                    </span>
+                                    {% endif %}
+                                    {% if r.is_official == 0 %}
+                                    <span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-500/10 text-amber-400 border border-amber-500/20" title="Unofficial or fan web novel translation">
+                                        Unofficial
+                                    </span>
                                     {% endif %}
                                 </div>
                                 <div class="flex items-center gap-3 text-[11px] text-slate-500 mt-1">
@@ -324,6 +333,19 @@
                             <span class="block mt-0.5">
                                 <span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-slate-800 text-amber-300 border border-slate-700">
                                     Vol. {{ r.volume }}
+                                </span>
+                            </span>
+                            {% else %}
+                            <span class="block mt-0.5">
+                                <span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-slate-800 text-slate-300 border border-slate-700">
+                                    Vol. 1
+                                </span>
+                            </span>
+                            {% endif %}
+                            {% if r.is_official == 0 %}
+                            <span class="block mt-0.5">
+                                <span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-500/10 text-amber-400 border border-amber-500/20" title="Unofficial or fan web novel translation">
+                                    Unofficial
                                 </span>
                             </span>
                             {% endif %}

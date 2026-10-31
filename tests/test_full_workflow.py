@@ -922,6 +922,146 @@ def run_e2e_test():
     print("  ✓ Strict volume guard verified: DanMachi Vol 19 does not falsely match DanMachi Vol 1")
 
     print("\n" + "=" * 60)
+    print("STEP 15: TESTING EDGE CASES (ALYA-SAN, GODS VOL 1, CHEAT ABILITY & INFINITE DENDROGRAM)")
+    print("=" * 60)
+    from app.parser import should_merge_series, get_canonical_series_name
+    from app.providers.jnovels import JNovelsProvider
+    from bs4 import BeautifulSoup
+
+    # 1. Alya-san / Roshidere Alias & Series Link Unification
+    alya_hub = "https://jnovels.com/the-neighboring-aarya-san-who-sometimes-acts-affectionate-and-murmuring-in-russian-light-novel-epub/"
+    app_db.upsert_release({
+        "guid": "alya_hub_guid",
+        "title": "The Neighboring Aarya-San Who Sometimes Acts Affectionate and Murmuring in Russian",
+        "series_name": "The Neighboring Aarya-San Who Sometimes Acts Affectionate and Murmuring in Russian",
+        "volume": 1.0,
+        "link": alya_hub,
+        "series_link": alya_hub,
+        "status": "NEW"
+    })
+    app_db.upsert_release({
+        "guid": "alya_vol9_guid",
+        "title": "Alya Sometimes Hides Her Feelings in Russian Volume 9 Epub",
+        "series_name": "Alya Sometimes Hides Her Feelings in Russian",
+        "volume": 9.0,
+        "link": "https://jnovels.com/alya-sometimes-hides-her-feelings-in-russian-volume-9-epub/",
+        "series_link": alya_hub,
+        "status": "REQUESTED"
+    })
+
+    assert should_merge_series("The Neighboring Aarya-San Who Sometimes Acts Affectionate and Murmuring in Russian", "Alya Sometimes Hides Her Feelings in Russian")
+    assert get_canonical_series_name("The Neighboring Aarya-San Who Sometimes Acts Affectionate and Murmuring in Russian") == "Alya Sometimes Hides Her Feelings in Russian"
+
+    groups = app_db.get_releases_grouped_by_series()
+    alya_groups = [g for g in groups if "alya" in g["series_name"].lower() or "aarya" in g["series_name"].lower()]
+    assert len(alya_groups) == 1
+    assert alya_groups[0]["series_name"] == "Alya Sometimes Hides Her Feelings in Russian"
+    assert 9.0 in alya_groups[0]["all_volumes"]
+    print(f"  ✓ Alya-san alias & hub consolidation verified: unified under '{alya_groups[0]['series_name']}' with {len(alya_groups[0]['releases'])} releases")
+
+    # 2. By the Grace of the Gods: Volume 1 without volume moniker
+    gods_hub = "https://jnovels.com/by-the-grace-of-the-gods-light-novel-epub/"
+    p_gods_v1 = extract_series_and_volume("By the Grace of the Gods Epub")
+    assert p_gods_v1["volume"] is None
+    assert p_gods_v1["series_name"] == "By the Grace of the Gods"
+
+    p_gods_v18 = extract_series_and_volume("By the Grace of the Gods Volume 18 Epub")
+    assert p_gods_v18["volume"] == 18.0
+
+    app_db.upsert_release({
+        "guid": "gods_v1_guid",
+        "title": "By the Grace of the Gods Epub",
+        "series_name": p_gods_v1["series_name"],
+        "volume": None,
+        "link": gods_hub,
+        "series_link": gods_hub,
+        "status": "NEW"
+    })
+    app_db.upsert_release({
+        "guid": "gods_v18_guid",
+        "title": "By the Grace of the Gods Volume 18 Epub",
+        "series_name": p_gods_v18["series_name"],
+        "volume": 18.0,
+        "link": "https://jnovels.com/by-the-grace-of-the-gods-volume-18-epub/",
+        "series_link": gods_hub,
+        "status": "REQUESTED"
+    })
+
+    groups = app_db.get_releases_grouped_by_series()
+    gods_group = next(g for g in groups if "by the grace of the gods" in g["series_name"].lower())
+    assert 1.0 in gods_group["all_volumes"], "Unnumbered release must contribute Volume 1.0 to series volume coverage"
+    assert 18.0 in gods_group["all_volumes"]
+    print(f"  ✓ By the Grace of the Gods Volume 1 unnumbered release correctly tracked in series coverage (Volumes: {gods_group['all_volumes']})")
+
+    # 3. Cheat Ability: Official translations only policy
+    app_db.set_setting("track_official_only", "true")
+    # Official volume 8
+    app_db.upsert_release({
+        "guid": "cheat_vol8_guid",
+        "title": "I Got a Cheat Ability in a Different World Volume 8 Epub",
+        "series_name": "I Got a Cheat Ability in a Different World, and Become Extraordinary Even in the Real World",
+        "volume": 8.0,
+        "link": "https://jnovels.com/cheat-ability-vol-8/",
+        "is_official": 1,
+        "status": "REQUESTED"
+    })
+    # Unofficial fan volume 13
+    app_db.upsert_release({
+        "guid": "cheat_vol13_guid",
+        "title": "I Got a Cheat Ability in a Different World Volume 13 Epub",
+        "series_name": "I Got a Cheat Ability in a Different World, and Become Extraordinary Even in the Real World",
+        "volume": 13.0,
+        "link": "https://jnovels.com/cheat-ability-vol-13/",
+        "is_official": 0,
+        "status": "REQUESTED"
+    })
+
+    # CalibreMatcher check: unofficial release is ignored
+    matcher_cheat = CalibreMatcher([], [])
+    eval_cheat_unofficial = matcher_cheat.check_release({
+        "series_name": "I Got a Cheat Ability in a Different World",
+        "volume": 13.0,
+        "is_official": 0
+    })
+    assert eval_cheat_unofficial["status"] == "IGNORED"
+
+    # Database clean up flags vol > 8 as unofficial and ignored
+    app_db.deduplicate_and_clean_discovery()
+
+    groups = app_db.get_releases_grouped_by_series()
+    cheat_group = next(g for g in groups if "cheat" in g["series_name"].lower())
+    assert 8.0 in cheat_group["all_volumes"], "Official volume 8 must be present"
+    assert 13.0 not in cheat_group["all_volumes"], "Unofficial volume 13 must NOT be tracked when track_official_only is enabled"
+    print(f"  ✓ Official Translations Only verified: Vol 8 tracked, Vol 13 excluded (Active volumes: {cheat_group['all_volumes']})")
+
+    # 4. Infinite Dendrogram: Plural 'Volumes 1' pattern and hub parsing
+    p_dendro_v1 = extract_series_and_volume("Infinite Dendrogram Volumes 1 Epub")
+    assert p_dendro_v1["volume"] == 1.0
+    assert p_dendro_v1["series_name"] == "Infinite Dendrogram", f"Expected 'Infinite Dendrogram', got '{p_dendro_v1['series_name']}'"
+    print("  ✓ Plural keyword regex verified: 'Infinite Dendrogram Volumes 1 Epub' parsed cleanly without dangling 'Volumes'")
+
+    mock_dendro_hub_html = """
+    <div class="entry-content">
+        <p><strong>Download Infinite Dendrogram Light Novel Epub</strong></p>
+        <ul>
+            <li><a href="https://jnovels.com/download-infinite-dendrogram-volume-1-epub/">Infinite Dendrogram Volumes 1</a></li>
+            <li><a href="https://jnovels.com/download-infinite-dendrogram-volume-2-epub/">Infinite Dendrogram Volumes 2</a></li>
+            <li><a href="https://jnovels.com/download-infinite-dendrogram-volume-3-epub/">Infinite Dendrogram Volumes 3</a></li>
+            <li><a href="https://jnovels.com/download-infinite-dendrogram-volume-4-epub/">Infinite Dendrogram Volumes 4</a></li>
+            <li><a href="https://jnovels.com/download-infinite-dendrogram-volume-5-epub/">Infinite Dendrogram Volumes 5</a></li>
+            <li><a href="https://jnovels.com/download-infinite-dendrogram-volume-6-epub/">Infinite Dendrogram Volumes 6</a></li>
+            <li><a href="https://jnovels.com/download-infinite-dendrogram-volume-7-epub/">Infinite Dendrogram Volume 7</a></li>
+        </ul>
+    </div>
+    """
+    mock_soup = BeautifulSoup(mock_dendro_hub_html, "html.parser")
+    dendro_hub_vols = JNovelsProvider.parse_hub_volumes(mock_soup, "https://jnovels.com/dendro-hub/", "Infinite Dendrogram")
+    assert len(dendro_hub_vols) == 7
+    extracted_nums = [v["volume"] for v in dendro_hub_vols]
+    assert extracted_nums == [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]
+    print(f"  ✓ Hub parsing unpacked missing Volumes 1–6 and Volume 7 cleanly ({extracted_nums})")
+
+    print("\n" + "=" * 60)
     print("ALL TESTS (INCLUDING SECURITY, SYNOPSIS, PAGINATION, BUNDLES, PDF PURGE & VOL 1 TRACKING) PASSED WITH 100% SUCCESS!")
     print("=" * 60)
 
