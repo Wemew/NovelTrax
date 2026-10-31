@@ -292,6 +292,41 @@ def run_e2e_test():
         assert updated_row["series_link"] == canonical_hub
     print(f"  ✓ Successfully updated release #{test_rel['id']} with synopsis & original post link")
 
+    # Test synopsis logic verifying sqlite3.Row dict conversion and title extraction
+    from app.providers.metadata import NovelMetadataProvider
+    with app_db.get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM releases WHERE id = ?;", (test_rel["id"],))
+        raw_row = cur.fetchone()
+        assert raw_row is not None
+        # Verify sqlite3.Row dict conversion prevents AttributeError on .get()
+        row_dict = dict(raw_row)
+        assert row_dict.get("title") == test_rel["title"]
+
+    mock_details = {
+        "synopsis": "Official synopsis loaded on-demand via API.",
+        "cover_url": "https://example.com/cover_test.jpg",
+        "english_title": "Gate: Thus the JSDF Fought There",
+        "series_link": "https://jnovels.com/gate-hub/"
+    }
+    new_s_name = NovelMetadataProvider.clean_novel_title(mock_details.get("english_title") or row_dict.get("series_name") or row_dict.get("title") or "")
+    app_db.update_release_details(
+        test_rel["id"],
+        description=mock_details.get("synopsis"),
+        series_link=mock_details.get("series_link"),
+        cover_url=mock_details.get("cover_url"),
+        series_name=new_s_name,
+        title=new_s_name
+    )
+    with app_db.get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT description, series_name, title FROM releases WHERE id = ?;", (test_rel["id"],))
+        updated_r = cur.fetchone()
+        assert updated_r["description"] == "Official synopsis loaded on-demand via API."
+        assert updated_r["series_name"] == "Gate: Thus the JSDF Fought There"
+        assert updated_r["title"] == "Gate: Thus the JSDF Fought There"
+    print("  ✓ Synopsis logic safely handled sqlite3.Row dict conversion and updated database successfully")
+
     # Test ReleaseItem with source_feed_name
     from app.providers.base import ReleaseItem
     test_item = ReleaseItem(

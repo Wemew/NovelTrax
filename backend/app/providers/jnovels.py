@@ -145,8 +145,11 @@ class JNovelsProvider(BaseFeedProvider):
                     if curr.name in ('p', 'blockquote'):
                         ptxt = curr.get_text(separator="\n", strip=True)
                         p_lower = ptxt.lower().strip()
-                        if any(p_lower.startswith(bad) for bad in ['download', 'zerobooks', 'associated names', 'associated titles', 'genre', 'related series']):
+                        if any(p_lower.startswith(bad) for bad in ['download', 'zerobooks', 'available in zerobooks']):
                             break
+                        if any(p_lower.startswith(bad) for bad in ['associated names', 'associated titles', 'genre', 'related series']):
+                            curr = curr.find_next_sibling()
+                            continue
                         if ptxt:
                             paragraphs.append(ptxt)
                     elif curr.name == 'div':
@@ -319,13 +322,30 @@ class JNovelsProvider(BaseFeedProvider):
         """
         results = []
         seen_links = set()
-        with httpx.Client(headers=DEFAULT_HEADERS, timeout=20.0, follow_redirects=True) as client:
-            resp = client.get(index_url)
-            resp.raise_for_status()
-            soup = BeautifulSoup(resp.text, "html.parser")
-            content = soup.select_one(".entry-content, article, .post-content")
-            if not content:
-                return results
+        soup = None
+
+        if httpx is not None:
+            try:
+                with httpx.Client(headers=DEFAULT_HEADERS, timeout=20.0, follow_redirects=True) as client:
+                    resp = client.get(index_url)
+                    if resp.status_code == 200:
+                        soup = BeautifulSoup(resp.text, "html.parser")
+            except Exception as e:
+                logger.debug(f"Error fetching master index with httpx: {e}")
+        else:
+            try:
+                req = urllib.request.Request(index_url, headers=DEFAULT_HEADERS)
+                with urllib.request.urlopen(req, timeout=20) as resp:
+                    soup = BeautifulSoup(resp.read().decode('utf-8', errors='ignore'), "html.parser")
+            except Exception as e:
+                logger.debug(f"Error fetching master index with urllib: {e}")
+
+        if not soup:
+            return results
+
+        content = soup.select_one(".entry-content, article, .post-content")
+        if not content:
+            return results
 
             for a in content.find_all("a"):
                 href = (a.get("href") or "").strip()
@@ -364,19 +384,32 @@ class JNovelsProvider(BaseFeedProvider):
         current_url = self.url
         page_num = 1
 
-        with httpx.Client(headers=DEFAULT_HEADERS, timeout=15.0, follow_redirects=True) as client:
-            while current_url and page_num <= self.max_pages:
-                logger.debug(f"JNovels fetching page {page_num}: {current_url}")
+        while current_url and page_num <= self.max_pages:
+            logger.debug(f"JNovels fetching page {page_num}: {current_url}")
+            html_text = None
+            if httpx is not None:
                 try:
-                    resp = client.get(current_url)
-                    if resp.status_code == 404:
-                        logger.info(f"Reached end of pagination at page {page_num} (HTTP 404).")
-                        break
-                    resp.raise_for_status()
-                    html_text = resp.text
+                    with httpx.Client(headers=DEFAULT_HEADERS, timeout=15.0, follow_redirects=True) as client:
+                        resp = client.get(current_url)
+                        if resp.status_code == 404:
+                            logger.info(f"Reached end of pagination at page {page_num} (HTTP 404).")
+                            break
+                        resp.raise_for_status()
+                        html_text = resp.text
                 except Exception as e:
-                    logger.warning(f"Error fetching page {page_num} ({current_url}): {e}")
+                    logger.warning(f"Error fetching page {page_num} ({current_url}) with httpx: {e}")
                     break
+            else:
+                try:
+                    req = urllib.request.Request(current_url, headers=DEFAULT_HEADERS)
+                    with urllib.request.urlopen(req, timeout=15) as resp:
+                        html_text = resp.read().decode('utf-8', errors='ignore')
+                except Exception as e:
+                    logger.warning(f"Error fetching page {page_num} ({current_url}) with urllib: {e}")
+                    break
+
+            if not html_text:
+                break
 
                 soup = BeautifulSoup(html_text, "html.parser")
 

@@ -550,13 +550,14 @@ async def api_fetch_synopsis(release_id: int):
         row = cur.fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Release not found")
+        row = dict(row)
 
-    target_url = row["series_link"] or row["link"]
+    target_url = row.get("series_link") or row.get("link")
     from app.providers.jnovels import JNovelsProvider
 
     if not target_url:
         from app.providers.metadata import NovelMetadataProvider
-        meta = await asyncio.to_thread(NovelMetadataProvider.fetch_novel_metadata, row["series_name"] or row["title"])
+        meta = await asyncio.to_thread(NovelMetadataProvider.fetch_novel_metadata, row.get("series_name") or row.get("title") or "")
         details = {
             "synopsis": meta.get("synopsis") if meta else None,
             "cover_url": meta.get("cover_url") if meta else None,
@@ -567,11 +568,11 @@ async def api_fetch_synopsis(release_id: int):
         details = await asyncio.to_thread(
             JNovelsProvider.extract_synopsis_and_original_link, 
             target_url, 
-            series_name=row["series_name"] or row["title"]
+            series_name=row.get("series_name") or row.get("title") or ""
         )
 
     from app.providers.metadata import NovelMetadataProvider
-    new_series_name = NovelMetadataProvider.clean_novel_title(details.get("english_title") or row["series_name"])
+    new_series_name = NovelMetadataProvider.clean_novel_title(details.get("english_title") or row.get("series_name") or row.get("title") or "")
     new_title = None
     if row.get("title"):
         if any(v in row["title"].lower() for v in ("volume", "vol.", "vol ")):
@@ -614,8 +615,9 @@ async def api_fetch_series_info(series_id: int):
         row = cur.fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Series not found")
+        row = dict(row)
 
-    target_url = row["website_url"]
+    target_url = row.get("website_url")
     if not target_url or "?s=" in target_url:
         with db.get_connection() as conn:
             cur = conn.cursor()
@@ -623,7 +625,7 @@ async def api_fetch_series_info(series_id: int):
                 SELECT series_link, link FROM releases 
                 WHERE lower(series_name) = lower(?) AND series_link IS NOT NULL AND series_link != '' 
                 ORDER BY id DESC LIMIT 1;
-            """, (row["name"],))
+            """, (row.get("name") or "",))
             rel = cur.fetchone()
             if rel and rel["series_link"]:
                 target_url = rel["series_link"]
@@ -632,7 +634,7 @@ async def api_fetch_series_info(series_id: int):
 
     if not target_url:
         from app.providers.metadata import NovelMetadataProvider
-        meta = await asyncio.to_thread(NovelMetadataProvider.fetch_novel_metadata, row["name"])
+        meta = await asyncio.to_thread(NovelMetadataProvider.fetch_novel_metadata, row.get("name") or "")
         if not meta or (not meta.get("synopsis") and not meta.get("cover_url")):
             return JSONResponse({"status": "error", "message": "No description found online"}, status_code=404)
         details = {
@@ -644,7 +646,7 @@ async def api_fetch_series_info(series_id: int):
         details = await asyncio.to_thread(
             JNovelsProvider.extract_synopsis_and_original_link, 
             target_url, 
-            series_name=row["name"]
+            series_name=row.get("name") or ""
         )
 
     db.update_series_details(
