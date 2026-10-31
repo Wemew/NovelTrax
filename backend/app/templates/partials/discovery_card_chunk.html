@@ -1,0 +1,80 @@
+{% for item in discovered_releases %}
+<div class="discovery-card bg-slate-900/90 border border-slate-800 hover:border-slate-700 rounded-2xl p-4 flex flex-col justify-between transition-all hover:shadow-xl group" data-title="{{ item.title|lower }}" data-series="{{ (item.series_name or '')|lower }}">
+    <div>
+        <!-- Top series & volume badge -->
+        <div class="flex items-start justify-between gap-2 mb-2">
+            <span id="series-badge-{{ item.id }}" class="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-bold bg-amber-500/10 text-amber-400 border border-amber-500/20">
+                {{ item.series_name or 'Standalone Novel' }}
+            </span>
+            <span class="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-bold {% if item.is_bundle %}bg-purple-500/15 text-purple-300 border border-purple-500/30{% elif item.volume == 1.0 %}bg-brand-500/15 text-brand-300 border border-brand-500/30{% else %}bg-slate-800 text-slate-300 border border-slate-700{% endif %}">
+                {{ 'Bundle' if item.is_bundle else ('Vol. 1' if item.volume == 1.0 else 'Standalone') }}
+            </span>
+        </div>
+
+        <!-- Book info container -->
+        <div class="flex gap-3.5 mt-2">
+            {% if item.cover_url %}
+            <img src="/api/covers?url={{ item.cover_url|urlencode }}" alt="Cover" loading="lazy" decoding="async" onclick="openImageModal(this.src, '{{ (item.series_name or item.title)|escape }}')" class="w-16 h-24 object-cover rounded-lg border border-slate-800 flex-shrink-0 shadow-md cursor-pointer hover:opacity-85 hover:scale-[1.03] transition-all cover-placeholder" title="Click to enlarge thumbnail">
+            {% else %}
+            <div class="w-16 h-24 rounded-lg bg-slate-800/80 border border-slate-700 flex flex-col items-center justify-center flex-shrink-0 text-slate-500" id="cover-box-{{ item.id }}">
+                <i data-lucide="book-open" class="w-6 h-6"></i>
+                <span class="text-[9px] mt-1 font-semibold">NOVEL</span>
+            </div>
+            {% endif %}
+
+            <div class="min-w-0 flex-1">
+                <h3 id="title-heading-{{ item.id }}" class="text-sm font-bold text-white line-clamp-2 group-hover:text-brand-400 transition-colors" title="{{ item.title }}">
+                    {{ item.title }}
+                </h3>
+                <p class="text-[11px] text-slate-400 mt-1 flex items-center gap-1">
+                    <i data-lucide="globe" class="w-3 h-3 text-slate-500"></i>
+                    {{ item.source_feed_name or 'Web Feed' }}
+                </p>
+                <p class="text-[11px] text-slate-500 mt-0.5 flex items-center gap-1">
+                    <i data-lucide="calendar" class="w-3 h-3 text-slate-500"></i>
+                    {{ item.pub_date[:10] if item.pub_date else 'Recent' }}
+                </p>
+            </div>
+        </div>
+
+        <!-- Synopsis / Description preview (Scrollable) -->
+        {% if item.description %}
+        <div class="max-h-28 overflow-y-auto pr-1 text-xs text-slate-300/90 mt-2.5 leading-relaxed bg-slate-950/50 p-2.5 rounded-xl border border-slate-800/60 whitespace-pre-line custom-scrollbar" title="{{ item.description }}">{{ item.description.strip() }}</div>
+        {% else %}
+        <div class="mt-2.5 flex items-center justify-between text-[11px] text-slate-500 bg-slate-950/30 px-2.5 py-1.5 rounded-xl border border-slate-800/40" id="synopsis-box-{{ item.id }}">
+            <span class="italic text-[10px]">No description loaded</span>
+            <button data-release-id="{{ item.id }}" onclick="handleFetchSynopsis(this)" class="text-brand-400 hover:text-brand-300 font-semibold flex items-center gap-1 hover:underline text-[10px]">
+                <i data-lucide="sparkles" class="w-3 h-3"></i> Load Description
+            </button>
+        </div>
+        {% endif %}
+    </div>
+
+    <!-- Action Toolbar: Track vs Blacklist -->
+    <div class="mt-4 pt-3.5 border-t border-slate-800/80 space-y-2.5">
+        <div class="flex items-center justify-between text-xs">
+            <div class="flex items-center gap-2 flex-wrap">
+                {% if item.series_link %}
+                <a href="{{ item.series_link }}" target="_blank" rel="noopener noreferrer" class="text-[11px] font-semibold text-brand-400 hover:text-brand-300 flex items-center gap-1 bg-brand-500/10 hover:bg-brand-500/20 px-2 py-0.5 rounded border border-brand-500/20 transition-colors" title="Referred to original post / main series page">
+                    <i data-lucide="book-marked" class="w-3 h-3"></i> Original Post
+                </a>
+                {% endif %}
+                <a href="{{ item.link }}" target="_blank" rel="noopener noreferrer" class="text-[11px] text-slate-400 hover:text-white flex items-center gap-1 transition-colors">
+                    <i data-lucide="external-link" class="w-3 h-3"></i> Release Post
+                </a>
+            </div>
+        </div>
+
+        <div class="grid grid-cols-2 gap-2">
+            <button id="track-btn-{{ item.id }}" data-series-name="{{ item.series_name }}" data-release-id="{{ item.id }}" onclick="handleTrackBtn(this)" class="w-full px-3 py-2 rounded-xl bg-brand-600 hover:bg-brand-500 text-white font-bold text-xs flex items-center justify-center gap-1.5 transition-all shadow-md shadow-brand-600/20 active:scale-95" title="Track this series and add to Calibre wishlist">
+                <i data-lucide="bookmark-plus" class="w-3.5 h-3.5"></i>
+                Track Series
+            </button>
+            <button id="blacklist-btn-{{ item.id }}" data-series-name="{{ item.series_name }}" onclick="handleBlacklistBtn(this)" class="w-full px-3 py-2 rounded-xl bg-slate-800 hover:bg-rose-500/20 text-slate-300 hover:text-rose-400 border border-slate-700 hover:border-rose-500/30 font-bold text-xs flex items-center justify-center gap-1.5 transition-all active:scale-95" title="Blacklist series: never track or notify for future releases">
+                <i data-lucide="ban" class="w-3.5 h-3.5 text-rose-400"></i>
+                Blacklist
+            </button>
+        </div>
+    </div>
+</div>
+{% endfor %}

@@ -35,3 +35,7 @@ Thumbs.db
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Scratch & temporary test scripts
+scratch/
+

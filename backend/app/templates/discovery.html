@@ -70,99 +70,56 @@
 
     <!-- TAB 1: Discovery Panel -->
     <div id="tab-content-discovery" class="space-y-4">
-        <!-- Search filter -->
-        <div class="bg-slate-900/80 border border-slate-800 rounded-2xl p-4 flex items-center justify-between gap-3">
-            <div class="relative w-full sm:w-80">
+        <!-- Search filter, Sort & Pagination Controls -->
+        <div class="bg-slate-900/80 border border-slate-800 rounded-2xl p-4 flex flex-col md:flex-row items-center justify-between gap-3">
+            <form action="/discovery" method="GET" class="relative w-full md:w-80 flex items-center">
                 <i data-lucide="search" class="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2"></i>
-                <input type="text" id="discovery-search" oninput="filterDiscovery()" placeholder="Filter discovered releases..." class="w-full bg-slate-950/70 border border-slate-700/80 rounded-xl pl-10 pr-4 py-2 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-brand-500">
+                <input type="text" name="q" id="discovery-search" value="{{ search_query }}" oninput="filterDiscovery()" placeholder="Search or filter discovered novels..." class="w-full bg-slate-950/70 border border-slate-700/80 rounded-xl pl-10 pr-8 py-2 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-brand-500">
+                <input type="hidden" name="page_size" value="{{ page_size }}">
+                <input type="hidden" name="sort" value="{{ current_sort }}">
+                {% if search_query %}
+                <a href="/discovery?page_size={{ page_size }}&sort={{ current_sort }}" class="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-white" title="Clear search">
+                    <i data-lucide="x" class="w-3.5 h-3.5"></i>
+                </a>
+                {% endif %}
+            </form>
+            <div class="flex flex-wrap items-center justify-between w-full md:w-auto gap-3 text-xs text-slate-400">
+                <!-- Sort Selector -->
+                <div class="flex items-center gap-1.5">
+                    <span class="text-xs text-slate-400 whitespace-nowrap flex items-center gap-1">
+                        <i data-lucide="arrow-up-down" class="w-3.5 h-3.5 text-slate-400"></i>
+                        <span>Sort:</span>
+                    </span>
+                    <select onchange="changeDiscoverySort(this.value)" class="bg-slate-900 border border-slate-700 text-slate-200 rounded-xl px-2.5 py-1.5 text-xs focus:outline-none focus:border-brand-500 cursor-pointer">
+                        <option value="date_desc" {% if current_sort == 'date_desc' %}selected{% endif %}>Release Date: New to Old</option>
+                        <option value="date_asc" {% if current_sort == 'date_asc' %}selected{% endif %}>Release Date: Old to New</option>
+                        <option value="title_asc" {% if current_sort == 'title_asc' %}selected{% endif %}>Title: A to Z</option>
+                        <option value="title_desc" {% if current_sort == 'title_desc' %}selected{% endif %}>Title: Z to A</option>
+                        <option value="series_asc" {% if current_sort == 'series_asc' %}selected{% endif %}>Series Name: A to Z</option>
+                        <option value="series_desc" {% if current_sort == 'series_desc' %}selected{% endif %}>Series Name: Z to A</option>
+                    </select>
+                </div>
+
+                <!-- Per page selector -->
+                <div class="flex items-center gap-1.5">
+                    <span class="text-slate-400 text-xs">Per page:</span>
+                    <select onchange="changeDiscoveryPageSize(this.value)" class="bg-slate-900 border border-slate-700 text-slate-200 rounded-xl px-2.5 py-1.5 text-xs focus:outline-none focus:border-brand-500 cursor-pointer">
+                        <option value="12" {% if page_size == 12 %}selected{% endif %}>12</option>
+                        <option value="24" {% if page_size == 24 %}selected{% endif %}>24</option>
+                        <option value="48" {% if page_size == 48 %}selected{% endif %}>48</option>
+                        <option value="96" {% if page_size == 96 %}selected{% endif %}>96</option>
+                    </select>
+                </div>
+
+                <p class="hidden lg:block text-slate-500">
+                    Showing <strong class="text-white">{{ (current_page - 1) * page_size + 1 if total_count > 0 else 0 }}</strong> to <strong class="text-white">{{ [current_page * page_size, total_count]|min }}</strong> of <strong class="text-white">{{ total_count }}</strong>
+                </p>
             </div>
-            <p class="text-xs text-slate-400 hidden sm:block">
-                Showing {{ (current_page - 1) * page_size + 1 }} to {{ [current_page * page_size, total_count]|min }} of {{ total_count }} potential new series
-            </p>
         </div>
 
         {% if discovered_releases %}
         <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4" id="discovery-grid">
-            {% for item in discovered_releases %}
-            <div class="discovery-card bg-slate-900/90 border border-slate-800 hover:border-slate-700 rounded-2xl p-4 flex flex-col justify-between transition-all hover:shadow-xl group" data-title="{{ item.title|lower }}" data-series="{{ (item.series_name or '')|lower }}">
-                <div>
-                    <!-- Top series & volume badge -->
-                    <div class="flex items-start justify-between gap-2 mb-2">
-                        <span id="series-badge-{{ item.id }}" class="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-bold bg-amber-500/10 text-amber-400 border border-amber-500/20">
-                            {{ item.series_name or 'Standalone Novel' }}
-                        </span>
-                        <span class="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-bold {% if item.is_bundle %}bg-purple-500/15 text-purple-300 border border-purple-500/30{% elif item.volume == 1.0 %}bg-brand-500/15 text-brand-300 border border-brand-500/30{% else %}bg-slate-800 text-slate-300 border border-slate-700{% endif %}">
-                            {{ 'Bundle' if item.is_bundle else ('Vol. 1' if item.volume == 1.0 else 'Standalone') }}
-                        </span>
-                    </div>
-
-                    <!-- Book info container -->
-                    <div class="flex gap-3.5 mt-2">
-                        {% if item.cover_url %}
-                        <img src="/api/covers?url={{ item.cover_url|urlencode }}" alt="Cover" loading="lazy" onclick="openImageModal(this.src, '{{ (item.series_name or item.title)|escape }}')" class="w-16 h-24 object-cover rounded-lg border border-slate-800 flex-shrink-0 shadow-md cursor-pointer hover:opacity-85 hover:scale-[1.03] transition-all" title="Click to enlarge thumbnail">
-                        {% else %}
-                        <div class="w-16 h-24 rounded-lg bg-slate-800/80 border border-slate-700 flex flex-col items-center justify-center flex-shrink-0 text-slate-500" id="cover-box-{{ item.id }}">
-                            <i data-lucide="book-open" class="w-6 h-6"></i>
-                            <span class="text-[9px] mt-1 font-semibold">NOVEL</span>
-                        </div>
-                        {% endif %}
-
-                        <div class="min-w-0 flex-1">
-                            <h3 id="title-heading-{{ item.id }}" class="text-sm font-bold text-white line-clamp-2 group-hover:text-brand-400 transition-colors" title="{{ item.title }}">
-                                {{ item.title }}
-                            </h3>
-                            <p class="text-[11px] text-slate-400 mt-1 flex items-center gap-1">
-                                <i data-lucide="globe" class="w-3 h-3 text-slate-500"></i>
-                                {{ item.source_feed_name or 'Web Feed' }}
-                            </p>
-                            <p class="text-[11px] text-slate-500 mt-0.5 flex items-center gap-1">
-                                <i data-lucide="calendar" class="w-3 h-3 text-slate-500"></i>
-                                {{ item.pub_date[:10] if item.pub_date else 'Recent' }}
-                            </p>
-                        </div>
-                    </div>
-
-                    <!-- Synopsis / Description preview (Scrollable) -->
-                    {% if item.description %}
-                    <div class="max-h-28 overflow-y-auto pr-1 text-xs text-slate-300/90 mt-2.5 leading-relaxed bg-slate-950/50 p-2.5 rounded-xl border border-slate-800/60 whitespace-pre-line custom-scrollbar" title="{{ item.description }}">{{ item.description.strip() }}</div>
-                    {% else %}
-                    <div class="mt-2.5 flex items-center justify-between text-[11px] text-slate-500 bg-slate-950/30 px-2.5 py-1.5 rounded-xl border border-slate-800/40" id="synopsis-box-{{ item.id }}">
-                        <span class="italic text-[10px]">No description loaded</span>
-                        <button data-release-id="{{ item.id }}" onclick="handleFetchSynopsis(this)" class="text-brand-400 hover:text-brand-300 font-semibold flex items-center gap-1 hover:underline text-[10px]">
-                            <i data-lucide="sparkles" class="w-3 h-3"></i> Load Description
-                        </button>
-                    </div>
-                    {% endif %}
-                </div>
-
-                <!-- Action Toolbar: Track vs Blacklist -->
-                <div class="mt-4 pt-3.5 border-t border-slate-800/80 space-y-2.5">
-                    <div class="flex items-center justify-between text-xs">
-                        <div class="flex items-center gap-2 flex-wrap">
-                            {% if item.series_link %}
-                            <a href="{{ item.series_link }}" target="_blank" rel="noopener noreferrer" class="text-[11px] font-semibold text-brand-400 hover:text-brand-300 flex items-center gap-1 bg-brand-500/10 hover:bg-brand-500/20 px-2 py-0.5 rounded border border-brand-500/20 transition-colors" title="Referred to original post / main series page">
-                                <i data-lucide="book-marked" class="w-3 h-3"></i> Original Post
-                            </a>
-                            {% endif %}
-                            <a href="{{ item.link }}" target="_blank" rel="noopener noreferrer" class="text-[11px] text-slate-400 hover:text-white flex items-center gap-1 transition-colors">
-                                <i data-lucide="external-link" class="w-3 h-3"></i> Release Post
-                            </a>
-                        </div>
-                    </div>
-
-                    <div class="grid grid-cols-2 gap-2">
-                        <button id="track-btn-{{ item.id }}" data-series-name="{{ item.series_name }}" data-release-id="{{ item.id }}" onclick="handleTrackBtn(this)" class="w-full px-3 py-2 rounded-xl bg-brand-600 hover:bg-brand-500 text-white font-bold text-xs flex items-center justify-center gap-1.5 transition-all shadow-md shadow-brand-600/20 active:scale-95" title="Track this series and add to Calibre wishlist">
-                            <i data-lucide="bookmark-plus" class="w-3.5 h-3.5"></i>
-                            Track Series
-                        </button>
-                        <button id="blacklist-btn-{{ item.id }}" data-series-name="{{ item.series_name }}" onclick="handleBlacklistBtn(this)" class="w-full px-3 py-2 rounded-xl bg-slate-800 hover:bg-rose-500/20 text-slate-300 hover:text-rose-400 border border-slate-700 hover:border-rose-500/30 font-bold text-xs flex items-center justify-center gap-1.5 transition-all active:scale-95" title="Blacklist series: never track or notify for future releases">
-                            <i data-lucide="ban" class="w-3.5 h-3.5 text-rose-400"></i>
-                            Blacklist
-                        </button>
-                    </div>
-                </div>
-            </div>
-            {% endfor %}
+            {% include "partials/discovery_card_chunk.html" %}
         </div>
 
         <!-- Pagination Bar -->
@@ -174,10 +131,10 @@
             <div class="flex items-center space-x-1.5">
                 <!-- First & Prev -->
                 {% if current_page > 1 %}
-                <a href="/discovery?page=1" class="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition-colors flex items-center gap-1" title="First Page">
+                <a href="/discovery?page=1&page_size={{ page_size }}&sort={{ current_sort }}{% if search_query %}&q={{ search_query|urlencode }}{% endif %}" class="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition-colors flex items-center gap-1" title="First Page">
                     <i data-lucide="chevrons-left" class="w-3.5 h-3.5"></i>
                 </a>
-                <a href="/discovery?page={{ current_page - 1 }}" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition-colors flex items-center gap-1">
+                <a href="/discovery?page={{ current_page - 1 }}&page_size={{ page_size }}&sort={{ current_sort }}{% if search_query %}&q={{ search_query|urlencode }}{% endif %}" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition-colors flex items-center gap-1">
                     <i data-lucide="chevron-left" class="w-3.5 h-3.5"></i>
                     <span>Previous</span>
                 </a>
@@ -195,11 +152,11 @@
 
                 <!-- Next & Last -->
                 {% if current_page < total_pages %}
-                <a href="/discovery?page={{ current_page + 1 }}" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition-colors flex items-center gap-1">
+                <a href="/discovery?page={{ current_page + 1 }}&page_size={{ page_size }}&sort={{ current_sort }}{% if search_query %}&q={{ search_query|urlencode }}{% endif %}" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition-colors flex items-center gap-1">
                     <span>Next</span>
                     <i data-lucide="chevron-right" class="w-3.5 h-3.5"></i>
                 </a>
-                <a href="/discovery?page={{ total_pages }}" class="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition-colors flex items-center gap-1" title="Last Page">
+                <a href="/discovery?page={{ total_pages }}&page_size={{ page_size }}&sort={{ current_sort }}{% if search_query %}&q={{ search_query|urlencode }}{% endif %}" class="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition-colors flex items-center gap-1" title="Last Page">
                     <i data-lucide="chevrons-right" class="w-3.5 h-3.5"></i>
                 </a>
                 {% else %}
@@ -338,10 +295,20 @@
         const query = document.getElementById('discovery-search').value.toLowerCase();
         const cards = document.querySelectorAll('.discovery-card');
         cards.forEach(c => {
-            const title = c.dataset.title;
-            const series = c.dataset.series;
-            c.style.display = (title.includes(query) || series.includes(query)) ? '' : 'none';
+            const title = c.dataset.title || '';
+            const series = c.dataset.series || '';
+            c.style.display = (!query || title.includes(query) || series.includes(query)) ? '' : 'none';
         });
+    }
+
+    function changeDiscoverySort(newSort) {
+        const q = (document.getElementById('discovery-search')?.value || '').trim();
+        window.location.href = `/discovery?page=1&page_size={{ page_size }}&sort=${encodeURIComponent(newSort)}${q ? '&q=' + encodeURIComponent(q) : ''}`;
+    }
+
+    function changeDiscoveryPageSize(newSize) {
+        const q = (document.getElementById('discovery-search')?.value || '').trim();
+        window.location.href = `/discovery?page=1&page_size=${encodeURIComponent(newSize)}&sort={{ current_sort }}${q ? '&q=' + encodeURIComponent(q) : ''}`;
     }
 
     function filterBlacklist() {

@@ -1062,7 +1062,98 @@ def run_e2e_test():
     print(f"  ✓ Hub parsing unpacked missing Volumes 1–6 and Volume 7 cleanly ({extracted_nums})")
 
     print("\n" + "=" * 60)
-    print("ALL TESTS (INCLUDING SECURITY, SYNOPSIS, PAGINATION, BUNDLES, PDF PURGE & VOL 1 TRACKING) PASSED WITH 100% SUCCESS!")
+    print("STEP 16: TESTING SORTING, SEARCH & LAZY LOADING PARTIALS")
+    print("=" * 60)
+    # 1. Discovery sorting: A-Z and Z-A
+    disc_az = app_db.get_discovery_releases(sort="title_asc")
+    disc_za = app_db.get_discovery_releases(sort="title_desc")
+    assert len(disc_az) >= 2
+    assert disc_az[0]["title"].lower() <= disc_az[-1]["title"].lower()
+    assert disc_za[0]["title"].lower() >= disc_za[-1]["title"].lower()
+    print("  ✓ Discovery sorting verified: Alphabetical A to Z and Z to A")
+
+    # 2. Discovery search
+    search_q = disc_az[0]["title"][:5]
+    searched_disc = app_db.get_discovery_releases(search=search_q)
+    assert len(searched_disc) >= 1
+    assert any(search_q.lower() in d["title"].lower() for d in searched_disc)
+    print(f"  ✓ Discovery search query verified for '{search_q}'")
+
+    # 3. Grouped series sorting: name_asc and name_desc
+    grp_az = app_db.get_releases_grouped_by_series(sort="name_asc")
+    grp_za = app_db.get_releases_grouped_by_series(sort="name_desc")
+    assert len(grp_az) >= 2
+    assert grp_az[0]["series_name"].lower() <= grp_az[-1]["series_name"].lower()
+    assert grp_za[0]["series_name"].lower() >= grp_za[-1]["series_name"].lower()
+    print("  ✓ Grouped series sorting verified: Series Name A to Z and Z to A")
+
+    # 4. Grouped series sorting: wanted_first
+    grp_wanted = app_db.get_releases_grouped_by_series(sort="wanted_first")
+    if any(g["has_wanted"] for g in grp_wanted):
+        assert grp_wanted[0]["has_wanted"] is True
+    print("  ✓ Grouped series sorting verified: Wanted First prioritized")
+
+    # 5. Flat releases sorting: title_asc and date_desc
+    flat_az = app_db.get_releases(sort="title_asc", limit=10)
+    assert len(flat_az) >= 2
+    assert flat_az[0]["title"].lower() <= flat_az[-1]["title"].lower()
+    print("  ✓ Flat releases sorting verified: Title A to Z")
+
+    # 6. Verify partial chunks for lazy loading exist and contain lazy attributes
+    backend_dir = os.path.join(BASE_DIR, "backend")
+    templates_dir = os.path.join(backend_dir, "app", "templates")
+    try:
+        from jinja2 import Environment, FileSystemLoader
+        jinja_env = Environment(loader=FileSystemLoader(templates_dir))
+
+        # Series chunk
+        tpl_series = jinja_env.get_template("partials/series_card_chunk.html")
+        html_series = tpl_series.render({"grouped_series": grp_az[:2]})
+        assert 'class="series-card' in html_series
+        assert 'loading="lazy"' in html_series
+        assert 'decoding="async"' in html_series
+        assert 'cover-placeholder' in html_series
+        print("  ✓ Series card chunk partial rendered with lazy loaded artwork and shimmer placeholder")
+
+        # Flat chunk
+        tpl_flat = jinja_env.get_template("partials/flat_release_row_chunk.html")
+        html_flat = tpl_flat.render({"releases": flat_az[:2]})
+        assert 'class="release-row' in html_flat
+        assert 'loading="lazy"' in html_flat
+        print("  ✓ Flat release row chunk partial rendered with lazy loaded thumbnail")
+
+        # Discovery chunk
+        tpl_disc = jinja_env.get_template("partials/discovery_card_chunk.html")
+        html_disc = tpl_disc.render({"discovered_releases": disc_az[:2]})
+        assert 'class="discovery-card' in html_disc
+        assert 'loading="lazy"' in html_disc
+        assert 'Track Series' in html_disc
+        print("  ✓ Discovery card chunk partial rendered with lazy loaded thumbnail and action buttons")
+    except ImportError:
+        series_chunk_file = os.path.join(templates_dir, "partials", "series_card_chunk.html")
+        with open(series_chunk_file, "r", encoding="utf-8") as f:
+            content = f.read()
+            assert 'loading="lazy"' in content
+            assert 'decoding="async"' in content
+            assert 'cover-placeholder' in content
+        print("  ✓ Series card chunk partial validated with lazy loaded artwork and shimmer placeholder")
+
+        flat_chunk_file = os.path.join(templates_dir, "partials", "flat_release_row_chunk.html")
+        with open(flat_chunk_file, "r", encoding="utf-8") as f:
+            content = f.read()
+            assert 'loading="lazy"' in content
+            assert 'decoding="async"' in content
+        print("  ✓ Flat release row chunk partial validated with lazy loaded thumbnail")
+
+        disc_chunk_file = os.path.join(templates_dir, "partials", "discovery_card_chunk.html")
+        with open(disc_chunk_file, "r", encoding="utf-8") as f:
+            content = f.read()
+            assert 'loading="lazy"' in content
+            assert 'Track Series' in content
+        print("  ✓ Discovery card chunk partial validated with lazy loaded thumbnail and action buttons")
+
+    print("\n" + "=" * 60)
+    print("ALL TESTS (INCLUDING SECURITY, SYNOPSIS, PAGINATION, BUNDLES, PDF PURGE, VOL 1, SORTING & LAZY LOADING) PASSED WITH 100% SUCCESS!")
     print("=" * 60)
 
 if __name__ == "__main__":

@@ -114,10 +114,13 @@ async def releases_view(
     status: Optional[str] = None,
     view: str = Query("series"),
     page: int = Query(1, ge=1),
-    page_size: int = Query(30, ge=10, le=200)
+    page_size: int = Query(30, ge=10, le=200),
+    sort: str = Query("date_desc"),
+    q: Optional[str] = Query(None)
 ):
+    clean_q = q.strip() if q else None
     if view != "flat":
-        all_groups = db.get_releases_grouped_by_series(status=status)
+        all_groups = db.get_releases_grouped_by_series(status=status, search=clean_q, sort=sort)
         total_count = len(all_groups)
         total_pages = max(1, math.ceil(total_count / page_size))
         current_page = min(page, total_pages) if total_count > 0 else 1
@@ -126,11 +129,11 @@ async def releases_view(
         releases = []
     else:
         grouped_series = []
-        total_count = db.count_releases(status=status)
+        total_count = db.count_releases(status=status, search=clean_q)
         total_pages = max(1, math.ceil(total_count / page_size))
         current_page = min(page, total_pages) if total_count > 0 else 1
         offset = (current_page - 1) * page_size
-        releases = db.get_releases(status=status, limit=page_size, offset=offset)
+        releases = db.get_releases(status=status, limit=page_size, offset=offset, search=clean_q, sort=sort)
 
     status_counts = db.get_release_status_counts()
 
@@ -143,6 +146,8 @@ async def releases_view(
             "grouped_series": grouped_series,
             "current_status": status,
             "current_view": view,
+            "current_sort": sort,
+            "search_query": clean_q or "",
             "current_page": current_page,
             "page_size": page_size,
             "total_pages": total_pages,
@@ -150,6 +155,81 @@ async def releases_view(
             "status_counts": status_counts
         }
     )
+
+# --- Lazy Loading API Endpoints for Releases & Discovery ---
+@app.get("/api/releases/cards")
+async def api_releases_cards(
+    request: Request,
+    status: Optional[str] = None,
+    offset: int = Query(0, ge=0),
+    limit: int = Query(8, ge=1, le=50),
+    search: Optional[str] = Query(None),
+    sort: str = Query("date_desc")
+):
+    clean_s = search.strip() if search else None
+    groups = db.get_releases_grouped_by_series(status=status, limit=limit, offset=offset, search=clean_s, sort=sort)
+    total = db.count_releases_grouped_by_series(status=status, search=clean_s)
+    has_more = (offset + len(groups)) < total
+    html = templates.get_template("partials/series_card_chunk.html").render(
+        {"request": request, "grouped_series": groups}
+    )
+    return JSONResponse({
+        "status": "success",
+        "offset": offset,
+        "count": len(groups),
+        "total": total,
+        "has_more": has_more,
+        "html": html
+    })
+
+@app.get("/api/releases/flat_rows")
+async def api_releases_flat_rows(
+    request: Request,
+    status: Optional[str] = None,
+    offset: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+    search: Optional[str] = Query(None),
+    sort: str = Query("date_desc")
+):
+    clean_s = search.strip() if search else None
+    releases = db.get_releases(status=status, limit=limit, offset=offset, search=clean_s, sort=sort)
+    total = db.count_releases(status=status, search=clean_s)
+    has_more = (offset + len(releases)) < total
+    html = templates.get_template("partials/flat_release_row_chunk.html").render(
+        {"request": request, "releases": releases}
+    )
+    return JSONResponse({
+        "status": "success",
+        "offset": offset,
+        "count": len(releases),
+        "total": total,
+        "has_more": has_more,
+        "html": html
+    })
+
+@app.get("/api/discovery/cards")
+async def api_discovery_cards(
+    request: Request,
+    offset: int = Query(0, ge=0),
+    limit: int = Query(12, ge=1, le=60),
+    search: Optional[str] = Query(None),
+    sort: str = Query("date_desc")
+):
+    clean_s = search.strip() if search else None
+    discovered = db.get_discovery_releases(limit=limit, offset=offset, search=clean_s, sort=sort)
+    total = db.count_discovery_releases(search=clean_s)
+    has_more = (offset + len(discovered)) < total
+    html = templates.get_template("partials/discovery_card_chunk.html").render(
+        {"request": request, "discovered_releases": discovered}
+    )
+    return JSONResponse({
+        "status": "success",
+        "offset": offset,
+        "count": len(discovered),
+        "total": total,
+        "has_more": has_more,
+        "html": html
+    })
 
 @app.get("/api/releases/grouped")
 async def api_releases_grouped(status: Optional[str] = None):
@@ -185,13 +265,16 @@ async def logs_view(request: Request):
 async def discovery_view(
     request: Request,
     page: int = Query(1, ge=1),
-    page_size: int = Query(30, ge=6, le=120)
+    page_size: int = Query(30, ge=6, le=120),
+    q: Optional[str] = Query(None),
+    sort: str = Query("date_desc")
 ):
-    total_count = db.count_discovery_releases()
+    clean_q = q.strip() if q else None
+    total_count = db.count_discovery_releases(search=clean_q)
     total_pages = max(1, math.ceil(total_count / page_size))
     current_page = min(page, total_pages) if total_count > 0 else 1
     offset = (current_page - 1) * page_size
-    discovered = db.get_discovery_releases(limit=page_size, offset=offset)
+    discovered = db.get_discovery_releases(limit=page_size, offset=offset, search=clean_q, sort=sort)
     blacklisted = db.get_blacklisted_series()
     settings = db.get_all_settings()
 
@@ -206,7 +289,9 @@ async def discovery_view(
             "current_page": current_page,
             "page_size": page_size,
             "total_pages": total_pages,
-            "total_count": total_count
+            "total_count": total_count,
+            "search_query": clean_q or "",
+            "current_sort": sort
         }
     )
 

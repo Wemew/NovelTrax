@@ -1,0 +1,123 @@
+{% for r in releases %}
+<tr class="release-row hover:bg-slate-800/40 transition-colors" data-search="{{ r.title|lower }} {{ (r.series_name or '')|lower }}">
+    <!-- Title & Cover -->
+    <td class="py-3.5 px-4 sm:px-6 font-medium text-white flex items-center gap-3">
+        {% if r.cover_url %}
+        <img src="/api/covers?url={{ r.cover_url|urlencode }}" alt="Cover" loading="lazy" decoding="async" onclick="openImageModal(this.src, '{{ (r.series_name or r.title)|escape }}')" class="w-10 h-14 object-cover rounded shadow flex-shrink-0 border border-slate-800 cursor-pointer hover:opacity-80 hover:scale-105 transition-all cover-placeholder" title="Click to enlarge thumbnail">
+        {% else %}
+        <div class="w-10 h-14 rounded bg-slate-800 border border-slate-700 flex items-center justify-center flex-shrink-0 text-slate-500">
+            <i data-lucide="book" class="w-4 h-4"></i>
+        </div>
+        {% endif %}
+        <div class="min-w-0">
+            <a href="{{ r.link }}" target="_blank" rel="noopener noreferrer" class="font-bold text-white hover:text-brand-400 transition-colors line-clamp-1">
+                {{ r.title }}
+            </a>
+            {% if r.author %}
+            <p class="text-[11px] text-slate-400">{{ r.author }}</p>
+            {% endif %}
+            <a href="{{ r.link }}" target="_blank" rel="noopener noreferrer" class="text-[10px] text-brand-400/80 hover:text-brand-300 flex items-center gap-1 mt-0.5 font-mono">
+                <i data-lucide="external-link" class="w-3 h-3"></i> Open Feed Item
+            </a>
+        </div>
+    </td>
+
+    <!-- Series & Volume -->
+    <td class="py-3.5 px-4">
+        {% if r.series_link %}
+        <a href="{{ r.series_link }}" target="_blank" rel="noopener noreferrer" class="font-bold text-white hover:text-brand-400 transition-colors inline-flex items-center gap-1 group/slink" title="Open Series page on website">
+            <span>{{ r.series_name or '—' }}</span>
+            <i data-lucide="external-link" class="w-3 h-3 text-slate-500 group-hover/slink:text-brand-400"></i>
+        </a>
+        {% else %}
+        <span class="font-medium text-slate-200">{{ r.series_name or '—' }}</span>
+        {% endif %}
+        {% if r.is_bundle or (r.volumes and r.volumes|length > 1) %}
+        <span class="block mt-0.5 space-y-0.5">
+            <span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-purple-500/15 text-purple-300 border border-purple-500/30 inline-block">
+                Bundle: Vol {{ r.volumes[0] }}–{{ r.volumes[-1] }}
+            </span>
+            {% if r.missing_volumes and r.missing_volumes|length > 0 %}
+            <span class="block text-[10px] text-amber-400 font-semibold">
+                Missing: Vol {{ r.missing_volumes|join(', ') }}
+            </span>
+            {% endif %}
+        </span>
+        {% elif r.volume is not none %}
+        <span class="block mt-0.5">
+            <span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-slate-800 text-amber-300 border border-slate-700">
+                Vol. {{ r.volume }}
+            </span>
+        </span>
+        {% else %}
+        <span class="block mt-0.5">
+            <span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-slate-800 text-slate-300 border border-slate-700">
+                Vol. 1
+            </span>
+        </span>
+        {% endif %}
+        {% if r.is_official == 0 %}
+        <span class="block mt-0.5">
+            <span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-500/10 text-amber-400 border border-amber-500/20" title="Unofficial or fan web novel translation">
+                Unofficial
+            </span>
+        </span>
+        {% endif %}
+    </td>
+
+    <!-- Source Feed -->
+    <td class="py-3.5 px-4 text-slate-400">
+        <span class="inline-flex items-center gap-1">
+            <i data-lucide="radio" class="w-3 h-3 text-slate-500"></i>
+            {{ r.source_feed_name or 'Web Scraper' }}
+        </span>
+    </td>
+
+    <!-- Status Badge -->
+    <td class="py-3.5 px-4 text-center">
+        {% if r.status == 'REQUESTED' %}
+        <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/15 text-amber-300 border border-amber-500/30">
+            REQUESTED
+        </span>
+        {% elif r.status == 'IN_CALIBRE' %}
+        <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
+            IN CALIBRE
+        </span>
+        {% elif r.status == 'IGNORED' %}
+        <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-medium bg-slate-800 text-slate-400 border border-slate-700">
+            IGNORED
+        </span>
+        {% else %}
+        <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-medium bg-blue-500/15 text-blue-300 border border-blue-500/30">
+            NEW
+        </span>
+        {% endif %}
+    </td>
+
+    <!-- Date -->
+    <td class="py-3.5 px-4 text-center text-slate-500 font-mono text-[11px]">
+        {{ r.pub_date[:10] if r.pub_date else r.created_at[:10] }}
+    </td>
+
+    <!-- Action Buttons -->
+    <td class="py-3.5 px-4 text-right">
+        <div class="flex items-center justify-end gap-1.5">
+            {% if r.status != 'IN_CALIBRE' %}
+            <button onclick="updateReleaseStatus({{ r.id }}, 'IN_CALIBRE')" title="Mark as acquired into Calibre" class="p-1.5 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/20 transition-colors">
+                <i data-lucide="check" class="w-3.5 h-3.5"></i>
+            </button>
+            {% endif %}
+            {% if r.status != 'REQUESTED' %}
+            <button onclick="updateReleaseStatus({{ r.id }}, 'REQUESTED')" title="Mark as requested" class="p-1.5 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 text-amber-400 border border-amber-500/20 transition-colors">
+                <i data-lucide="bookmark-plus" class="w-3.5 h-3.5"></i>
+            </button>
+            {% endif %}
+            {% if r.status != 'IGNORED' %}
+            <button onclick="updateReleaseStatus({{ r.id }}, 'IGNORED')" title="Ignore release" class="p-1.5 rounded-lg bg-slate-800 hover:bg-rose-500/20 text-slate-400 hover:text-rose-400 border border-slate-700 transition-colors">
+                <i data-lucide="eye-off" class="w-3.5 h-3.5"></i>
+            </button>
+            {% endif %}
+        </div>
+    </td>
+</tr>
+{% endfor %}

@@ -1,4 +1,5 @@
 import os
+import re
 import sqlite3
 import json
 import logging
@@ -184,9 +185,6 @@ class Database:
                 ))
 
             conn.commit()
-
-        # Run startup cleanup: strip (Light Novel) noise and deduplicate unreviewed series
-        self.deduplicate_and_clean_discovery()
 
     # --- Setting Operations ---
     def get_setting(self, key: str, default: str = "") -> str:
@@ -460,24 +458,51 @@ class Database:
             """, (status, matched_book_id, release_id))
             conn.commit()
 
-    def get_releases(self, status: Optional[str] = None, limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
+    def get_releases(
+        self,
+        status: Optional[str] = None,
+        limit: int = 100,
+        offset: int = 0,
+        search: Optional[str] = None,
+        sort: str = "date_desc"
+    ) -> List[Dict[str, Any]]:
         with self.get_connection() as conn:
             cur = conn.cursor()
+            where_clauses = []
+            params = []
             if status:
-                cur.execute("""
-                    SELECT * FROM releases 
-                    WHERE status = ? 
-                    ORDER BY updated_at DESC, id DESC 
-                    LIMIT ? OFFSET ?;
-                """, (status, limit, offset))
-            else:
-                cur.execute("""
-                    SELECT * FROM releases 
-                    ORDER BY 
-                        CASE status WHEN 'REQUESTED' THEN 1 WHEN 'NEW' THEN 2 WHEN 'IN_CALIBRE' THEN 3 ELSE 4 END,
-                        updated_at DESC 
-                    LIMIT ? OFFSET ?;
-                """, (limit, offset))
+                where_clauses.append("status = ?")
+                params.append(status)
+            if search and search.strip():
+                clean_s = f"%{search.strip().lower()}%"
+                where_clauses.append("(lower(title) LIKE ? OR lower(COALESCE(series_name, '')) LIKE ?)")
+                params.extend([clean_s, clean_s])
+
+            where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+
+            # Sort mapping
+            sort_sql = "ORDER BY updated_at DESC, id DESC"
+            if sort == "date_asc":
+                sort_sql = "ORDER BY COALESCE(pub_date, updated_at) ASC, id ASC"
+            elif sort == "title_asc":
+                sort_sql = "ORDER BY title COLLATE NOCASE ASC, id ASC"
+            elif sort == "title_desc":
+                sort_sql = "ORDER BY title COLLATE NOCASE DESC, id DESC"
+            elif sort == "series_asc":
+                sort_sql = "ORDER BY COALESCE(NULLIF(series_name, ''), title) COLLATE NOCASE ASC, id ASC"
+            elif sort == "series_desc":
+                sort_sql = "ORDER BY COALESCE(NULLIF(series_name, ''), title) COLLATE NOCASE DESC, id DESC"
+            elif sort == "status":
+                sort_sql = "ORDER BY CASE status WHEN 'REQUESTED' THEN 1 WHEN 'NEW' THEN 2 WHEN 'IN_CALIBRE' THEN 3 ELSE 4 END, updated_at DESC, id DESC"
+            elif sort == "date_desc":
+                sort_sql = "ORDER BY COALESCE(pub_date, updated_at) DESC, id DESC"
+
+            cur.execute(f"""
+                SELECT * FROM releases 
+                {where_sql}
+                {sort_sql}
+                LIMIT ? OFFSET ?;
+            """, (*params, limit, offset))
             items = [dict(row) for row in cur.fetchall()]
             for item in items:
                 try:
@@ -490,13 +515,40 @@ class Database:
                     item["missing_volumes"] = []
             return items
 
-    def get_releases_grouped_by_series(self, status: Optional[str] = None) -> List[Dict[str, Any]]:
+    def count_releases(self, status: Optional[str] = None, search: Optional[str] = None) -> int:
+        """Returns total count of releases, optionally filtered by status and search query."""
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            where_clauses = []
+            params = []
+            if status:
+                where_clauses.append("status = ?")
+                params.append(status)
+            if search and search.strip():
+                clean_s = f"%{search.strip().lower()}%"
+                where_clauses.append("(lower(title) LIKE ? OR lower(COALESCE(series_name, '')) LIKE ?)")
+                params.extend([clean_s, clean_s])
+
+            where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+            cur.execute(f"SELECT count(*) FROM releases {where_sql};", tuple(params))
+            row = cur.fetchone()
+            return row[0] if row else 0
+
+    def get_releases_grouped_by_series(
+        self,
+        status: Optional[str] = None,
+        limit: Optional[int] = None,
+        offset: int = 0,
+        search: Optional[str] = None,
+        sort: str = "date_desc"
+    ) -> List[Dict[str, Any]]:
         """
         Groups releases under canonical series, aggregating all bundle volumes,
         highlighting owned vs missing volumes against Calibre tracking.
         Respects track_official_only setting by filtering out unofficial fan volumes.
+        Supports fast pagination with limit & offset and instant search & sort.
         """
-        from app.parser import normalize_text, get_canonical_series_name, should_merge_series
+        from app.parser import normalize_text, get_canonical_series_name
 
         track_official_only = self.get_setting("track_official_only", "true").lower() == "true"
 
@@ -680,32 +732,62 @@ class Database:
 
                 del g["all_volumes_set"]
                 del g["missing_volumes_set"]
+                dates = [str(r.get("pub_date") or r.get("updated_at") or r.get("created_at") or "") for r in g["releases"]]
+                valid_dates = [d for d in dates if d]
+                g["latest_date"] = max(valid_dates) if valid_dates else ""
+                g["releases_count"] = len(g["releases"])
                 result_groups.append(g)
 
-            # Sort groups: series with wanted/requested releases first, then discovery, then tracked, then name
-            def sort_key(item):
-                prio = 4
-                if item["has_wanted"]:
-                    prio = 1
-                elif item["has_discovery"]:
-                    prio = 2
-                elif item["in_calibre"]:
-                    prio = 3
-                return (prio, item["series_name"].lower())
+            # Instant keyword search filter across series name, synopsis, and release titles
+            if search and search.strip():
+                clean_s = search.strip().lower()
+                result_groups = [
+                    g for g in result_groups
+                    if clean_s in g["series_name"].lower()
+                    or clean_s in (g.get("synopsis") or "").lower()
+                    or any(clean_s in (r.get("title") or "").lower() for r in g["releases"])
+                ]
 
-            result_groups.sort(key=sort_key)
+            # Sort groups by requested sorting criteria
+            if sort == "date_desc":
+                result_groups.sort(key=lambda item: item["series_name"].lower())
+                result_groups.sort(key=lambda item: item["latest_date"], reverse=True)
+            elif sort == "date_asc":
+                result_groups.sort(key=lambda item: item["series_name"].lower())
+                result_groups.sort(key=lambda item: item["latest_date"] or "9999", reverse=False)
+            elif sort in ("title_asc", "name_asc"):
+                result_groups.sort(key=lambda item: item["series_name"].lower())
+            elif sort in ("title_desc", "name_desc"):
+                result_groups.sort(key=lambda item: item["series_name"].lower(), reverse=True)
+            elif sort == "wanted_first":
+                result_groups.sort(key=lambda item: (not item["has_wanted"], -len(item.get("missing_volumes", [])), item["series_name"].lower()))
+            elif sort == "releases_desc":
+                result_groups.sort(key=lambda item: (-item["releases_count"], item["series_name"].lower()))
+            else:
+                # Default / legacy sort: wanted first, then discovery, then tracked, then name
+                def sort_key(item):
+                    prio = 4
+                    if item["has_wanted"]:
+                        prio = 1
+                    elif item["has_discovery"]:
+                        prio = 2
+                    elif item["in_calibre"]:
+                        prio = 3
+                    return (prio, item["series_name"].lower())
+                result_groups.sort(key=sort_key)
+
+            if limit is not None:
+                return result_groups[offset : offset + limit]
             return result_groups
 
-    def count_releases(self, status: Optional[str] = None) -> int:
-        """Returns total count of releases, optionally filtered by status."""
-        with self.get_connection() as conn:
-            cur = conn.cursor()
-            if status:
-                cur.execute("SELECT count(*) FROM releases WHERE status = ?;", (status,))
-            else:
-                cur.execute("SELECT count(*) FROM releases;")
-            row = cur.fetchone()
-            return row[0] if row else 0
+    def count_releases_grouped_by_series(
+        self,
+        status: Optional[str] = None,
+        search: Optional[str] = None
+    ) -> int:
+        """Returns the total number of series groups matching status and search filters."""
+        groups = self.get_releases_grouped_by_series(status=status, search=search)
+        return len(groups)
 
     def get_release_status_counts(self) -> Dict[str, int]:
         """Returns total count and breakdowns for each release status."""
@@ -896,7 +978,13 @@ class Database:
             return cur.fetchone() is not None
 
     # --- Discovery Operations ---
-    def get_discovery_releases(self, limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
+    def get_discovery_releases(
+        self,
+        limit: int = 100,
+        offset: int = 0,
+        search: Optional[str] = None,
+        sort: str = "date_desc"
+    ) -> List[Dict[str, Any]]:
         """
         Returns releases that are Volume 1 or unnumbered (standalone),
         which are NOT currently in Calibre, NOT in series_tracking, and NOT blacklisted.
@@ -905,7 +993,30 @@ class Database:
         """
         with self.get_connection() as conn:
             cur = conn.cursor()
-            cur.execute("""
+            search_clause = ""
+            search_params = []
+            if search and search.strip():
+                clean_s = f"%{search.strip().lower()}%"
+                search_clause = "AND (lower(r.title) LIKE ? OR lower(COALESCE(r.series_name, '')) LIKE ? OR lower(COALESCE(r.description, '')) LIKE ?)"
+                search_params = [clean_s, clean_s, clean_s]
+
+            # Sorting clause for discovery
+            sort_sql = "ORDER BY updated_at DESC, id DESC"
+            if sort == "date_asc":
+                sort_sql = "ORDER BY COALESCE(pub_date, updated_at) ASC, id ASC"
+            elif sort == "title_asc":
+                sort_sql = "ORDER BY title COLLATE NOCASE ASC, id ASC"
+            elif sort == "title_desc":
+                sort_sql = "ORDER BY title COLLATE NOCASE DESC, id DESC"
+            elif sort in ("series_asc", "name_asc"):
+                sort_sql = "ORDER BY COALESCE(NULLIF(series_name, ''), title) COLLATE NOCASE ASC, id ASC"
+            elif sort in ("series_desc", "name_desc"):
+                sort_sql = "ORDER BY COALESCE(NULLIF(series_name, ''), title) COLLATE NOCASE DESC, id DESC"
+            elif sort == "date_desc":
+                sort_sql = "ORDER BY COALESCE(pub_date, updated_at) DESC, id DESC"
+
+
+            query = f"""
                 WITH ranked_discovery AS (
                     SELECT r.*,
                            ROW_NUMBER() OVER (
@@ -926,12 +1037,14 @@ class Database:
                       AND COALESCE(lower(r.guid), '') NOT LIKE '%pdf%'
                       AND (r.series_name IS NULL OR lower(trim(r.series_name)) NOT IN (SELECT lower(trim(name)) FROM series_blacklist))
                       AND (r.series_name IS NULL OR lower(trim(r.series_name)) NOT IN (SELECT lower(trim(name)) FROM series_tracking WHERE is_monitored = 1))
+                      {search_clause}
                 )
                 SELECT * FROM ranked_discovery
                 WHERE rn = 1
-                ORDER BY updated_at DESC, id DESC
+                {sort_sql}
                 LIMIT ? OFFSET ?;
-            """, (limit, offset))
+            """
+            cur.execute(query, (*search_params, limit, offset))
             items = []
             for row in cur.fetchall():
                 d = dict(row)
@@ -943,7 +1056,7 @@ class Database:
                 items.append(d)
             return items
 
-    def count_discovery_releases(self) -> int:
+    def count_discovery_releases(self, search: Optional[str] = None) -> int:
         """
         Returns total count of unique discovered series (Volume 1 or unnumbered standalones)
         not in Calibre, tracking, or blacklist.
@@ -951,7 +1064,14 @@ class Database:
         """
         with self.get_connection() as conn:
             cur = conn.cursor()
-            cur.execute("""
+            search_clause = ""
+            search_params = []
+            if search and search.strip():
+                clean_s = f"%{search.strip().lower()}%"
+                search_clause = "AND (lower(r.title) LIKE ? OR lower(COALESCE(r.series_name, '')) LIKE ? OR lower(COALESCE(r.description, '')) LIKE ?)"
+                search_params = [clean_s, clean_s, clean_s]
+
+            query = f"""
                 WITH ranked_discovery AS (
                     SELECT r.id,
                            ROW_NUMBER() OVER (
@@ -968,9 +1088,11 @@ class Database:
                       AND COALESCE(lower(r.guid), '') NOT LIKE '%pdf%'
                       AND (r.series_name IS NULL OR lower(trim(r.series_name)) NOT IN (SELECT lower(trim(name)) FROM series_blacklist))
                       AND (r.series_name IS NULL OR lower(trim(r.series_name)) NOT IN (SELECT lower(trim(name)) FROM series_tracking WHERE is_monitored = 1))
+                      {search_clause}
                 )
                 SELECT count(*) FROM ranked_discovery WHERE rn = 1;
-            """)
+            """
+            cur.execute(query, tuple(search_params))
             row = cur.fetchone()
             return row[0] if row else 0
 
@@ -987,7 +1109,7 @@ class Database:
         # 1. Purge all PDF releases
         self.purge_pdf_releases()
 
-        from app.parser import extract_series_and_volume, should_merge_series, get_canonical_series_name, SERIES_ALIASES
+        from app.parser import extract_series_and_volume, get_canonical_series_name, SERIES_ALIASES, normalize_text
         from app.providers.metadata import NovelMetadataProvider
 
         with self.get_connection() as conn:
@@ -1047,7 +1169,7 @@ class Database:
                         WHERE lower(trim(series_name)) = lower(trim(?));
                     """, (canon, alias))
 
-            # 6. Alias, series_link & fuzzy deduplication for 'NEW' status discovery releases
+            # 6. Alias & series_link fast O(N) deduplication for 'NEW' status discovery releases
             cur.execute("""
                 SELECT id, title, series_name, volume, description, cover_url, series_link, updated_at
                 FROM releases
@@ -1058,44 +1180,58 @@ class Database:
                     updated_at DESC, id DESC;
             """)
             disc_records = [dict(r) for r in cur.fetchall()]
-            merged_ids = set()
 
-            for i in range(len(disc_records)):
-                rec_a = disc_records[i]
-                if rec_a["id"] in merged_ids:
-                    continue
+            seen_canon_map: Dict[str, dict] = {}
+            seen_link_map: Dict[str, str] = {}
+            to_delete_ids = []
+            master_updates: Dict[int, Tuple[Optional[str], Optional[str], Optional[str]]] = {}
 
-                for j in range(i + 1, len(disc_records)):
-                    rec_b = disc_records[j]
-                    if rec_b["id"] in merged_ids:
-                        continue
+            for rec in disc_records:
+                s_name = rec["series_name"]
+                canon_name = get_canonical_series_name(s_name)
+                s_key = normalize_text(canon_name)
+                s_link = (rec.get("series_link") or "").strip().rstrip("/")
 
-                    links_match = False
-                    if rec_a.get("series_link") and rec_b.get("series_link"):
-                        la = rec_a["series_link"].rstrip("/")
-                        lb = rec_b["series_link"].rstrip("/")
-                        if la == lb:
-                            links_match = True
+                target_key = None
+                if s_key in seen_canon_map:
+                    target_key = s_key
+                elif s_link and s_link in seen_link_map:
+                    target_key = seen_link_map[s_link]
+                elif "|" in s_name or "/" in s_name:
+                    for sub in re.split(r'\s*[|/]\s*', s_name):
+                        sub_key = normalize_text(sub)
+                        if sub_key and sub_key in seen_canon_map:
+                            target_key = sub_key
+                            break
 
-                    if links_match or should_merge_series(rec_a["series_name"], rec_b["series_name"]):
-                        m_desc = rec_a["description"] or rec_b["description"]
-                        m_cover = rec_a["cover_url"] or rec_b["cover_url"]
-                        m_link = rec_a["series_link"] or rec_b["series_link"]
+                if target_key:
+                    master = seen_canon_map[target_key]
+                    to_delete_ids.append(rec["id"])
+                    m_desc = master["description"] or rec["description"]
+                    m_cover = master["cover_url"] or rec["cover_url"]
+                    m_link = master["series_link"] or rec["series_link"]
+                    master["description"] = m_desc
+                    master["cover_url"] = m_cover
+                    master["series_link"] = m_link
+                    master_updates[master["id"]] = (m_desc, m_cover, m_link)
+                else:
+                    seen_canon_map[s_key] = rec
+                    if s_link:
+                        seen_link_map[s_link] = s_key
+                    if "|" in s_name or "/" in s_name:
+                        for sub in re.split(r'\s*[|/]\s*', s_name):
+                            sub_key = normalize_text(sub)
+                            if sub_key and sub_key not in seen_canon_map:
+                                seen_canon_map[sub_key] = rec
 
-                        cur.execute("DELETE FROM releases WHERE id = ?;", (rec_b["id"],))
-                        merged_ids.add(rec_b["id"])
-
-                        cur.execute("""
-                            UPDATE releases 
-                            SET description = ?, cover_url = ?, series_link = ?, updated_at = CURRENT_TIMESTAMP
-                            WHERE id = ?;
-                        """, (m_desc, m_cover, m_link, rec_a["id"]))
-
-                        rec_a["description"] = m_desc
-                        rec_a["cover_url"] = m_cover
-                        rec_a["series_link"] = m_link
-
-            conn.commit()
+            if to_delete_ids:
+                cur.executemany("DELETE FROM releases WHERE id = ?;", [(i,) for i in to_delete_ids])
+            if master_updates:
+                cur.executemany("""
+                    UPDATE releases 
+                    SET description = ?, cover_url = ?, series_link = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?;
+                """, [(desc, cover, link, mid) for mid, (desc, cover, link) in master_updates.items()])
 
             conn.commit()
 

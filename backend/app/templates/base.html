@@ -41,6 +41,23 @@
         .custom-scrollbar::-webkit-scrollbar-track { background: rgba(15, 23, 42, 0.4); border-radius: 4px; }
         .custom-scrollbar::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
         .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #475569; }
+
+        /* Universal word-wrapping rule for cards, titles, and synopses */
+        .break-words-anywhere {
+            overflow-wrap: anywhere !important;
+            word-break: break-word !important;
+            hyphens: auto;
+        }
+
+        /* Cover shimmer placeholder while lazy loading images */
+        .cover-placeholder {
+            background: linear-gradient(110deg, #161e2e 8%, #1f2a3d 18%, #161e2e 33%);
+            background-size: 200% 100%;
+            animation: shimmer 1.5s linear infinite;
+        }
+        @keyframes shimmer {
+            to { background-position-x: -200%; }
+        }
     </style>
 </head>
 <body class="bg-[#0b0f19] text-slate-100 min-h-screen flex flex-col font-sans antialiased selection:bg-brand-500 selection:text-white">
