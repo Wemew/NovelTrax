@@ -144,7 +144,8 @@ class JNovelsProvider(BaseFeedProvider):
             "cover_url": cover_url
         }
 
-    def fetch_master_index(self, index_url: str = "https://jnovels.com/light-novel-epub-jp/") -> List[ReleaseItem]:
+    @staticmethod
+    def fetch_master_index(index_url: str = "https://jnovels.com/light-novel-epub-jp/") -> List[ReleaseItem]:
         """
         Parses the complete series directory from J-Novels index page.
         Yields canonical light novel series directly with their main series URLs.

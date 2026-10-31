@@ -280,6 +280,7 @@ class TaskManager:
 
             msg = f"Master Index Ingestion: Processed {len(items)} series. Linked {linked_calibre} Calibre hubs, added {new_discoveries} new discoveries."
             logger.info(msg)
+            self.db.set_setting("backfill_progress", f"Master Index Ingest: {new_discoveries} new discoveries, {linked_calibre} Calibre hubs linked.")
             self.db.log_activity("MASTER_INDEX_INGEST", "Imported J-Novels Complete Series Index", msg)
             return {"status": "success", "total_indexed": len(items), "linked_calibre": linked_calibre, "new_discoveries": new_discoveries}
         except Exception as e:
@@ -318,9 +319,13 @@ class TaskManager:
 
         try:
             # 1. Master Index
-            self.ingest_master_index()
+            self.db.set_setting("backfill_progress", "Ingesting J-Novels Complete Series Index...")
+            index_res = await asyncio.to_thread(self.ingest_master_index)
             if self.stop_backfill_requested:
                 return
+
+            if index_res.get("status") == "error":
+                logger.warning(f"Master index ingest reported error: {index_res.get('message')}")
 
             # 2. Enrich Synopses for Discovery items
             if enrich_synopses:
@@ -336,7 +341,7 @@ class TaskManager:
                     target_url = d.get("series_link") or d.get("link")
                     if target_url:
                         self.db.set_setting("backfill_progress", f"Enriching synopsis {idx}/{total_to_enrich}: {d.get('series_name')}")
-                        details = JNovelsProvider.extract_synopsis_and_original_link(target_url)
+                        details = await asyncio.to_thread(JNovelsProvider.extract_synopsis_and_original_link, target_url)
                         if details.get("synopsis") or details.get("series_link") or details.get("cover_url"):
                             self.db.update_release_details(
                                 d["id"],
@@ -359,6 +364,7 @@ class TaskManager:
                 calibre_books = scanner.get_all_books() if scanner.is_available() else []
                 matcher = CalibreMatcher(calibre_series, calibre_books)
                 monitored = {s["name"].lower(): s for s in self.db.get_all_series(monitored_only=True)}
+                blacklisted_series = {b["name"].lower() for b in self.db.get_blacklisted_series()}
 
                 for page_num in range(1, max_pages + 1):
                     if self.stop_backfill_requested:
@@ -367,18 +373,33 @@ class TaskManager:
                     self.db.set_setting("backfill_progress", f"Checking historical feed page {page_num}/{max_pages}...")
                     paged_url = provider._build_paged_url("https://jnovels.com/?s=epub", page_num)
                     page_provider = JNovelsProvider(url=paged_url, config={"max_pages": 1})
-                    releases = page_provider.fetch_releases()
+                    releases = await asyncio.to_thread(page_provider.fetch_releases)
                     if not releases:
                         break
 
                     for r in releases:
                         s_name = r.series_name or ""
+                        if not s_name:
+                            continue
+                        if s_name.lower() in blacklisted_series:
+                            continue
+
                         if s_name.lower() in monitored:
                             m_res = matcher.check_release(r.to_dict(), auto_request_monitored=True)
                             rel_dict = r.to_dict()
                             rel_dict.update({
                                 "status": m_res["status"],
                                 "calibre_matched_book_id": m_res.get("matched_book_id")
+                            })
+                            is_new, _ = self.db.upsert_release(rel_dict)
+                            if r.cover_url:
+                                self.cover_cache.cache_sync(r.cover_url)
+                        elif r.volume is None or r.volume == 1.0:
+                            # Vol 1 or standalone unmonitored series -> Add to Discovery!
+                            rel_dict = r.to_dict()
+                            rel_dict.update({
+                                "status": "NEW",
+                                "calibre_matched_book_id": None
                             })
                             is_new, _ = self.db.upsert_release(rel_dict)
                             if r.cover_url:

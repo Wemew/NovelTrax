@@ -292,6 +292,23 @@ def run_e2e_test():
         assert updated_row["series_link"] == canonical_hub
     print(f"  ✓ Successfully updated release #{test_rel['id']} with synopsis & original post link")
 
+    # Test ReleaseItem with source_feed_name
+    from app.providers.base import ReleaseItem
+    test_item = ReleaseItem(
+        title="Mushoku Tensei (Light Novel)",
+        link="https://jnovels.com/mushoku-tensei-epub/",
+        series_name="Mushoku Tensei",
+        volume=1.0,
+        series_link="https://jnovels.com/mushoku-tensei-epub/",
+        source_feed_name="J-Novels Master Index"
+    )
+    assert test_item.source_feed_name == "J-Novels Master Index"
+    item_dict = test_item.to_dict()
+    assert item_dict["source_feed_name"] == "J-Novels Master Index"
+    is_new, rel_id = app_db.upsert_release(item_dict)
+    assert rel_id > 0
+    print("  ✓ ReleaseItem successfully handles source_feed_name and persists cleanly to database")
+
     print("\n" + "=" * 60)
     print("ALL TESTS (INCLUDING SECURITY & SYNOPSIS DISCOVERY) PASSED WITH 100% SUCCESS!")
     print("=" * 60)
