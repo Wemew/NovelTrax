@@ -449,13 +449,13 @@
             if (data.running) {
                 stopBackfill();
             } else {
-                const confirmed = confirm('Start Polite Historical Backfill?\n\nThis will ingest the Master Index, slowly enrich novel synopses/covers with polite 2-second rate-limiting, and deep-scan past releases for missing volumes.\n\nYou can stop or pause it anytime.');
+                const confirmed = confirm('Start Gentle Historical Backfill?\n\nThis will ingest the Master Index, slowly enrich novel synopses/covers with polite rate-limiting, and deep-scan historical pages based on your configured Settings.\n\nYou can stop or pause it anytime.');
                 if (!confirmed) return;
 
                 const startRes = await fetch('/api/backfill/start', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ max_pages: 30, delay: 2.0, enrich_synopses: true })
+                    body: JSON.stringify({ enrich_synopses: true })
                 });
                 const sData = await startRes.json();
                 showToast('Polite backfill started in background.', 'info');

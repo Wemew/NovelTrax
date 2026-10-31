@@ -107,6 +107,20 @@ class CoverCache:
         path = self.get_path(url)
         return os.path.isfile(path) and os.path.getsize(path) > 0
 
+    def clear_cache(self) -> int:
+        """Removes all cached cover images from disk. Returns count of files removed."""
+        count = 0
+        if os.path.isdir(self.covers_dir):
+            for fname in os.listdir(self.covers_dir):
+                fpath = os.path.join(self.covers_dir, fname)
+                try:
+                    if os.path.isfile(fpath):
+                        os.remove(fpath)
+                        count += 1
+                except Exception as e:
+                    logger.warning(f"Error removing cached cover {fpath}: {e}")
+        return count
+
     async def get_or_download(self, url: str) -> Optional[str]:
         """
         Safely fetches and caches a cover image.

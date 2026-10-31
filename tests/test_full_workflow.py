@@ -347,6 +347,48 @@ def run_e2e_test():
     print("  ✓ Successfully verified series_tracking description persistence")
 
     print("\n" + "=" * 60)
+    print("STEP 10: TESTING DEBUG & MAINTENANCE TOOLS")
+    print("=" * 60)
+    # Test setting retrieval for backfill_max_pages
+    app_db.set_setting("backfill_max_pages", "45")
+    assert app_db.get_setting("backfill_max_pages") == "45"
+    print("  ✓ backfill_max_pages setting successfully saved and retrieved")
+
+    # Test clear_all_descriptions
+    cleared_desc_count = app_db.clear_all_descriptions()
+    assert cleared_desc_count >= 1
+    with app_db.get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT count(*) FROM releases WHERE description IS NOT NULL AND description != '';")
+        assert cur.fetchone()[0] == 0
+        cur.execute("SELECT count(*) FROM series_tracking WHERE description != '';")
+        assert cur.fetchone()[0] == 0
+    print(f"  ✓ clear_all_descriptions successfully cleared descriptions across {cleared_desc_count} records")
+
+    # Test clear_discovered_series
+    initial_requests = len(app_db.get_pending_requests())
+    cleared_disc = app_db.clear_discovered_series()
+    assert cleared_disc >= 1
+    # Ensure active wishlist requests were NOT affected
+    assert len(app_db.get_pending_requests()) == initial_requests
+    assert len(app_db.get_discovery_releases()) == 0
+    print(f"  ✓ clear_discovered_series successfully purged {cleared_disc} unreviewed discovery items without affecting requests")
+
+    # Test CoverCache clear_cache
+    from app.covers import CoverCache
+    test_cover_dir = os.path.join(test_dir, "test_cache")
+    c_cache = CoverCache(test_cover_dir)
+    # Create dummy image file
+    dummy_file = os.path.join(c_cache.covers_dir, "test_cover.jpg")
+    with open(dummy_file, "wb") as f:
+        f.write(b"dummy image data")
+    assert os.path.isfile(dummy_file)
+    removed_files = c_cache.clear_cache()
+    assert removed_files == 1
+    assert not os.path.exists(dummy_file)
+    print(f"  ✓ CoverCache.clear_cache successfully purged {removed_files} cached image file")
+
+    print("\n" + "=" * 60)
     print("ALL TESTS (INCLUDING SECURITY & SYNOPSIS DISCOVERY) PASSED WITH 100% SUCCESS!")
     print("=" * 60)
 

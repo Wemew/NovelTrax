@@ -137,6 +137,8 @@ class Database:
                     "auto_request_monitored": "true",
                     "discord_webhook_url": "",
                     "apprise_url": "",
+                    "backfill_max_pages": "30",
+                    "backfill_delay_seconds": "2.0",
                 }
                 for k, v in defaults.items():
                     cur.execute("INSERT INTO app_settings (key, value) VALUES (?, ?);", (k, v))
@@ -603,3 +605,25 @@ class Database:
 
             conn.commit()
             return True
+
+    # --- Debug / Maintenance Operations ---
+    def clear_all_descriptions(self) -> int:
+        """Clears all stored descriptions and synopses in releases and series_tracking."""
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("UPDATE releases SET description = NULL;")
+            rel_count = cur.rowcount
+            cur.execute("UPDATE series_tracking SET description = '';")
+            conn.commit()
+            self.log_activity("DEBUG_CLEAR", "Cleared all novel descriptions", f"Reset descriptions across {rel_count} releases and tracked series.")
+            return rel_count
+
+    def clear_discovered_series(self) -> int:
+        """Clears unreviewed new series from the Discovery page (status='NEW')."""
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("DELETE FROM releases WHERE status = 'NEW';")
+            count = cur.rowcount
+            conn.commit()
+            self.log_activity("DEBUG_CLEAR", "Cleared discovered series", f"Removed {count} unreviewed discovery releases.")
+            return count

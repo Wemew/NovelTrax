@@ -301,7 +301,7 @@ class TaskManager:
             "progress": self.db.get_setting("backfill_progress", "Idle")
         }
 
-    async def run_polite_backfill(self, max_pages: int = 30, enrich_synopses: bool = True, delay_seconds: float = 2.0):
+    async def run_polite_backfill(self, max_pages: Optional[int] = None, enrich_synopses: bool = True, delay_seconds: Optional[float] = None):
         """
         Runs the polite historical backfill:
         1. Ingests Master Index.
@@ -311,6 +311,18 @@ class TaskManager:
         import asyncio
         if self.is_backfilling:
             return {"status": "in_progress", "message": "Backfill already running"}
+
+        if max_pages is None:
+            try:
+                max_pages = int(self.db.get_setting("backfill_max_pages", "30"))
+            except ValueError:
+                max_pages = 30
+
+        if delay_seconds is None:
+            try:
+                delay_seconds = float(self.db.get_setting("backfill_delay_seconds", "2.0"))
+            except ValueError:
+                delay_seconds = 2.0
 
         self.is_backfilling = True
         self.stop_backfill_requested = False

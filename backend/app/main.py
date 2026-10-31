@@ -370,8 +370,12 @@ async def api_backfill_start(payload: Optional[Dict[str, Any]] = None):
         return JSONResponse({"status": "in_progress", "message": "Backfill already running"})
 
     p = payload or {}
-    max_pages = int(p.get("max_pages", 30))
-    delay = float(p.get("delay", 2.0))
+    max_pages = p.get("max_pages")
+    if max_pages is not None:
+        max_pages = int(max_pages)
+    delay = p.get("delay")
+    if delay is not None:
+        delay = float(delay)
     enrich = bool(p.get("enrich_synopses", True))
 
     asyncio.create_task(task_manager.run_polite_backfill(
@@ -380,6 +384,22 @@ async def api_backfill_start(payload: Optional[Dict[str, Any]] = None):
         delay_seconds=delay
     ))
     return JSONResponse({"status": "started", "message": "Polite backfill started in background"})
+
+@app.post("/api/debug/action")
+async def api_debug_action(payload: Dict[str, Any]):
+    """Debug maintenance operations: clear descriptions, discovery, or cover cache."""
+    action = payload.get("action")
+    if action == "clear-descriptions":
+        count = db.clear_all_descriptions()
+        return JSONResponse({"status": "success", "message": f"Cleared descriptions across {count} items."})
+    elif action == "clear-discovery":
+        count = db.clear_discovered_series()
+        return JSONResponse({"status": "success", "message": f"Cleared {count} unreviewed series from Discovery."})
+    elif action == "clear-thumbnails":
+        count = task_manager.cover_cache.clear_cache()
+        return JSONResponse({"status": "success", "message": f"Purged {count} cached cover images from disk."})
+    else:
+        return JSONResponse({"status": "error", "message": f"Unknown action: {action}"}, status_code=400)
 
 @app.post("/api/backfill/stop")
 async def api_backfill_stop():

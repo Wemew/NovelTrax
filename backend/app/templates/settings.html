@@ -82,6 +82,22 @@
                     <input type="number" id="setting-feed-interval" value="{{ settings.feed_check_interval_minutes }}" min="5" max="1440" required class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-brand-500">
                     <p class="text-[11px] text-slate-500 mt-1">How often to poll J-Novels and other novel release feeds.</p>
                 </div>
+
+                <div>
+                    <label class="block text-xs font-semibold text-slate-300 mb-1">
+                        Gentle Backfill Max Pages
+                    </label>
+                    <input type="number" id="setting-backfill-pages" value="{{ settings.backfill_max_pages or '30' }}" min="1" max="500" required class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-brand-500">
+                    <p class="text-[11px] text-slate-500 mt-1">Number of historical pagination pages to scan backwards during gentle backfill.</p>
+                </div>
+
+                <div>
+                    <label class="block text-xs font-semibold text-slate-300 mb-1">
+                        Backfill Request Delay (Seconds)
+                    </label>
+                    <input type="number" id="setting-backfill-delay" value="{{ settings.backfill_delay_seconds or '2.0' }}" min="0.5" max="30" step="0.5" required class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-brand-500">
+                    <p class="text-[11px] text-slate-500 mt-1">Rate-limiting delay between network requests to prevent server bans.</p>
+                </div>
             </div>
         </div>
 
@@ -117,6 +133,72 @@
         </div>
     </form>
 
+    <!-- Maintenance & Debug Tools -->
+    <div class="bg-slate-900/90 border border-slate-800 rounded-2xl p-6 space-y-4 shadow-xl">
+        <div>
+            <h3 class="text-sm font-bold uppercase tracking-wider text-rose-400 border-b border-slate-800 pb-2 mb-2 flex items-center gap-2">
+                <i data-lucide="wrench" class="w-4 h-4 text-rose-400"></i>
+                Maintenance & Debug Tools
+            </h3>
+            <p class="text-xs text-slate-400">
+                Use these tools to clear cached metadata, purge unreviewed discovery series to re-scrape cleanly, or empty the local thumbnail storage.
+            </p>
+        </div>
+
+        <div class="grid grid-cols-1 sm:grid-cols-3 gap-3.5 pt-2">
+            <!-- Clear Descriptions -->
+            <div class="bg-slate-950/60 border border-slate-800 rounded-xl p-4 flex flex-col justify-between">
+                <div>
+                    <h4 class="text-xs font-bold text-white flex items-center gap-1.5">
+                        <i data-lucide="file-text" class="w-4 h-4 text-amber-400"></i>
+                        Clear Descriptions
+                    </h4>
+                    <p class="text-[11px] text-slate-400 mt-1.5 leading-relaxed">
+                        Resets all stored novel descriptions/synopses across releases and series so they can be re-fetched fresh from feeds or on-demand.
+                    </p>
+                </div>
+                <button type="button" onclick="debugAction('clear-descriptions')" id="btn-clear-desc" class="mt-4 w-full px-3 py-2 rounded-xl bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/30 text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors active:scale-95">
+                    <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
+                    <span>Clear Descriptions</span>
+                </button>
+            </div>
+
+            <!-- Clear Discovered Series -->
+            <div class="bg-slate-950/60 border border-slate-800 rounded-xl p-4 flex flex-col justify-between">
+                <div>
+                    <h4 class="text-xs font-bold text-white flex items-center gap-1.5">
+                        <i data-lucide="compass" class="w-4 h-4 text-brand-400"></i>
+                        Clear Discovered Series
+                    </h4>
+                    <p class="text-[11px] text-slate-400 mt-1.5 leading-relaxed">
+                        Purges unreviewed series from the Discovery page. Active wishlist requests and Calibre library tracking remain completely untouched.
+                    </p>
+                </div>
+                <button type="button" onclick="debugAction('clear-discovery')" id="btn-clear-discovery" class="mt-4 w-full px-3 py-2 rounded-xl bg-brand-500/10 hover:bg-brand-500/20 text-brand-300 border border-brand-500/30 text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors active:scale-95">
+                    <i data-lucide="rotate-ccw" class="w-3.5 h-3.5"></i>
+                    <span>Clear Discovered Series</span>
+                </button>
+            </div>
+
+            <!-- Clear Thumbnails -->
+            <div class="bg-slate-950/60 border border-slate-800 rounded-xl p-4 flex flex-col justify-between">
+                <div>
+                    <h4 class="text-xs font-bold text-white flex items-center gap-1.5">
+                        <i data-lucide="image" class="w-4 h-4 text-rose-400"></i>
+                        Clear Thumbnails
+                    </h4>
+                    <p class="text-[11px] text-slate-400 mt-1.5 leading-relaxed">
+                        Deletes all cached image files in the container's storage cache. Images will be re-downloaded safely upon browsing.
+                    </p>
+                </div>
+                <button type="button" onclick="debugAction('clear-thumbnails')" id="btn-clear-thumbs" class="mt-4 w-full px-3 py-2 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 border border-rose-500/30 text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors active:scale-95">
+                    <i data-lucide="flame" class="w-3.5 h-3.5"></i>
+                    <span>Clear Image Cache</span>
+                </button>
+            </div>
+        </div>
+    </div>
+
 </div>
 
 <script>
@@ -150,6 +232,8 @@
             calibre_path: document.getElementById('setting-calibre-path').value,
             calibre_sync_interval_minutes: document.getElementById('setting-calibre-interval').value,
             feed_check_interval_minutes: document.getElementById('setting-feed-interval').value,
+            backfill_max_pages: document.getElementById('setting-backfill-pages').value,
+            backfill_delay_seconds: document.getElementById('setting-backfill-delay').value,
             discord_webhook_url: document.getElementById('setting-discord-url').value,
             apprise_url: document.getElementById('setting-apprise-url').value
         };
@@ -168,6 +252,35 @@
             }
         } catch (err) {
             showToast(`Error saving settings: ${err}`, 'error');
+        }
+    }
+
+    async function debugAction(action) {
+        let msg = '';
+        if (action === 'clear-descriptions') {
+            msg = 'Are you sure you want to clear all novel descriptions and synopses?\n\nYou can re-fetch them at any time using gentle backfill or individual load buttons.';
+        } else if (action === 'clear-discovery') {
+            msg = 'Are you sure you want to clear all unreviewed series from the Discovery page?\n\nThis will not delete your active wishlist requests or Calibre tracked series.';
+        } else if (action === 'clear-thumbnails') {
+            msg = 'Are you sure you want to purge the cached cover image thumbnails from disk?\n\nImages will be safely re-downloaded when viewed.';
+        }
+
+        if (!confirm(msg)) return;
+
+        try {
+            const res = await fetch('/api/debug/action', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ action: action })
+            });
+            const data = await res.json();
+            if (data.status === 'success') {
+                showToast(data.message, 'success');
+            } else {
+                showToast(data.message || 'Action failed', 'error');
+            }
+        } catch (err) {
+            showToast(`Error: ${err}`, 'error');
         }
     }
 </script>
