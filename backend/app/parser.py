@@ -53,64 +53,77 @@ def is_pdf_release(raw_title: Optional[str] = None, link: Optional[str] = None, 
 SERIES_ALIASES = [
     {
         "canonical": "Alya Sometimes Hides Her Feelings in Russian",
-        "aliases": {
+        "aliases": [
             "alya sometimes hides her feelings in russian",
             "the neighboring aarya san who sometimes acts affectionate and murmuring in russian",
             "the neighboring aaryasan who sometimes acts affectionate and murmuring in russian",
             "tokidoki bosotto russia go de dereru tonari no alya san",
             "roshidere"
-        }
+        ]
     },
     {
         "canonical": "I Got a Cheat Ability in a Different World, and Become Extraordinary Even in the Real World",
-        "aliases": {
+        "aliases": [
             "i got a cheat skill in another world and became unrivaled in the real world too",
             "i got a cheat ability in a different world and become extraordinary even in the real world",
             "isekai de cheat skill wo te ni shita ore wa genjitsu sekai wo mo musou suru"
-        }
+        ]
     },
     {
         "canonical": "By the Grace of the Gods",
-        "aliases": {
+        "aliases": [
             "by the grace of the gods",
             "kami tachi ni hirowareta otoko",
             "kamitachi ni hirowareta otoko"
-        }
+        ]
     },
     {
         "canonical": "86-Eighty Six",
-        "aliases": {
+        "aliases": [
             "86",
             "86 eighty six",
             "eighty six"
-        }
+        ]
     },
     {
         "canonical": "Tenkyou no Alderamin (Alderamin On The Sky)",
-        "aliases": {
+        "aliases": [
             "tenkyou no alderamin",
             "alderamin on the sky",
             "tenkyou no alderamin alderamin on the sky"
-        }
+        ]
     },
     {
         "canonical": "Infinite Dendrogram",
-        "aliases": {
+        "aliases": [
             "infinite dendrogram",
             "infinite dendrogram all volumes"
-        }
+        ]
     }
 ]
+
+# Fast O(1) alias lookup dictionary:
+CANONICAL_LOOKUP: Dict[str, str] = {}
+for _group in SERIES_ALIASES:
+    _canon = _group["canonical"]
+    for _alias in _group["aliases"]:
+        CANONICAL_LOOKUP[normalize_text(_alias)] = _canon
 
 def get_canonical_series_name(name: str) -> str:
     """Returns canonical series name if matched against known alias sets, otherwise original name."""
     if not name:
         return ""
     norm = normalize_text(name)
-    for group in SERIES_ALIASES:
-        for alias in group["aliases"]:
-            if alias in norm or norm in alias:
-                return group["canonical"]
+    if norm in CANONICAL_LOOKUP:
+        return CANONICAL_LOOKUP[norm]
+
+    # Check dual titles separated by | or / (e.g. "Japanese Title | English Title")
+    if "|" in name or "/" in name:
+        for sub in re.split(r'\s*[|/]\s*', name):
+            sub_norm = normalize_text(sub)
+            if sub_norm in CANONICAL_LOOKUP:
+                return CANONICAL_LOOKUP[sub_norm]
+
     return name
 
 def should_merge_series(name_a: str, name_b: str) -> bool:
@@ -128,12 +141,23 @@ def should_merge_series(name_a: str, name_b: str) -> bool:
     if norm_a == norm_b:
         return True
 
-    # 1. Check known alias sets
-    for group in SERIES_ALIASES:
-        matches_a = any(alias in norm_a or norm_a in alias for alias in group["aliases"])
-        matches_b = any(alias in norm_b or norm_b in alias for alias in group["aliases"])
-        if matches_a and matches_b:
-            return True
+    # 1. Fast O(1) canonical check
+    canon_a = get_canonical_series_name(name_a)
+    canon_b = get_canonical_series_name(name_b)
+    if canon_a != name_a and canon_b != name_b and canon_a == canon_b:
+        return True
+    if normalize_text(canon_a) == normalize_text(canon_b):
+        return True
+
+    # 2. Check dual title parts separated by | or /
+    parts_a = [normalize_text(p) for p in re.split(r'\s*[|/]\s*', name_a) if len(p.strip()) >= 3]
+    parts_b = [normalize_text(p) for p in re.split(r'\s*[|/]\s*', name_b) if len(p.strip()) >= 3]
+    for pa in parts_a:
+        for pb in parts_b:
+            if pa == pb:
+                return True
+            if len(pa) >= 8 and len(pb) >= 8 and (pa in pb or pb in pa):
+                return True
 
     # Check high string similarity
     if string_similarity(norm_a, norm_b) >= 0.85:
@@ -439,26 +463,36 @@ def match_series_in_calibre(extracted_series: str, calibre_series_list: list, th
     """
     Matches an extracted series name against Calibre's series list.
     calibre_series_list can have 'name' or 'series_name'.
+    Supports dual titles separated by | or / (e.g. Romaji | English Title).
     Returns the best matching dict or None.
     """
     if not extracted_series or not calibre_series_list:
         return None
     
-    norm_extracted = normalize_text(extracted_series)
-    
-    # 1. Exact match (normalized)
-    for c_ser in calibre_series_list:
-        s_name = c_ser.get("series_name") or c_ser.get("name", "")
-        if normalize_text(s_name) == norm_extracted:
-            return c_ser
-            
-    # 2. Substring containment match (e.g. "Mushoku Tensei" in "Mushoku Tensei: Jobless Reincarnation")
-    for c_ser in calibre_series_list:
-        s_name = c_ser.get("series_name") or c_ser.get("name", "")
-        norm_c = normalize_text(s_name)
-        if len(norm_c) >= 5 and len(norm_extracted) >= 5:
-            if norm_c in norm_extracted or norm_extracted in norm_c:
+    candidates = [extracted_series]
+    if "|" in extracted_series or "/" in extracted_series:
+        for sub in re.split(r'\s*[|/]\s*', extracted_series):
+            if len(sub.strip()) >= 3 and sub.strip() not in candidates:
+                candidates.append(sub.strip())
+
+    for cand in candidates:
+        norm_extracted = normalize_text(cand)
+        if not norm_extracted:
+            continue
+        
+        # 1. Exact match (normalized)
+        for c_ser in calibre_series_list:
+            s_name = c_ser.get("series_name") or c_ser.get("name", "")
+            if normalize_text(s_name) == norm_extracted:
                 return c_ser
+                
+        # 2. Substring containment match (e.g. "Mushoku Tensei" in "Mushoku Tensei: Jobless Reincarnation")
+        for c_ser in calibre_series_list:
+            s_name = c_ser.get("series_name") or c_ser.get("name", "")
+            norm_c = normalize_text(s_name)
+            if len(norm_c) >= 5 and len(norm_extracted) >= 5:
+                if norm_c in norm_extracted or norm_extracted in norm_c:
+                    return c_ser
 
     # 3. Fuzzy similarity match
     best_match = None

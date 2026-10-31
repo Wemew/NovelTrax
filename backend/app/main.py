@@ -114,14 +114,24 @@ async def releases_view(
     status: Optional[str] = None,
     view: str = Query("series"),
     page: int = Query(1, ge=1),
-    page_size: int = Query(50, ge=10, le=200)
+    page_size: int = Query(30, ge=10, le=200)
 ):
-    total_count = db.count_releases(status=status)
-    total_pages = max(1, math.ceil(total_count / page_size))
-    current_page = min(page, total_pages) if total_count > 0 else 1
-    offset = (current_page - 1) * page_size
-    releases = db.get_releases(status=status, limit=page_size, offset=offset)
-    grouped_series = db.get_releases_grouped_by_series(status=status) if view != "flat" else []
+    if view != "flat":
+        all_groups = db.get_releases_grouped_by_series(status=status)
+        total_count = len(all_groups)
+        total_pages = max(1, math.ceil(total_count / page_size))
+        current_page = min(page, total_pages) if total_count > 0 else 1
+        offset = (current_page - 1) * page_size
+        grouped_series = all_groups[offset : offset + page_size]
+        releases = []
+    else:
+        grouped_series = []
+        total_count = db.count_releases(status=status)
+        total_pages = max(1, math.ceil(total_count / page_size))
+        current_page = min(page, total_pages) if total_count > 0 else 1
+        offset = (current_page - 1) * page_size
+        releases = db.get_releases(status=status, limit=page_size, offset=offset)
+
     status_counts = db.get_release_status_counts()
 
     return templates.TemplateResponse(

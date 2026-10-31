@@ -529,9 +529,22 @@ class Database:
                     r["missing_volumes"] = []
 
             cur.execute("SELECT * FROM series_tracking;")
-            tracked_map = {row["name"].lower(): dict(row) for row in cur.fetchall()}
+            tracked_rows = [dict(r) for r in cur.fetchall()]
+            # Pre-index tracked series by normalized name AND component sub-titles for instant O(1) lookups
+            tracked_by_norm: Dict[str, Dict[str, Any]] = {}
+            for t_row in tracked_rows:
+                t_name = t_row["name"]
+                t_norm = normalize_text(t_name)
+                tracked_by_norm[t_norm] = t_row
+                # Also index component sub-titles for pipe/slash separated titles
+                if "|" in t_name or "/" in t_name:
+                    for sub in re.split(r'\s*[|/]\s*', t_name):
+                        sub_norm = normalize_text(sub)
+                        if len(sub_norm) >= 3 and sub_norm not in tracked_by_norm:
+                            tracked_by_norm[sub_norm] = t_row
 
             groups_dict: Dict[str, Dict[str, Any]] = {}
+            link_to_group_key: Dict[str, str] = {}
 
             for rel in raw_releases:
                 is_off = rel.get("is_official")
@@ -547,29 +560,32 @@ class Database:
                 s_name = (rel.get("series_name") or "Uncategorized").strip()
                 canonical_s_name = get_canonical_series_name(s_name)
                 s_key = normalize_text(canonical_s_name) or "uncategorized"
+                rel_link = (rel.get("series_link") or "").strip().rstrip("/")
 
-                # Check if group already exists under s_key, alias, or shared series_link
+                # Instant O(1) group key resolution without quadratic fuzzy scanning
                 matched_key = None
                 if s_key in groups_dict:
                     matched_key = s_key
+                elif rel_link and rel_link in link_to_group_key:
+                    matched_key = link_to_group_key[rel_link]
                 else:
-                    rel_link = (rel.get("series_link") or "").strip().rstrip("/")
-                    for existing_k, existing_g in groups_dict.items():
-                        if should_merge_series(canonical_s_name, existing_g["series_name"]):
-                            matched_key = existing_k
-                            break
-                        g_link = (existing_g.get("website_url") or "").strip().rstrip("/")
-                        if rel_link and g_link and rel_link == g_link:
-                            matched_key = existing_k
-                            break
+                    if "|" in s_name or "/" in s_name:
+                        for sub in re.split(r'\s*[|/]\s*', s_name):
+                            sub_key = normalize_text(sub)
+                            if sub_key in groups_dict:
+                                matched_key = sub_key
+                                break
 
                 if not matched_key:
                     matched_key = s_key
-                    calibre_match = None
-                    for t_name_lower, t_row in tracked_map.items():
-                        if normalize_text(t_name_lower) == s_key or should_merge_series(canonical_s_name, t_row["name"]):
-                            calibre_match = t_row
-                            break
+                    # Instant O(1) Calibre match lookup
+                    calibre_match = tracked_by_norm.get(s_key)
+                    if not calibre_match and ("|" in s_name or "/" in s_name):
+                        for sub in re.split(r'\s*[|/]\s*', s_name):
+                            sub_norm = normalize_text(sub)
+                            if sub_norm in tracked_by_norm:
+                                calibre_match = tracked_by_norm[sub_norm]
+                                break
 
                     canonical_title = (calibre_match.get("name") if calibre_match else None) or canonical_s_name
                     cover = rel.get("cover_url") or (calibre_match.get("cover_url") if calibre_match else "") or ""
@@ -598,6 +614,9 @@ class Database:
                     }
 
                 group = groups_dict[matched_key]
+                if rel_link and rel_link not in link_to_group_key:
+                    link_to_group_key[rel_link] = matched_key
+
                 group["releases"].append(rel)
                 group["releases_count"] += 1
 
@@ -638,7 +657,27 @@ class Database:
                 g["all_volumes"] = all_vols
                 g["missing_volumes"] = missing_vols
                 latest_owned = g["calibre_latest_index"]
-                g["owned_volumes"] = [v for v in all_vols if v <= latest_owned and v not in missing_vols]
+
+                # Determine if books from this series are present in Calibre
+                has_calibre_match = (
+                    g["in_calibre"] 
+                    or g["has_in_calibre"]
+                    or any(r.get("calibre_matched_book_id") is not None for r in g["releases"])
+                    or any(r.get("status") == "IN_CALIBRE" for r in g["releases"])
+                )
+
+                if latest_owned > 0.0:
+                    g["owned_volumes"] = [v for v in all_vols if v <= latest_owned and v not in missing_vols]
+                elif has_calibre_match:
+                    g["owned_volumes"] = [v for v in all_vols if v not in missing_vols]
+                else:
+                    g["owned_volumes"] = []
+
+                # If Volume 1 or any book is owned in Calibre, mark the entire series group as In Calibre!
+                if has_calibre_match or len(g["owned_volumes"]) > 0:
+                    g["in_calibre"] = True
+                    g["has_discovery"] = False
+
                 del g["all_volumes_set"]
                 del g["missing_volumes_set"]
                 result_groups.append(g)
