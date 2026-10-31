@@ -105,6 +105,7 @@ async def series_view(request: Request):
 async def releases_view(
     request: Request,
     status: Optional[str] = None,
+    view: str = Query("series"),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=10, le=200)
 ):
@@ -113,6 +114,7 @@ async def releases_view(
     current_page = min(page, total_pages) if total_count > 0 else 1
     offset = (current_page - 1) * page_size
     releases = db.get_releases(status=status, limit=page_size, offset=offset)
+    grouped_series = db.get_releases_grouped_by_series(status=status) if view != "flat" else []
     status_counts = db.get_release_status_counts()
 
     return templates.TemplateResponse(
@@ -121,7 +123,9 @@ async def releases_view(
         context={
             "active_page": "releases",
             "releases": releases,
+            "grouped_series": grouped_series,
             "current_status": status,
+            "current_view": view,
             "current_page": current_page,
             "page_size": page_size,
             "total_pages": total_pages,
@@ -129,6 +133,12 @@ async def releases_view(
             "status_counts": status_counts
         }
     )
+
+@app.get("/api/releases/grouped")
+async def api_releases_grouped(status: Optional[str] = None):
+    """Returns all releases aggregated into canonical series cards."""
+    groups = db.get_releases_grouped_by_series(status=status)
+    return JSONResponse({"status": "success", "count": len(groups), "series_groups": groups})
 
 @app.get("/feeds", response_class=HTMLResponse)
 async def feeds_view(request: Request):

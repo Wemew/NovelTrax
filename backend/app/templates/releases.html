@@ -1,12 +1,12 @@
 {% extends "base.html" %}
 
-{% block title %}Releases & Requests{% endblock %}
+{% block title %}Novel Releases & Bundles{% endblock %}
 
 {% block content %}
 <div class="space-y-6">
 
     <!-- Header & Action Row -->
-    <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+    <div class="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
         <div>
             <h1 class="text-2xl font-black text-white flex items-center gap-2.5">
                 <i data-lucide="sparkles" class="w-6 h-6 text-brand-400"></i>
@@ -16,9 +16,24 @@
                 All releases detected by monitored feeds. Books marked <span class="text-amber-400 font-semibold">REQUESTED</span> will automatically flip to <span class="text-emerald-400 font-semibold">IN_CALIBRE</span> once added to your Calibre library.
             </p>
         </div>
-        <div class="flex items-center gap-2.5">
-            <button onclick="triggerFeedCheck()" class="text-xs px-3.5 py-2 rounded-xl bg-brand-600 hover:bg-brand-500 text-white font-medium flex items-center gap-2 transition-all shadow-md shadow-brand-600/20 active:scale-95">
-                <i data-lucide="radio" class="w-4 h-4" id="icon-feed-check"></i>
+
+        <div class="flex flex-wrap items-center gap-3">
+            <!-- View Mode Switcher: Group by Series vs Flat -->
+            <div class="flex items-center bg-slate-900 border border-slate-800 rounded-xl p-1 text-xs font-semibold shadow-md">
+                <a href="/releases?view=series{% if current_status %}&status={{ current_status }}{% endif %}" 
+                   class="px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition-colors {% if current_view != 'flat' %}bg-brand-600 text-white shadow-sm{% else %}text-slate-400 hover:text-white{% endif %}">
+                    <i data-lucide="layers" class="w-3.5 h-3.5"></i>
+                    Group by Series
+                </a>
+                <a href="/releases?view=flat{% if current_status %}&status={{ current_status }}{% endif %}" 
+                   class="px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition-colors {% if current_view == 'flat' %}bg-brand-600 text-white shadow-sm{% else %}text-slate-400 hover:text-white{% endif %}">
+                    <i data-lucide="list" class="w-3.5 h-3.5"></i>
+                    All Releases (Flat)
+                </a>
+            </div>
+
+            <button onclick="triggerFeedCheck()" class="text-xs px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-medium flex items-center gap-2 transition-all shadow-sm active:scale-95">
+                <i data-lucide="radio" class="w-4 h-4 text-brand-400" id="icon-feed-check"></i>
                 Check Feeds Now
             </button>
         </div>
@@ -27,28 +42,225 @@
     <!-- Filter Buttons & Search -->
     <div class="bg-slate-900/80 border border-slate-800 rounded-2xl p-4 flex flex-col sm:flex-row items-center justify-between gap-3">
         <div class="flex items-center space-x-1 sm:space-x-2 overflow-x-auto w-full sm:w-auto">
-            <a href="/releases" class="text-xs px-3 py-1.5 rounded-lg {% if not current_status %}bg-slate-800 text-white border border-slate-700 font-semibold{% else %}text-slate-400 hover:text-white{% endif %} transition-colors">
+            <a href="/releases?view={{ current_view }}" class="text-xs px-3 py-1.5 rounded-lg {% if not current_status %}bg-slate-800 text-white border border-slate-700 font-semibold{% else %}text-slate-400 hover:text-white{% endif %} transition-colors">
                 All ({{ status_counts.ALL if status_counts else releases|length }})
             </a>
-            <a href="/releases?status=REQUESTED" class="text-xs px-3 py-1.5 rounded-lg flex items-center gap-1.5 {% if current_status == 'REQUESTED' %}bg-amber-500/20 text-amber-300 border border-amber-500/30 font-semibold{% else %}text-slate-400 hover:text-amber-400{% endif %} transition-colors">
+            <a href="/releases?view={{ current_view }}&status=REQUESTED" class="text-xs px-3 py-1.5 rounded-lg flex items-center gap-1.5 {% if current_status == 'REQUESTED' %}bg-amber-500/20 text-amber-300 border border-amber-500/30 font-semibold{% else %}text-slate-400 hover:text-amber-400{% endif %} transition-colors">
                 <span class="w-2 h-2 rounded-full bg-amber-400"></span>
                 Requested ({{ status_counts.REQUESTED if status_counts else '' }})
             </a>
-            <a href="/releases?status=IN_CALIBRE" class="text-xs px-3 py-1.5 rounded-lg flex items-center gap-1.5 {% if current_status == 'IN_CALIBRE' %}bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 font-semibold{% else %}text-slate-400 hover:text-emerald-400{% endif %} transition-colors">
+            <a href="/releases?view={{ current_view }}&status=IN_CALIBRE" class="text-xs px-3 py-1.5 rounded-lg flex items-center gap-1.5 {% if current_status == 'IN_CALIBRE' %}bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 font-semibold{% else %}text-slate-400 hover:text-emerald-400{% endif %} transition-colors">
                 <span class="w-2 h-2 rounded-full bg-emerald-400"></span>
                 In Calibre ({{ status_counts.IN_CALIBRE if status_counts else '' }})
             </a>
-            <a href="/releases?status=IGNORED" class="text-xs px-3 py-1.5 rounded-lg flex items-center gap-1.5 {% if current_status == 'IGNORED' %}bg-slate-800 text-slate-300 border border-slate-700 font-semibold{% else %}text-slate-400 hover:text-white{% endif %} transition-colors">
+            <a href="/releases?view={{ current_view }}&status=IGNORED" class="text-xs px-3 py-1.5 rounded-lg flex items-center gap-1.5 {% if current_status == 'IGNORED' %}bg-slate-800 text-slate-300 border border-slate-700 font-semibold{% else %}text-slate-400 hover:text-white{% endif %} transition-colors">
                 Ignored ({{ status_counts.IGNORED if status_counts else '' }})
             </a>
         </div>
-        <div class="relative w-full sm:w-72">
+        <div class="relative w-full sm:w-80">
             <i data-lucide="search" class="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2"></i>
-            <input type="text" id="release-search" oninput="filterReleases()" placeholder="Filter table..." class="w-full bg-slate-950/70 border border-slate-700/80 rounded-xl pl-10 pr-4 py-2 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-brand-500">
+            <input type="text" id="release-search" oninput="filterReleases()" placeholder="Filter releases or series..." class="w-full bg-slate-950/70 border border-slate-700/80 rounded-xl pl-10 pr-4 py-2 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-brand-500">
         </div>
     </div>
 
-    <!-- Releases Table -->
+    {% if current_view != 'flat' %}
+    <!-- ========================================== -->
+    <!-- VIEW MODE: GROUPED BY CANONICAL SERIES     -->
+    <!-- ========================================== -->
+    <div class="space-y-4" id="seriesGroupContainer">
+        {% for group in grouped_series %}
+        <div class="series-card bg-slate-900/90 border border-slate-800 hover:border-slate-700 rounded-2xl p-5 shadow-lg transition-all" data-search="{{ group.series_name|lower }} {{ (group.synopsis or '')|lower }}">
+            <div class="flex flex-col md:flex-row gap-5 items-start">
+                
+                <!-- Series Cover Art -->
+                <div class="relative flex-shrink-0 mx-auto md:mx-0">
+                    {% if group.cover_url %}
+                    <img src="/api/covers?url={{ group.cover_url|urlencode }}" alt="{{ group.series_name }}" 
+                         onclick="openImageModal(this.src, '{{ group.series_name|escape }}')"
+                         class="w-24 h-36 object-cover rounded-xl shadow-md border border-slate-800 cursor-pointer hover:opacity-85 hover:scale-105 transition-all" loading="lazy" title="Click to enlarge">
+                    {% else %}
+                    <div class="w-24 h-36 rounded-xl bg-slate-950 border border-slate-800 flex flex-col items-center justify-center text-slate-600">
+                        <i data-lucide="book-open" class="w-8 h-8 mb-1"></i>
+                        <span class="text-[10px] uppercase font-bold tracking-wider">NOVEL</span>
+                    </div>
+                    {% endif %}
+                    
+                    {% if group.has_wanted %}
+                    <span class="absolute -top-2 -right-2 px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-amber-500 text-slate-950 shadow-lg animate-pulse">
+                        WANTED
+                    </span>
+                    {% elif group.in_calibre %}
+                    <span class="absolute -top-2 -right-2 px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-emerald-600 text-white shadow">
+                        TRACKED
+                    </span>
+                    {% endif %}
+                </div>
+
+                <!-- Series Info & Aggregated Volumes -->
+                <div class="flex-1 w-full min-w-0">
+                    <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                        <div>
+                            <h2 class="text-lg font-bold text-white tracking-tight flex items-center gap-2">
+                                <span>{{ group.series_name }}</span>
+                                {% if group.website_url %}
+                                <a href="{{ group.website_url }}" target="_blank" rel="noopener noreferrer" class="text-brand-400 hover:text-brand-300" title="Open series website hub">
+                                    <i data-lucide="external-link" class="w-3.5 h-3.5"></i>
+                                </a>
+                                {% endif %}
+                            </h2>
+                            <div class="flex items-center gap-2 flex-wrap mt-1 text-xs">
+                                {% if group.in_calibre %}
+                                <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-semibold text-[11px]">
+                                    <i data-lucide="check-circle" class="w-3 h-3"></i> In Calibre: {{ group.calibre_book_count }} books (Latest: Vol {{ group.calibre_latest_index }})
+                                </span>
+                                {% else %}
+                                <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-amber-500/10 text-amber-400 border border-amber-500/20 font-semibold text-[11px]">
+                                    <i data-lucide="compass" class="w-3 h-3"></i> Unreviewed / Discovery
+                                </span>
+                                {% endif %}
+
+                                <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-purple-500/10 text-purple-300 border border-purple-500/20 font-semibold text-[11px]">
+                                    {{ group.releases_count }} {{ 'Release' if group.releases_count == 1 else 'Releases / Batches' }}
+                                </span>
+                            </div>
+                        </div>
+
+                        <!-- Accordion Trigger Button -->
+                        <button onclick="toggleReleasesAccordion('accordion-{{ loop.index }}')" 
+                                class="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700/80 text-xs font-semibold flex items-center gap-1.5 transition-colors self-start sm:self-auto">
+                            <span>Releases ({{ group.releases_count }})</span>
+                            <i data-lucide="chevron-down" id="icon-accordion-{{ loop.index }}" class="w-3.5 h-3.5 transition-transform duration-200"></i>
+                        </button>
+                    </div>
+
+                    <!-- Synopsis Preview -->
+                    {% if group.synopsis %}
+                    <p class="text-xs text-slate-400 mt-2 line-clamp-2 leading-relaxed">
+                        {{ group.synopsis }}
+                    </p>
+                    {% endif %}
+
+                    <!-- Volume Coverage Grid -->
+                    {% if group.all_volumes %}
+                    <div class="mt-3.5 pt-3 border-t border-slate-800/80">
+                        <div class="flex items-center justify-between text-xs text-slate-400 mb-2">
+                            <span class="font-semibold text-slate-300 flex items-center gap-1.5">
+                                <i data-lucide="layers" class="w-3.5 h-3.5 text-brand-400"></i>
+                                Detected Volumes Across Feed Releases:
+                            </span>
+                            <div class="flex items-center gap-3 text-[10px]">
+                                <span class="flex items-center gap-1 text-emerald-400"><span class="w-2 h-2 rounded-full bg-emerald-500"></span> In Calibre</span>
+                                <span class="flex items-center gap-1 text-amber-400"><span class="w-2 h-2 rounded-full bg-amber-500"></span> Wanted</span>
+                            </div>
+                        </div>
+
+                        <div class="flex flex-wrap gap-1.5 max-h-24 overflow-y-auto custom-scrollbar pr-1">
+                            {% for v in group.all_volumes %}
+                            {% if v in group.owned_volumes %}
+                            <span class="px-2 py-0.5 rounded text-[11px] font-mono font-bold bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 flex items-center gap-1" title="Volume {{ v }} is already in Calibre">
+                                <i data-lucide="check" class="w-2.5 h-2.5"></i> Vol {{ v }}
+                            </span>
+                            {% else %}
+                            <span class="px-2 py-0.5 rounded text-[11px] font-mono font-bold bg-amber-500/15 text-amber-300 border border-amber-500/30 flex items-center gap-1" title="Volume {{ v }} is missing and requested">
+                                <i data-lucide="bookmark" class="w-2.5 h-2.5"></i> Vol {{ v }}
+                            </span>
+                            {% endif %}
+                            {% endfor %}
+                        </div>
+                    </div>
+                    {% endif %}
+
+                    <!-- Expandable Accordion: Individual Releases in this Series -->
+                    <div id="accordion-{{ loop.index }}" class="hidden mt-4 pt-3 border-t border-slate-800 space-y-2.5">
+                        {% for r in group.releases %}
+                        <div class="p-3 rounded-xl bg-slate-950/60 border border-slate-800/80 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+                            <div class="min-w-0 flex-1">
+                                <div class="flex items-center gap-2 flex-wrap">
+                                    <a href="{{ r.link }}" target="_blank" rel="noopener noreferrer" class="font-bold text-white hover:text-brand-400 transition-colors">
+                                        {{ r.title }}
+                                    </a>
+                                    {% if r.is_bundle or (r.volumes and r.volumes|length > 1) %}
+                                    <span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-purple-500/15 text-purple-300 border border-purple-500/30">
+                                        Bundle: {{ r.volumes|length }} vols
+                                    </span>
+                                    {% elif r.volume is not none %}
+                                    <span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-slate-800 text-amber-300 border border-slate-700">
+                                        Vol. {{ r.volume }}
+                                    </span>
+                                    {% endif %}
+                                </div>
+                                <div class="flex items-center gap-3 text-[11px] text-slate-500 mt-1">
+                                    <span>{{ r.source_feed_name or 'Feed' }}</span>
+                                    <span>&bull;</span>
+                                    <span>{{ r.pub_date[:10] if r.pub_date else r.created_at[:10] }}</span>
+                                    {% if r.missing_volumes and r.missing_volumes|length > 0 %}
+                                    <span>&bull;</span>
+                                    <span class="text-amber-400 font-semibold">Missing: Vol {{ r.missing_volumes|join(', ') }}</span>
+                                    {% endif %}
+                                </div>
+                            </div>
+
+                            <div class="flex items-center gap-2 flex-shrink-0 self-end sm:self-auto">
+                                {% if r.status == 'REQUESTED' %}
+                                <span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/15 text-amber-300 border border-amber-500/30">
+                                    REQUESTED
+                                </span>
+                                {% elif r.status == 'IN_CALIBRE' %}
+                                <span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
+                                    IN CALIBRE
+                                </span>
+                                {% elif r.status == 'IGNORED' %}
+                                <span class="px-2 py-0.5 rounded-full text-[10px] font-medium bg-slate-800 text-slate-400 border border-slate-700">
+                                    IGNORED
+                                </span>
+                                {% else %}
+                                <span class="px-2 py-0.5 rounded-full text-[10px] font-medium bg-blue-500/15 text-blue-300 border border-blue-500/30">
+                                    NEW
+                                </span>
+                                {% endif %}
+
+                                <div class="flex items-center gap-1">
+                                    {% if r.status != 'IN_CALIBRE' %}
+                                    <button onclick="updateReleaseStatus({{ r.id }}, 'IN_CALIBRE')" title="Mark as in Calibre" class="p-1.5 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/20 transition-colors">
+                                        <i data-lucide="check" class="w-3.5 h-3.5"></i>
+                                    </button>
+                                    {% endif %}
+                                    {% if r.status != 'REQUESTED' %}
+                                    <button onclick="updateReleaseStatus({{ r.id }}, 'REQUESTED')" title="Mark as requested" class="p-1.5 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 text-amber-400 border border-amber-500/20 transition-colors">
+                                        <i data-lucide="bookmark-plus" class="w-3.5 h-3.5"></i>
+                                    </button>
+                                    {% endif %}
+                                    {% if r.status != 'IGNORED' %}
+                                    <button onclick="updateReleaseStatus({{ r.id }}, 'IGNORED')" title="Ignore release" class="p-1.5 rounded-lg bg-slate-800 hover:bg-rose-500/20 text-slate-400 hover:text-rose-400 border border-slate-700 transition-colors">
+                                        <i data-lucide="eye-off" class="w-3.5 h-3.5"></i>
+                                    </button>
+                                    {% endif %}
+                                </div>
+                            </div>
+                        </div>
+                        {% endfor %}
+                    </div>
+                </div>
+
+            </div>
+        </div>
+        {% else %}
+        <div class="bg-slate-900/60 border border-slate-800/80 rounded-2xl p-12 text-center">
+            <div class="w-14 h-14 rounded-2xl bg-brand-500/10 text-brand-400 border border-brand-500/20 flex items-center justify-center mx-auto mb-3">
+                <i data-lucide="sparkles" class="w-7 h-7"></i>
+            </div>
+            <h3 class="text-base font-bold text-white">No releases found</h3>
+            <p class="text-xs text-slate-400 max-w-md mx-auto mt-1">
+                No releases match your current status or search filter.
+            </p>
+        </div>
+        {% endfor %}
+    </div>
+
+    {% else %}
+    <!-- ========================================== -->
+    <!-- VIEW MODE: ALL RELEASES (FLAT TABLE)       -->
+    <!-- ========================================== -->
     <div class="bg-slate-900/90 border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
         <div class="overflow-x-auto">
             <table class="w-full text-left text-xs">
@@ -97,7 +309,18 @@
                             {% else %}
                             <span class="font-medium text-slate-200">{{ r.series_name or '—' }}</span>
                             {% endif %}
-                            {% if r.volume is not none %}
+                            {% if r.is_bundle or (r.volumes and r.volumes|length > 1) %}
+                            <span class="block mt-0.5 space-y-0.5">
+                                <span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-purple-500/15 text-purple-300 border border-purple-500/30 inline-block">
+                                    Bundle: Vol {{ r.volumes[0] }}–{{ r.volumes[-1] }}
+                                </span>
+                                {% if r.missing_volumes and r.missing_volumes|length > 0 %}
+                                <span class="block text-[10px] text-amber-400 font-semibold">
+                                    Missing: Vol {{ r.missing_volumes|join(', ') }}
+                                </span>
+                                {% endif %}
+                            </span>
+                            {% elif r.volume is not none %}
                             <span class="block mt-0.5">
                                 <span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-slate-800 text-amber-300 border border-slate-700">
                                     Vol. {{ r.volume }}
@@ -173,7 +396,7 @@
         </div>
     </div>
 
-    <!-- Pagination Bar -->
+    <!-- Pagination Bar (Flat Mode) -->
     {% if total_pages and total_pages > 1 %}
     <div class="bg-slate-900/80 border border-slate-800 rounded-2xl p-4 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs text-slate-400">
         <div>
@@ -182,10 +405,10 @@
         <div class="flex items-center space-x-1.5">
             <!-- First & Prev -->
             {% if current_page > 1 %}
-            <a href="/releases?page=1{% if current_status %}&status={{ current_status }}{% endif %}" class="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition-colors flex items-center gap-1" title="First Page">
+            <a href="/releases?view=flat&page=1{% if current_status %}&status={{ current_status }}{% endif %}" class="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition-colors flex items-center gap-1" title="First Page">
                 <i data-lucide="chevrons-left" class="w-3.5 h-3.5"></i>
             </a>
-            <a href="/releases?page={{ current_page - 1 }}{% if current_status %}&status={{ current_status }}{% endif %}" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition-colors flex items-center gap-1">
+            <a href="/releases?view=flat&page={{ current_page - 1 }}{% if current_status %}&status={{ current_status }}{% endif %}" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition-colors flex items-center gap-1">
                 <i data-lucide="chevron-left" class="w-3.5 h-3.5"></i>
                 <span>Previous</span>
             </a>
@@ -203,11 +426,11 @@
 
             <!-- Next & Last -->
             {% if current_page < total_pages %}
-            <a href="/releases?page={{ current_page + 1 }}{% if current_status %}&status={{ current_status }}{% endif %}" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition-colors flex items-center gap-1">
+            <a href="/releases?view=flat&page={{ current_page + 1 }}{% if current_status %}&status={{ current_status }}{% endif %}" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition-colors flex items-center gap-1">
                 <span>Next</span>
                 <i data-lucide="chevron-right" class="w-3.5 h-3.5"></i>
             </a>
-            <a href="/releases?page={{ total_pages }}{% if current_status %}&status={{ current_status }}{% endif %}" class="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition-colors flex items-center gap-1" title="Last Page">
+            <a href="/releases?view=flat&page={{ total_pages }}{% if current_status %}&status={{ current_status }}{% endif %}" class="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition-colors flex items-center gap-1" title="Last Page">
                 <i data-lucide="chevrons-right" class="w-3.5 h-3.5"></i>
             </a>
             {% else %}
@@ -220,16 +443,56 @@
     </div>
     {% endif %}
 
+    {% endif %}
+
 </div>
 
 <script>
+    function toggleReleasesAccordion(id) {
+        const el = document.getElementById(id);
+        const icon = document.getElementById('icon-' + id);
+        if (!el) return;
+        el.classList.toggle('hidden');
+        if (icon) {
+            icon.classList.toggle('rotate-180');
+        }
+    }
+
     function filterReleases() {
         const query = document.getElementById('release-search').value.toLowerCase();
+        
+        // Filter series cards if in series view
+        const cards = document.querySelectorAll('.series-card');
+        cards.forEach(card => {
+            const searchData = card.dataset.search || '';
+            card.style.display = searchData.includes(query) ? '' : 'none';
+        });
+
+        // Filter rows if in flat table view
         const rows = document.querySelectorAll('.release-row');
         rows.forEach(row => {
-            const searchData = row.dataset.search;
+            const searchData = row.dataset.search || '';
             row.style.display = searchData.includes(query) ? '' : 'none';
         });
+    }
+
+    async function updateReleaseStatus(releaseId, newStatus) {
+        try {
+            const res = await fetch(`/api/releases/${releaseId}/status`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ status: newStatus })
+            });
+            const data = await res.json();
+            if (data.status === 'success') {
+                showToast(`Release updated to ${newStatus}`);
+                setTimeout(() => location.reload(), 500);
+            } else {
+                showToast('Failed to update release status', 'error');
+            }
+        } catch (err) {
+            showToast(`Error: ${err}`, 'error');
+        }
     }
 </script>
 {% endblock %}

@@ -72,28 +72,55 @@ class CalibreMatcher:
         if series_name:
             matched_series = match_series_in_calibre(series_name, self.calibre_series)
 
-        if matched_series and volume is not None:
-            vol_key = round(float(volume), 2)
+        volumes = release.get("volumes") or ([volume] if volume is not None else [])
+        is_bundle = release.get("is_bundle", False) or len(volumes) > 1
+
+        if matched_series:
             ser_id = matched_series["series_id"]
 
-            # Check if volume exists in Calibre for this series
-            if (ser_id, vol_key) in self.series_vol_index:
-                matched_book = self.series_vol_index[(ser_id, vol_key)]
-                return {
-                    "status": "IN_CALIBRE",
-                    "matched_book_id": matched_book["book_id"],
-                    "matched_series": matched_series,
-                    "reason": f"Series '{matched_series['series_name']}' Vol {volume} already present in Calibre (Book #{matched_book['book_id']})"
-                }
-            
-            # Series matched, but this volume is NOT in Calibre!
-            if auto_request_monitored:
-                return {
-                    "status": "REQUESTED",
-                    "matched_book_id": None,
-                    "matched_series": matched_series,
-                    "reason": f"New volume {volume} for tracked series '{matched_series['series_name']}' (Latest owned: Vol {matched_series['latest_index']})"
-                }
+            if is_bundle and len(volumes) > 1:
+                owned_vols = [v for v in volumes if (ser_id, round(float(v), 2)) in self.series_vol_index]
+                missing_vols = [v for v in volumes if v not in owned_vols]
+
+                if not missing_vols:
+                    return {
+                        "status": "IN_CALIBRE",
+                        "matched_book_id": None,
+                        "matched_series": matched_series,
+                        "missing_volumes": [],
+                        "reason": f"All {len(volumes)} volumes in bundle for '{matched_series['series_name']}' are already in Calibre"
+                    }
+                else:
+                    if auto_request_monitored:
+                        return {
+                            "status": "REQUESTED",
+                            "matched_book_id": None,
+                            "matched_series": matched_series,
+                            "missing_volumes": missing_vols,
+                            "reason": f"Bundle has {len(missing_vols)} missing volume(s) ({missing_vols}) for tracked series '{matched_series['series_name']}'"
+                        }
+            elif volume is not None:
+                vol_key = round(float(volume), 2)
+                # Check if volume exists in Calibre for this series
+                if (ser_id, vol_key) in self.series_vol_index:
+                    matched_book = self.series_vol_index[(ser_id, vol_key)]
+                    return {
+                        "status": "IN_CALIBRE",
+                        "matched_book_id": matched_book["book_id"],
+                        "matched_series": matched_series,
+                        "missing_volumes": [],
+                        "reason": f"Series '{matched_series['series_name']}' Vol {volume} already present in Calibre (Book #{matched_book['book_id']})"
+                    }
+                
+                # Series matched, but this volume is NOT in Calibre!
+                if auto_request_monitored:
+                    return {
+                        "status": "REQUESTED",
+                        "matched_book_id": None,
+                        "matched_series": matched_series,
+                        "missing_volumes": [volume],
+                        "reason": f"New volume {volume} for tracked series '{matched_series['series_name']}' (Latest owned: Vol {matched_series['latest_index']})"
+                    }
 
         # 3. Series matched, but volume wasn't specified:
         if matched_series:

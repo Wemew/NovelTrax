@@ -641,7 +641,76 @@ def run_e2e_test():
     print("  ✓ Webhook diagnostics safely reported connection error without crashing")
 
     print("\n" + "=" * 60)
-    print("ALL TESTS (INCLUDING SECURITY, SYNOPSIS DISCOVERY & PAGINATION) PASSED WITH 100% SUCCESS!")
+    print("STEP 12: TESTING MULTI-VOLUME BUNDLE PARSING & CANONICAL SERIES GROUPING")
+    print("=" * 60)
+    # 1. Bundle parsing
+    bundle1 = extract_series_and_volume("Overlord Vol 1-14 Epub")
+    assert bundle1["is_bundle"] is True
+    assert bundle1["series_name"] == "Overlord"
+    assert len(bundle1["volumes"]) == 14
+    assert bundle1["volumes"][0] == 1.0 and bundle1["volumes"][-1] == 14.0
+    print(f"  ✓ Bundle range parsed: '{bundle1['clean_title']}' -> {len(bundle1['volumes'])} volumes")
+
+    bundle2 = extract_series_and_volume("DanMachi Volumes 18-20 Epub")
+    assert bundle2["is_bundle"] is True
+    assert bundle2["series_name"] == "DanMachi"
+    assert bundle2["volumes"] == [18.0, 19.0, 20.0]
+
+    bundle3 = extract_series_and_volume("Monogatari Box Set Vol 1, 2, 3 Epub")
+    assert bundle3["is_bundle"] is True
+    assert bundle3["volumes"] == [1.0, 2.0, 3.0]
+    print("  ✓ Comma-separated volume list bundle parsed")
+
+    # 2. Bundle matching against Calibre
+    # In Step 2, Overlord has 15 volumes in Calibre. Overlord 1-14 is fully owned:
+    m_overlord = matcher.check_release(bundle1, auto_request_monitored=True)
+    assert m_overlord["status"] == "IN_CALIBRE"
+    assert len(m_overlord["missing_volumes"]) == 0
+    print("  ✓ Overlord Vol 1-14 bundle correctly evaluated as IN_CALIBRE (all owned)")
+
+    # DanMachi has 18 volumes owned. Vol 18-20 should be REQUESTED with missing: [19.0, 20.0]
+    # Note: earlier in test, book 19 was added in step 5, so DanMachi has 19 books!
+    # Therefore Vol 18-20 has missing: [20.0]
+    m_danmachi = matcher.check_release(bundle2, auto_request_monitored=True)
+    assert m_danmachi["status"] == "REQUESTED"
+    assert 20.0 in m_danmachi["missing_volumes"]
+    print(f"  ✓ DanMachi Vol 18-20 bundle evaluated as REQUESTED (missing: {m_danmachi['missing_volumes']})")
+
+    # 3. Store bundles in DB
+    app_db.upsert_release({
+        "guid": "b_overlord_1_14",
+        "title": "Overlord Vol 1-14 Epub",
+        "series_name": "Overlord",
+        "volume": 1.0,
+        "is_bundle": True,
+        "volumes": bundle1["volumes"],
+        "missing_volumes": m_overlord["missing_volumes"],
+        "status": m_overlord["status"]
+    })
+    app_db.upsert_release({
+        "guid": "b_danmachi_18_20",
+        "title": "DanMachi Volumes 18-20 Epub",
+        "series_name": "DanMachi",
+        "volume": 18.0,
+        "is_bundle": True,
+        "volumes": bundle2["volumes"],
+        "missing_volumes": m_danmachi["missing_volumes"],
+        "status": m_danmachi["status"]
+    })
+
+    # 4. Grouped by Series
+    grouped = app_db.get_releases_grouped_by_series()
+    assert len(grouped) >= 2
+    overlord_group = next((g for g in grouped if g["series_name"].lower() == "overlord"), None)
+    assert overlord_group is not None
+    assert overlord_group["in_calibre"] is True
+    assert 1.0 in overlord_group["all_volumes"]
+    assert 14.0 in overlord_group["all_volumes"]
+    print(f"  ✓ Group by Series verified: {len(grouped)} canonical series groups created")
+    print(f"    - Overlord Group: {overlord_group['releases_count']} releases, {len(overlord_group['all_volumes'])} detected volumes")
+
+    print("\n" + "=" * 60)
+    print("ALL TESTS (INCLUDING SECURITY, SYNOPSIS, PAGINATION & BUNDLES) PASSED WITH 100% SUCCESS!")
     print("=" * 60)
 
 if __name__ == "__main__":

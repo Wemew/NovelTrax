@@ -81,6 +81,21 @@ class Database:
             except sqlite3.OperationalError:
                 pass
 
+            try:
+                cur.execute("ALTER TABLE releases ADD COLUMN is_bundle INTEGER DEFAULT 0;")
+            except sqlite3.OperationalError:
+                pass
+
+            try:
+                cur.execute("ALTER TABLE releases ADD COLUMN volumes_json TEXT DEFAULT '[]';")
+            except sqlite3.OperationalError:
+                pass
+
+            try:
+                cur.execute("ALTER TABLE releases ADD COLUMN missing_vols_json TEXT DEFAULT '[]';")
+            except sqlite3.OperationalError:
+                pass
+
             # Series blacklist table
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS series_blacklist (
@@ -303,6 +318,10 @@ class Database:
                     conn.commit()
                     return False, rel_id
 
+            is_bundle_val = 1 if release_data.get("is_bundle") else 0
+            vols_val = json.dumps(release_data.get("volumes") or ([release_data["volume"]] if release_data.get("volume") is not None else []))
+            missing_val = json.dumps(release_data.get("missing_volumes") or [])
+
             cur.execute("SELECT id, status FROM releases WHERE guid = ?;", (guid,))
             existing = cur.fetchone()
 
@@ -320,6 +339,9 @@ class Database:
                         description = ?,
                         author = ?,
                         series_link = COALESCE(?, series_link),
+                        is_bundle = ?,
+                        volumes_json = ?,
+                        missing_vols_json = ?,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE id = ?;
                 """, (
@@ -332,6 +354,9 @@ class Database:
                     release_data.get("description"),
                     release_data.get("author"),
                     release_data.get("series_link"),
+                    is_bundle_val,
+                    vols_val,
+                    missing_val,
                     rel_id
                 ))
                 conn.commit()
@@ -341,8 +366,9 @@ class Database:
                     INSERT INTO releases (
                         guid, title, series_name, volume, link, pub_date,
                         cover_url, description, author, source_feed_id,
-                        source_feed_name, series_link, status, calibre_matched_book_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                        source_feed_name, series_link, status, calibre_matched_book_id,
+                        is_bundle, volumes_json, missing_vols_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                 """, (
                     guid,
                     release_data["title"],
@@ -357,7 +383,10 @@ class Database:
                     release_data.get("source_feed_name"),
                     release_data.get("series_link"),
                     release_data.get("status", "REQUESTED"),
-                    release_data.get("calibre_matched_book_id")
+                    release_data.get("calibre_matched_book_id"),
+                    is_bundle_val,
+                    vols_val,
+                    missing_val
                 ))
                 rel_id = cur.lastrowid
 
@@ -402,7 +431,145 @@ class Database:
                         updated_at DESC 
                     LIMIT ? OFFSET ?;
                 """, (limit, offset))
-            return [dict(row) for row in cur.fetchall()]
+            items = [dict(row) for row in cur.fetchall()]
+            for item in items:
+                try:
+                    item["volumes"] = json.loads(item.get("volumes_json") or "[]")
+                except Exception:
+                    item["volumes"] = [item["volume"]] if item.get("volume") is not None else []
+                try:
+                    item["missing_volumes"] = json.loads(item.get("missing_vols_json") or "[]")
+                except Exception:
+                    item["missing_volumes"] = []
+            return items
+
+    def get_releases_grouped_by_series(self, status: Optional[str] = None) -> List[Dict[str, Any]]:
+        """
+        Groups releases under canonical series, aggregating all bundle volumes,
+        highlighting owned vs missing volumes against Calibre tracking.
+        """
+        from app.parser import normalize_text
+
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+
+            if status:
+                cur.execute("""
+                    SELECT * FROM releases 
+                    WHERE status = ? 
+                    ORDER BY updated_at DESC, id DESC;
+                """, (status,))
+            else:
+                cur.execute("""
+                    SELECT * FROM releases 
+                    ORDER BY 
+                        CASE status WHEN 'REQUESTED' THEN 1 WHEN 'NEW' THEN 2 WHEN 'IN_CALIBRE' THEN 3 ELSE 4 END,
+                        updated_at DESC, id DESC;
+                """)
+
+            raw_releases = [dict(r) for r in cur.fetchall()]
+            for r in raw_releases:
+                try:
+                    r["volumes"] = json.loads(r.get("volumes_json") or "[]")
+                except Exception:
+                    r["volumes"] = [r["volume"]] if r.get("volume") is not None else []
+                try:
+                    r["missing_volumes"] = json.loads(r.get("missing_vols_json") or "[]")
+                except Exception:
+                    r["missing_volumes"] = []
+
+            cur.execute("SELECT * FROM series_tracking;")
+            tracked_map = {row["name"].lower(): dict(row) for row in cur.fetchall()}
+
+            groups_dict: Dict[str, Dict[str, Any]] = {}
+
+            for rel in raw_releases:
+                s_name = (rel.get("series_name") or "Uncategorized").strip()
+                s_key = normalize_text(s_name) or "uncategorized"
+
+                if s_key not in groups_dict:
+                    calibre_match = None
+                    for t_name_lower, t_row in tracked_map.items():
+                        if normalize_text(t_name_lower) == s_key:
+                            calibre_match = t_row
+                            break
+
+                    canonical_title = (calibre_match.get("name") if calibre_match else None) or s_name
+                    cover = rel.get("cover_url") or (calibre_match.get("cover_url") if calibre_match else "") or ""
+                    synopsis = rel.get("description") or (calibre_match.get("description") if calibre_match else "") or ""
+                    website_url = rel.get("series_link") or (calibre_match.get("website_url") if calibre_match else "") or ""
+
+                    groups_dict[s_key] = {
+                        "series_key": s_key,
+                        "series_name": canonical_title,
+                        "raw_name": s_name,
+                        "cover_url": cover,
+                        "in_calibre": calibre_match is not None,
+                        "is_monitored": bool(calibre_match.get("is_monitored", 0)) if calibre_match else False,
+                        "calibre_series_id": calibre_match.get("calibre_series_id") if calibre_match else None,
+                        "calibre_book_count": calibre_match.get("book_count", 0) if calibre_match else 0,
+                        "calibre_latest_index": calibre_match.get("latest_index", 0.0) if calibre_match else 0.0,
+                        "synopsis": synopsis,
+                        "website_url": website_url,
+                        "releases": [],
+                        "releases_count": 0,
+                        "all_volumes_set": set(),
+                        "missing_volumes_set": set(),
+                        "has_wanted": False,
+                        "has_discovery": False,
+                        "has_in_calibre": False
+                    }
+
+                group = groups_dict[s_key]
+                group["releases"].append(rel)
+                group["releases_count"] += 1
+
+                if not group["cover_url"] and rel.get("cover_url"):
+                    group["cover_url"] = rel["cover_url"]
+                if not group["synopsis"] and rel.get("description"):
+                    group["synopsis"] = rel["description"]
+                if not group["website_url"] and rel.get("series_link"):
+                    group["website_url"] = rel["series_link"]
+
+                # Aggregate volumes
+                for v in rel.get("volumes", []):
+                    group["all_volumes_set"].add(v)
+                for mv in rel.get("missing_volumes", []):
+                    group["missing_volumes_set"].add(mv)
+
+                st = rel.get("status")
+                if st == "REQUESTED":
+                    group["has_wanted"] = True
+                elif st == "NEW":
+                    group["has_discovery"] = True
+                elif st == "IN_CALIBRE":
+                    group["has_in_calibre"] = True
+
+            result_groups = []
+            for g in groups_dict.values():
+                all_vols = sorted(list(g["all_volumes_set"]))
+                missing_vols = sorted(list(g["missing_volumes_set"]))
+                g["all_volumes"] = all_vols
+                g["missing_volumes"] = missing_vols
+                latest_owned = g["calibre_latest_index"]
+                g["owned_volumes"] = [v for v in all_vols if v <= latest_owned and v not in missing_vols]
+                del g["all_volumes_set"]
+                del g["missing_volumes_set"]
+                result_groups.append(g)
+
+            # Sort groups: series with wanted/requested releases first, then discovery, then tracked, then name
+            def sort_key(item):
+                prio = 4
+                if item["has_wanted"]:
+                    prio = 1
+                elif item["has_discovery"]:
+                    prio = 2
+                elif item["in_calibre"]:
+                    prio = 3
+                return (prio, item["series_name"].lower())
+
+            result_groups.sort(key=sort_key)
+            return result_groups
 
     def count_releases(self, status: Optional[str] = None) -> int:
         """Returns total count of releases, optionally filtered by status."""
