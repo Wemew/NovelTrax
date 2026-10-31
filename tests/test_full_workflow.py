@@ -827,7 +827,67 @@ def run_e2e_test():
     print("  ✓ 'Part 1' parsed cleanly without contaminating series name")
 
     print("\n" + "=" * 60)
-    print("ALL TESTS (INCLUDING SECURITY, SYNOPSIS, PAGINATION, BUNDLES & PDF PURGE) PASSED WITH 100% SUCCESS!")
+    print("STEP 14: TESTING VOLUME 1 UNNUMBERED RELEASES & CALIBRE TRACKING")
+    print("=" * 60)
+    # 1. Unnumbered release on J-Novels for a series owned in Calibre (e.g. Overlord)
+    # Overlord is in Calibre with Vol 1.0. J-Novels posts "Overlord Epub" without volume number.
+    p_unnum_overlord = extract_series_and_volume("Overlord Epub")
+    assert p_unnum_overlord["volume"] is None
+    assert p_unnum_overlord["series_name"] == "Overlord"
+    m_unnum_overlord = matcher.check_release(p_unnum_overlord, auto_request_monitored=True)
+    assert m_unnum_overlord["status"] == "IN_CALIBRE"
+    assert m_unnum_overlord["effective_volume"] == 1.0
+    assert m_unnum_overlord["matched_book_id"] is not None
+    print(f"  ✓ Unnumbered release '{p_unnum_overlord['clean_title']}' matched Calibre Vol 1 (Book #{m_unnum_overlord['matched_book_id']})")
+
+    # 2. Monitored series where Volume 1 is NOT owned in Calibre
+    # Add a monitored series 'TBATE' that has only Vol 2 in Calibre
+    with app_db.get_connection() as conn:
+        conn.execute("INSERT OR IGNORE INTO series_tracking (name, is_monitored) VALUES ('TBATE', 1);")
+        conn.commit()
+
+    tbate_series = [{"series_id": 99, "series_name": "TBATE", "book_count": 1, "latest_index": 2.0, "authors": "TurtleMe"}]
+    tbate_books = [{"book_id": 992, "title": "TBATE Vol 2", "series_id": 99, "series_name": "TBATE", "series_index": 2.0}]
+    tbate_matcher = CalibreMatcher(tbate_series, tbate_books)
+
+    p_unnum_tbate = extract_series_and_volume("TBATE Epub")
+    assert p_unnum_tbate["volume"] is None
+    m_unnum_tbate = tbate_matcher.check_release(p_unnum_tbate, auto_request_monitored=True)
+    assert m_unnum_tbate["status"] == "REQUESTED"
+    assert m_unnum_tbate["effective_volume"] == 1.0
+    assert m_unnum_tbate["missing_volumes"] == [1.0]
+    print("  ✓ Unnumbered release for monitored series with missing Vol 1 correctly evaluated as REQUESTED")
+
+    # 3. Auto-resolving pending requests when Volume 1 is later added to Calibre
+    # Insert pending request with volume=1.0 (or None)
+    app_db.upsert_release({
+        "guid": "tbate_v1_req",
+        "title": "TBATE Epub",
+        "series_name": "TBATE",
+        "volume": 1.0,
+        "status": "REQUESTED"
+    })
+    assert any(r["guid"] == "tbate_v1_req" for r in app_db.get_pending_requests())
+
+    # Now add TBATE Vol 1 to Calibre scanner mock
+    tbate_books.append({"book_id": 991, "title": "TBATE Vol 1", "series_id": 99, "series_name": "TBATE", "series_index": 1.0})
+    tbate_matcher_updated = CalibreMatcher(tbate_series, tbate_books)
+    resolved = tbate_matcher_updated.resolve_pending_requests(app_db.get_pending_requests())
+    assert any(res["request"]["guid"] == "tbate_v1_req" for res in resolved)
+    print("  ✓ Pending unnumbered Vol 1 request auto-resolved once added to Calibre")
+
+    # 4. Strict intra-series fuzzy guard: DanMachi Vol 19 must NOT fuzzy match DanMachi Vol 1
+    p_dm19 = extract_series_and_volume("DanMachi Volume 19 Epub")
+    danmachi_series_only_v1 = [{"series_id": 1, "series_name": "DanMachi", "book_count": 1, "latest_index": 1.0, "authors": "Fujino Omori"}]
+    danmachi_books_only_v1 = [{"book_id": 1, "title": "DanMachi, Vol. 1", "series_id": 1, "series_name": "DanMachi", "series_index": 1.0}]
+    dm_matcher = CalibreMatcher(danmachi_series_only_v1, danmachi_books_only_v1)
+    dm_res = dm_matcher.check_release(p_dm19, auto_request_monitored=True)
+    assert dm_res["status"] == "REQUESTED"
+    assert dm_res["matched_book_id"] is None
+    print("  ✓ Strict volume guard verified: DanMachi Vol 19 does not falsely match DanMachi Vol 1")
+
+    print("\n" + "=" * 60)
+    print("ALL TESTS (INCLUDING SECURITY, SYNOPSIS, PAGINATION, BUNDLES, PDF PURGE & VOL 1 TRACKING) PASSED WITH 100% SUCCESS!")
     print("=" * 60)
 
 if __name__ == "__main__":

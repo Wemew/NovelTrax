@@ -22,6 +22,8 @@ class CalibreMatcher:
         self.series_name_vol_index: Dict[Tuple[str, float], Dict[str, Any]] = {}
         # 3. By normalized clean title
         self.clean_title_index: Dict[str, Dict[str, Any]] = {}
+        # 4. First / lowest indexed book per series: series_id -> book
+        self.series_first_book: Dict[int, Dict[str, Any]] = {}
 
         for b in calibre_books:
             norm_title = normalize_text(clean_feed_title(b.get("title") or ""))
@@ -36,6 +38,8 @@ class CalibreMatcher:
                 vol_key = round(float(vol), 2)
                 if ser_id:
                     self.series_vol_index[(ser_id, vol_key)] = b
+                    if ser_id not in self.series_first_book or vol_key < self.series_first_book[ser_id].get("series_index", 9999):
+                        self.series_first_book[ser_id] = b
                 if ser_name:
                     norm_ser_name = normalize_text(ser_name)
                     self.series_name_vol_index[(norm_ser_name, vol_key)] = b
@@ -43,11 +47,14 @@ class CalibreMatcher:
     def check_release(self, release: Dict[str, Any], auto_request_monitored: bool = True) -> Dict[str, Any]:
         """
         Determines if a release is already in Calibre or needs to be requested.
+        Handles Volume 1 releases (which typically lack volume numbers on J-Novels).
         Returns dict with:
         {
             "status": "IN_CALIBRE" | "REQUESTED" | "IGNORED" | "NEW",
             "matched_book_id": Optional[int],
             "matched_series": Optional[Dict],
+            "effective_volume": float,
+            "missing_volumes": List[float],
             "reason": str
         }
         """
@@ -64,6 +71,8 @@ class CalibreMatcher:
                 "status": "IN_CALIBRE",
                 "matched_book_id": matched_book["book_id"],
                 "matched_series": None,
+                "effective_volume": volume or matched_book.get("series_index", 1.0),
+                "missing_volumes": [],
                 "reason": f"Title matched Calibre book #{matched_book['book_id']} ('{matched_book['title']}')"
             }
 
@@ -72,7 +81,13 @@ class CalibreMatcher:
         if series_name:
             matched_series = match_series_in_calibre(series_name, self.calibre_series)
 
-        volumes = release.get("volumes") or ([volume] if volume is not None else [])
+        # On J-Novels, Volume 1 releases usually do not have the volume moniker in the title
+        # (e.g. "Overlord Epub", "Solo Leveling Epub").
+        # If unnumbered, treat effective_volume as 1.0 for series tracking against Calibre.
+        effective_volume = float(volume) if volume is not None else 1.0
+        is_explicit_vol = (volume is not None)
+
+        volumes = release.get("volumes") or [effective_volume]
         is_bundle = release.get("is_bundle", False) or len(volumes) > 1
 
         if matched_series:
@@ -87,6 +102,7 @@ class CalibreMatcher:
                         "status": "IN_CALIBRE",
                         "matched_book_id": None,
                         "matched_series": matched_series,
+                        "effective_volume": effective_volume,
                         "missing_volumes": [],
                         "reason": f"All {len(volumes)} volumes in bundle for '{matched_series['series_name']}' are already in Calibre"
                     }
@@ -96,57 +112,84 @@ class CalibreMatcher:
                             "status": "REQUESTED",
                             "matched_book_id": None,
                             "matched_series": matched_series,
+                            "effective_volume": effective_volume,
                             "missing_volumes": missing_vols,
                             "reason": f"Bundle has {len(missing_vols)} missing volume(s) ({missing_vols}) for tracked series '{matched_series['series_name']}'"
                         }
-            elif volume is not None:
-                vol_key = round(float(volume), 2)
-                # Check if volume exists in Calibre for this series
-                if (ser_id, vol_key) in self.series_vol_index:
-                    matched_book = self.series_vol_index[(ser_id, vol_key)]
-                    return {
-                        "status": "IN_CALIBRE",
-                        "matched_book_id": matched_book["book_id"],
-                        "matched_series": matched_series,
-                        "missing_volumes": [],
-                        "reason": f"Series '{matched_series['series_name']}' Vol {volume} already present in Calibre (Book #{matched_book['book_id']})"
-                    }
-                
-                # Series matched, but this volume is NOT in Calibre!
-                if auto_request_monitored:
-                    return {
-                        "status": "REQUESTED",
-                        "matched_book_id": None,
-                        "matched_series": matched_series,
-                        "missing_volumes": [volume],
-                        "reason": f"New volume {volume} for tracked series '{matched_series['series_name']}' (Latest owned: Vol {matched_series['latest_index']})"
-                    }
 
-        # 3. Series matched, but volume wasn't specified:
-        if matched_series:
-            # Let's check fuzzy title against books in that series
-            for b in self.calibre_books:
-                if b.get("series_id") == matched_series["series_id"]:
-                    if string_similarity(b["title"], title) > 0.85:
-                        return {
-                            "status": "IN_CALIBRE",
-                            "matched_book_id": b["book_id"],
-                            "matched_series": matched_series,
-                            "reason": f"Fuzzy title match in series '{matched_series['series_name']}'"
-                        }
+            # Check single volume
+            vol_key = round(effective_volume, 2)
+            vol_match = self.series_vol_index.get((ser_id, vol_key))
+
+            # If unnumbered release (Vol 1) and (ser_id, 1.0) wasn't found directly,
+            # check if Calibre has Volume 0.0 or if lowest indexed book in this series is <= 1.0
+            if not vol_match and not is_explicit_vol:
+                vol_match = self.series_vol_index.get((ser_id, 0.0))
+                if not vol_match and ser_id in self.series_first_book:
+                    first_b = self.series_first_book[ser_id]
+                    if round(first_b.get("series_index", 1.0), 2) <= 1.0:
+                        vol_match = first_b
+
+            if vol_match:
+                return {
+                    "status": "IN_CALIBRE",
+                    "matched_book_id": vol_match["book_id"],
+                    "matched_series": matched_series,
+                    "effective_volume": effective_volume,
+                    "missing_volumes": [],
+                    "reason": f"Series '{matched_series['series_name']}' Vol {effective_volume:.0f} already present in Calibre (Book #{vol_match['book_id']})"
+                }
+
+            # Only check fuzzy title matching within this series if volume was NOT explicitly specified
+            # (to prevent Volume 1 from falsely fuzzy-matching Volume 19 due to common series title prefix)
+            if not is_explicit_vol:
+                for b in self.calibre_books:
+                    if b.get("series_id") == ser_id:
+                        b_vol = b.get("series_index")
+                        if b_vol is None or round(float(b_vol), 2) <= 1.0:
+                            if string_similarity(b["title"], clean_title) >= 0.85:
+                                return {
+                                    "status": "IN_CALIBRE",
+                                    "matched_book_id": b["book_id"],
+                                    "matched_series": matched_series,
+                                    "effective_volume": effective_volume,
+                                    "missing_volumes": [],
+                                    "reason": f"Fuzzy title match in series '{matched_series['series_name']}'"
+                                }
+
+            # Volume is not in Calibre!
             if auto_request_monitored:
                 return {
                     "status": "REQUESTED",
                     "matched_book_id": None,
                     "matched_series": matched_series,
-                    "reason": f"New release detected for tracked series '{matched_series['series_name']}'"
+                    "effective_volume": effective_volume,
+                    "missing_volumes": [effective_volume],
+                    "reason": f"New volume {effective_volume:.0f} for tracked series '{matched_series['series_name']}' (Latest owned: Vol {matched_series['latest_index']})"
                 }
+
+        # 3. Check standalone book fuzzy or substring title match across library
+        for b in self.calibre_books:
+            if not b.get("series_id"):
+                b_clean = clean_feed_title(b.get("title") or "")
+                if b_clean:
+                    if string_similarity(b_clean, clean_title) >= 0.85 or (len(clean_title) >= 8 and (clean_title.lower() in b_clean.lower() or b_clean.lower() in clean_title.lower())):
+                        return {
+                            "status": "IN_CALIBRE",
+                            "matched_book_id": b["book_id"],
+                            "matched_series": None,
+                            "effective_volume": volume or b.get("series_index", 1.0),
+                            "missing_volumes": [],
+                            "reason": f"Title match with Calibre book #{b['book_id']} ('{b['title']}')"
+                        }
 
         # 4. Neither series nor title matched
         return {
             "status": "NEW",
             "matched_book_id": None,
             "matched_series": None,
+            "effective_volume": effective_volume,
+            "missing_volumes": [effective_volume],
             "reason": "Not in Calibre library and does not match any currently tracked series"
         }
 
@@ -164,7 +207,7 @@ class CalibreMatcher:
                     "release_id": req["id"],
                     "title": req["title"],
                     "series_name": req.get("series_name"),
-                    "volume": req.get("volume"),
+                    "volume": req.get("volume") or result.get("effective_volume") or 1.0,
                     "matched_book_id": result["matched_book_id"],
                     "reason": result["reason"]
                 })

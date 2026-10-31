@@ -235,15 +235,23 @@ class TaskManager:
                                 is_monitored = True
 
                             status = match_result["status"]
+                            eff_vol = match_result.get("effective_volume") or r.volume or 1.0
+
                             # If not matched to any monitored series and auto_request is strict, keep as NEW
                             if status == "REQUESTED" and not is_monitored and not auto_request:
                                 status = "NEW"
+                            elif status == "NEW" and is_monitored and auto_request:
+                                # Series monitored by user, but release is not in Calibre -> REQUEST it!
+                                status = "REQUESTED"
+
+                        final_volume = r.volume if r.volume is not None else (eff_vol if (is_monitored or status in ("IN_CALIBRE", "REQUESTED")) else None)
 
                         rel_dict = r.to_dict()
                         rel_dict.update({
                             "source_feed_id": feed_id,
                             "source_feed_name": feed_name,
                             "status": status,
+                            "volume": final_volume,
                             "calibre_matched_book_id": match_result.get("matched_book_id")
                         })
 
@@ -259,7 +267,7 @@ class TaskManager:
                             self.db.log_activity(
                                 "NEW_RELEASE",
                                 f"New release requested: {r.title}",
-                                f"Series: {series_name} Vol {r.volume} from '{feed_name}'"
+                                f"Series: {series_name} Vol {final_volume} from '{feed_name}'"
                             )
                             notifier.notify_new_request(rel_dict)
 
@@ -489,24 +497,38 @@ class TaskManager:
 
                         if s_name.lower() in monitored:
                             m_res = matcher.check_release(r.to_dict(), auto_request_monitored=True)
+                            eff_vol = m_res.get("effective_volume") or r.volume or 1.0
                             rel_dict = r.to_dict()
                             rel_dict.update({
                                 "status": m_res["status"],
+                                "volume": r.volume if r.volume is not None else eff_vol,
                                 "calibre_matched_book_id": m_res.get("matched_book_id")
                             })
                             is_new, _ = self.db.upsert_release(rel_dict)
                             if r.cover_url:
                                 self.cover_cache.cache_sync(r.cover_url)
-                        elif r.volume is None or r.volume == 1.0:
-                            # Vol 1 or standalone unmonitored series -> Add to Discovery!
-                            rel_dict = r.to_dict()
-                            rel_dict.update({
-                                "status": "NEW",
-                                "calibre_matched_book_id": None
-                            })
-                            is_new, _ = self.db.upsert_release(rel_dict)
-                            if r.cover_url:
-                                self.cover_cache.cache_sync(r.cover_url)
+                        else:
+                            # Evaluate unmonitored releases against Calibre
+                            m_res = matcher.check_release(r.to_dict(), auto_request_monitored=False)
+                            if m_res["status"] == "IN_CALIBRE":
+                                eff_vol = m_res.get("effective_volume") or r.volume or 1.0
+                                rel_dict = r.to_dict()
+                                rel_dict.update({
+                                    "status": "IN_CALIBRE",
+                                    "volume": r.volume if r.volume is not None else eff_vol,
+                                    "calibre_matched_book_id": m_res.get("matched_book_id")
+                                })
+                                self.db.upsert_release(rel_dict)
+                            elif r.volume is None or r.volume == 1.0:
+                                # Vol 1 or standalone unmonitored series -> Add to Discovery!
+                                rel_dict = r.to_dict()
+                                rel_dict.update({
+                                    "status": "NEW",
+                                    "calibre_matched_book_id": None
+                                })
+                                is_new, _ = self.db.upsert_release(rel_dict)
+                                if r.cover_url:
+                                    self.cover_cache.cache_sync(r.cover_url)
 
                     page_num += 1
                     await asyncio.sleep(delay_seconds)
