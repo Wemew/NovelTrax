@@ -366,8 +366,8 @@ class TaskManager:
 
                     await asyncio.sleep(delay_seconds)
 
-            # 3. Deep Pagination for historical volumes
-            if not self.stop_backfill_requested and max_pages > 0:
+            # 3. Deep Pagination for historical volumes (stops automatically when end of feed is reached)
+            if not self.stop_backfill_requested and max_pages != -1:
                 from app.providers.jnovels import JNovelsProvider
                 provider = JNovelsProvider(config={"max_pages": 1})
                 calibre_dir = self.db.get_setting("calibre_path", self.calibre_path)
@@ -378,15 +378,19 @@ class TaskManager:
                 monitored = {s["name"].lower(): s for s in self.db.get_all_series(monitored_only=True)}
                 blacklisted_series = {b["name"].lower() for b in self.db.get_blacklisted_series()}
 
-                for page_num in range(1, max_pages + 1):
-                    if self.stop_backfill_requested:
+                page_num = 1
+                while not self.stop_backfill_requested:
+                    # If max_pages is positive and exceeded, finish
+                    if max_pages > 0 and page_num > max_pages:
                         break
 
-                    self.db.set_setting("backfill_progress", f"Checking historical feed page {page_num}/{max_pages}...")
+                    target_text = f"page {page_num}/{max_pages}" if max_pages > 0 else f"page {page_num} (scanning until end)"
+                    self.db.set_setting("backfill_progress", f"Checking historical feed {target_text}...")
                     paged_url = provider._build_paged_url("https://jnovels.com/?s=epub", page_num)
                     page_provider = JNovelsProvider(url=paged_url, config={"max_pages": 1})
                     releases = await asyncio.to_thread(page_provider.fetch_releases)
                     if not releases:
+                        logger.info(f"Historical backfill reached end of available feed pages at page {page_num}.")
                         break
 
                     for r in releases:
@@ -417,6 +421,7 @@ class TaskManager:
                             if r.cover_url:
                                 self.cover_cache.cache_sync(r.cover_url)
 
+                    page_num += 1
                     await asyncio.sleep(delay_seconds)
 
             self.db.set_setting("backfill_status", "completed")
