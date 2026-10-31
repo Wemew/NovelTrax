@@ -66,6 +66,9 @@
                             {% endif %}
                             <div>
                                 <span class="text-sm font-bold text-white hover:text-brand-400 transition-colors">{{ s.name }}</span>
+                                {% if s.description %}
+                                <p class="text-[11px] text-slate-400 line-clamp-1 max-w-xs font-normal mt-0.5" title="{{ s.description }}">{{ s.description }}</p>
+                                {% endif %}
                                 {% if s.calibre_series_id %}
                                 <span class="block text-[10px] text-slate-500 font-mono">Calibre ID: #{{ s.calibre_series_id }}</span>
                                 {% endif %}
@@ -103,6 +106,9 @@
                                 {% endif %}
                                 <button data-series-id="{{ s.id }}" data-website-url="{{ s.website_url or '' }}" data-series-name="{{ s.name }}" onclick="handleEditLink(this)" class="p-1 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-white transition-colors" title="Edit custom series website URL">
                                     <i data-lucide="edit-3" class="w-3.5 h-3.5"></i>
+                                </button>
+                                <button data-series-id="{{ s.id }}" data-series-name="{{ s.name }}" onclick="handleFetchSeriesDetails(this)" class="p-1 rounded-lg hover:bg-amber-500/20 text-slate-400 hover:text-amber-400 transition-colors" title="Import series description & cover from website">
+                                    <i data-lucide="sparkles" class="w-3.5 h-3.5"></i>
                                 </button>
                             </div>
                         </td>
@@ -186,6 +192,36 @@
             }
         } catch (err) {
             showToast(`Error: ${err}`, 'error');
+        }
+    }
+
+    async function handleFetchSeriesDetails(btn) {
+        const seriesId = btn.dataset.seriesId;
+        const seriesName = btn.dataset.seriesName;
+        btn.disabled = true;
+        btn.innerHTML = '<i data-lucide="loader" class="w-3.5 h-3.5 animate-spin"></i>';
+        lucide.createIcons();
+
+        try {
+            const res = await fetch(`/api/series/${seriesId}/fetch-info`, { method: 'POST' });
+            const data = await res.json();
+            if (data.status === 'success' && data.description) {
+                showToast(`Imported description for "${seriesName}"!`, 'success');
+                setTimeout(() => location.reload(), 800);
+            } else if (data.status === 'success') {
+                showToast(`Updated info for "${seriesName}".`, 'success');
+                setTimeout(() => location.reload(), 800);
+            } else {
+                showToast(data.message || 'No description found on page.', 'info');
+                btn.innerHTML = '<i data-lucide="sparkles" class="w-3.5 h-3.5"></i>';
+                lucide.createIcons();
+                btn.disabled = false;
+            }
+        } catch (err) {
+            showToast(`Error: ${err}`, 'error');
+            btn.innerHTML = '<i data-lucide="sparkles" class="w-3.5 h-3.5"></i>';
+            lucide.createIcons();
+            btn.disabled = false;
         }
     }
 </script>

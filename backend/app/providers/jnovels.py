@@ -2,7 +2,10 @@ import re
 import logging
 from typing import List, Dict, Any, Optional
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
-import httpx
+try:
+    import httpx
+except ImportError:
+    httpx = None
 from bs4 import BeautifulSoup
 from app.providers.base import BaseFeedProvider, ReleaseItem
 from app.parser import extract_series_and_volume
@@ -58,41 +61,105 @@ class JNovelsProvider(BaseFeedProvider):
         return urlunparse((parsed.scheme, parsed.netloc, new_path, '', parsed.query, ''))
 
     @staticmethod
+    def clean_description_text(text: str) -> str:
+        if not text:
+            return ""
+        cleaned = re.sub(r'AVAILABLE IN ZEROBOOKS APP.*?(iOS|\n|$)', '', text, flags=re.I)
+        cleaned = re.sub(r'DIGITAL EXCLUSIVE!?\s*', '', cleaned, flags=re.I)
+        cleaned = re.sub(r'You can now Download .*? Epub', '', cleaned, flags=re.I)
+        cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
+        return cleaned
+
+    @staticmethod
+    def parse_description_from_soup(soup: BeautifulSoup) -> Optional[str]:
+        """
+        Extracts novel description/synopsis from J-Novels or WordPress DOM.
+        Handles #editdescription, #description, and headings for Description/Synopsis/Plot/Summary.
+        """
+        # 1. Direct container match (#editdescription, #description, etc.)
+        desc_container = soup.select_one("#editdescription, #description, .entry-description, div[id*='description']")
+        if desc_container:
+            c_id = (desc_container.get("id") or "").lower()
+            c_class = " ".join(desc_container.get("class") or []).lower()
+            if "site" not in c_class and "comment" not in c_id and "comment" not in c_class:
+                text = desc_container.get_text(separator="\n", strip=True)
+                cleaned = JNovelsProvider.clean_description_text(text)
+                if len(cleaned) > 20:
+                    return cleaned
+
+        # 2. Look for headings or labels in entry content
+        content = soup.select_one(".entry-content, article, .post-content") or soup
+        keywords = ('description', 'synopsis', 'plot', 'summary', 'about the book', 'about the novel', 'story')
+
+        for tag in content.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'strong', 'b', 'p']):
+            raw_t = tag.get_text(separator=' ', strip=True)
+            t_lower = raw_t.lower()
+
+            matched_kw = None
+            for kw in keywords:
+                if t_lower == kw or t_lower.startswith(f"{kw}:") or t_lower.startswith(f"{kw} :") or t_lower.startswith(f"**{kw}"):
+                    matched_kw = kw
+                    break
+
+            if matched_kw:
+                paragraphs = []
+                inline_body = re.sub(rf'^\s*(\*\*)?{matched_kw}(\*\*)?\s*[:\-–—]?\s*', '', raw_t, flags=re.I).strip()
+                if len(inline_body) > 30 and not inline_body.lower().startswith('download'):
+                    paragraphs.append(inline_body)
+
+                parent = tag.parent if tag.name in ('strong', 'b') and tag.parent else tag
+                curr = parent.find_next_sibling()
+                while curr and curr.name not in ('h1', 'h2', 'h3', 'h4', 'ol', 'ul'):
+                    if curr.name == 'p':
+                        ptxt = curr.get_text(separator="\n", strip=True)
+                        if ptxt and not ptxt.lower().startswith('download') and 'zerobooks' not in ptxt.lower():
+                            paragraphs.append(ptxt)
+                    elif curr.name == 'div':
+                        c_id = (curr.get('id') or '').lower()
+                        c_cls = " ".join(curr.get('class') or []).lower()
+                        if any(bad in c_cls for bad in ('share', 'sharedaddy', 'related', 'comments', 'meta')):
+                            break
+                        if c_id == 'editdescription' or 'description' in c_id:
+                            paragraphs.append(curr.get_text(separator="\n", strip=True))
+                            break
+                        div_ps = curr.find_all('p')
+                        for dp in div_ps:
+                            dp_txt = dp.get_text(separator="\n", strip=True)
+                            if dp_txt and not dp_txt.lower().startswith('download'):
+                                paragraphs.append(dp_txt)
+                    curr = curr.find_next_sibling()
+
+                if paragraphs:
+                    result = "\n\n".join(paragraphs)
+                    cleaned = JNovelsProvider.clean_description_text(result)
+                    if len(cleaned) > 25:
+                        return cleaned
+
+        return None
+
+    @staticmethod
+    def parse_cover_from_soup(target_soup: BeautifulSoup) -> Optional[str]:
+        """Extracts high-resolution novel cover image, filtering out ads and icons."""
+        for selector in ("img.wp-post-image", "img.attachment-post-thumbnail", ".post-thumbnail img", ".entry-content img", "article img", "img"):
+            for img in target_soup.select(selector):
+                src = img.get("src") or img.get("data-src") or img.get("data-lazy-src")
+                if src and src.startswith("http") and not any(bad in src.lower() for bad in ("gravatar", "cbz-reader", "download.jpg", "zerobooks", "zero-book", "logo", "banner", "avatar", "support-us", ".gif")):
+                    return src
+        return None
+
+    @staticmethod
     def extract_synopsis_and_original_link(url: str) -> Dict[str, Optional[str]]:
         """
         Visits a J-Novels post or series page:
-        1. Detects canonical 'Refer to original post' link.
-        2. Extracts real novel synopsis from the 'Synopsis' section.
+        1. Detects canonical 'Refer to original post' link if volume release.
+        2. Extracts real novel description/synopsis from #editdescription or content.
         3. Extracts high-resolution cover image.
         """
         orig_link = None
         synopsis = None
         cover_url = None
 
-        def parse_synopsis_from_soup(target_soup):
-            syn_header = target_soup.find(
-                lambda tag: tag.name in ('h1', 'h2', 'h3', 'h4', 'strong', 'b', 'p') 
-                and 'synopsis' in tag.get_text(strip=True).lower()
-            )
-            if not syn_header:
-                return None
-            
-            paragraphs = []
-            curr = syn_header.find_next_sibling()
-            while curr and curr.name not in ('ol', 'ul', 'h1', 'h2', 'h3'):
-                if curr.name == 'p':
-                    p_text = curr.get_text(strip=True)
-                    if p_text:
-                        p_clean = re.sub(r'^(DIGITAL EXCLUSIVE!?|AVAILABLE IN ZEROBOOKS APP.*?)\s*', '', p_text, flags=re.I).strip()
-                        if p_clean and not p_clean.lower().startswith('download'):
-                            paragraphs.append(p_clean)
-                elif curr.name == 'div' and any(c in (curr.get('class') or []) for c in ('share', 'sharedaddy', 'related')):
-                    break
-                curr = curr.find_next_sibling()
-            
-            return '\n\n'.join(paragraphs) if paragraphs else None
-
-        with httpx.Client(headers=DEFAULT_HEADERS, timeout=12.0, follow_redirects=True) as client:
+        with httpx.Client(headers=DEFAULT_HEADERS, timeout=15.0, follow_redirects=True) as client:
             try:
                 resp = client.get(url)
                 if resp.status_code == 200:
@@ -100,46 +167,40 @@ class JNovelsProvider(BaseFeedProvider):
                     
                     # 1. Search for "Refer to original post" link
                     for a in soup.find_all("a"):
-                        text = a.get_text(strip=True)
-                        if re.search(r'refer\s+to\s+original\s+post', text, re.I):
-                            orig_link = a.get("href")
-                            break
-                    
-                    # 2. Extract synopsis
-                    synopsis = parse_synopsis_from_soup(soup)
-
-                    # 3. Extract cover image
-                    article = soup.select_one("article, .post-content, .entry-content")
-                    if article:
-                        for img in article.find_all("img"):
-                            src = img.get("src") or img.get("data-src") or img.get("data-lazy-src")
-                            if src and not any(bad in src.lower() for bad in ("gravatar", "cbz-reader", "download.jpg", "zerobooks", "logo")):
-                                cover_url = src
+                        text = a.get_text(separator=' ', strip=True)
+                        href = (a.get("href") or "").strip()
+                        if re.search(r'refer\s+to\s+original\s+post|original\s+post|main\s+series\s+post|main\s+post', text, re.I):
+                            if href.startswith("http") and "jnovels.com" in href:
+                                orig_link = href
                                 break
 
-                    # If volume post didn't have synopsis but has orig_link, fetch orig_link
-                    if not synopsis and orig_link:
+                    # 2. Extract description from page
+                    synopsis = JNovelsProvider.parse_description_from_soup(soup)
+
+                    # 3. Extract cover image from page
+                    cover_url = JNovelsProvider.parse_cover_from_soup(soup)
+
+                    # If volume post didn't have synopsis or cover, but has orig_link, fetch orig_link
+                    if (not synopsis or not cover_url) and orig_link and orig_link != url:
                         try:
                             resp_orig = client.get(orig_link)
                             if resp_orig.status_code == 200:
                                 soup_orig = BeautifulSoup(resp_orig.text, "html.parser")
-                                synopsis = parse_synopsis_from_soup(soup_orig)
+                                if not synopsis:
+                                    synopsis = JNovelsProvider.parse_description_from_soup(soup_orig)
                                 if not cover_url:
-                                    art_orig = soup_orig.select_one("article, .post-content, .entry-content")
-                                    if art_orig:
-                                        for img in art_orig.find_all("img"):
-                                            src = img.get("src") or img.get("data-src")
-                                            if src and not any(bad in src.lower() for bad in ("gravatar", "cbz-reader", "download.jpg", "zerobooks")):
-                                                cover_url = src
-                                                break
+                                    cover_url = JNovelsProvider.parse_cover_from_soup(soup_orig)
                         except Exception as e:
                             logger.debug(f"Error fetching canonical series link {orig_link}: {e}")
 
             except Exception as e:
                 logger.debug(f"Error extracting details from {url}: {e}")
 
+        # If url itself was already the main series page, orig_link is url
+        final_series_link = orig_link or (url if not any(v in url.lower() for v in ('volume', 'vol-', 'vol.')) else None)
+
         return {
-            "series_link": orig_link,
+            "series_link": final_series_link,
             "synopsis": synopsis,
             "cover_url": cover_url
         }

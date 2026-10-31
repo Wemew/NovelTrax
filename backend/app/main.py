@@ -395,6 +395,7 @@ async def api_backfill_status():
 @app.post("/api/releases/{release_id}/synopsis")
 async def api_fetch_synopsis(release_id: int):
     """On-demand synopsis and canonical series link extraction for a release."""
+    import asyncio
     with db.get_connection() as conn:
         cur = conn.cursor()
         cur.execute("SELECT * FROM releases WHERE id = ?;", (release_id,))
@@ -407,7 +408,7 @@ async def api_fetch_synopsis(release_id: int):
         return JSONResponse({"status": "error", "message": "No link available"}, status_code=400)
 
     from app.providers.jnovels import JNovelsProvider
-    details = JNovelsProvider.extract_synopsis_and_original_link(target_url)
+    details = await asyncio.to_thread(JNovelsProvider.extract_synopsis_and_original_link, target_url)
 
     db.update_release_details(
         release_id,
@@ -423,6 +424,52 @@ async def api_fetch_synopsis(release_id: int):
         "synopsis": details.get("synopsis"),
         "series_link": details.get("series_link"),
         "cover_url": details.get("cover_url")
+    })
+
+@app.post("/api/series/{series_id}/fetch-info")
+async def api_fetch_series_info(series_id: int):
+    """Fetches description and cover image for a tracked series from its website hub."""
+    import asyncio
+    with db.get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM series_tracking WHERE id = ?;", (series_id,))
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Series not found")
+
+    target_url = row["website_url"]
+    if not target_url or "?s=" in target_url:
+        with db.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT series_link, link FROM releases 
+                WHERE lower(series_name) = lower(?) AND series_link IS NOT NULL AND series_link != '' 
+                ORDER BY id DESC LIMIT 1;
+            """, (row["name"],))
+            rel = cur.fetchone()
+            if rel and rel["series_link"]:
+                target_url = rel["series_link"]
+
+    if not target_url:
+        return JSONResponse({"status": "error", "message": "No website URL configured for this series"}, status_code=400)
+
+    from app.providers.jnovels import JNovelsProvider
+    details = await asyncio.to_thread(JNovelsProvider.extract_synopsis_and_original_link, target_url)
+
+    db.update_series_details(
+        series_id,
+        description=details.get("synopsis"),
+        cover_url=details.get("cover_url"),
+        website_url=details.get("series_link") or target_url
+    )
+    if details.get("cover_url"):
+        task_manager.cover_cache.cache_sync(details["cover_url"])
+
+    return JSONResponse({
+        "status": "success",
+        "description": details.get("synopsis"),
+        "cover_url": details.get("cover_url"),
+        "website_url": details.get("series_link") or target_url
     })
 
 if __name__ == "__main__":

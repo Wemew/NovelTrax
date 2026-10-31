@@ -309,6 +309,43 @@ def run_e2e_test():
     assert rel_id > 0
     print("  ✓ ReleaseItem successfully handles source_feed_name and persists cleanly to database")
 
+    # Test parse_description_from_soup with #editdescription
+    from bs4 import BeautifulSoup
+    from app.providers.jnovels import JNovelsProvider
+
+    sample_user_html = """
+    <article class="post">
+    <h4>Description</h4>
+    <div id="editdescription">
+    <p>Even someone like me discovered a way to find a girlfriend!<br/>
+    The unexpected development in this high school love comedy will bring a smile to your mouth!!</p>
+    <p>With my friends getting attached one after another, I became the last bachelor within my group. As I was sighing and lamenting such a high school life, an advertising email about a latest game app was sent to my phone. This game could actually guide the player to meet with girls by predicting the future——</p>
+    <p>Was this true? If it was, please let me meet with the daughter of the capitalist family that I looked up to, Mochizuki Rika, and the innocent model student Nakajima Konoha. In order to meet the heroines within the in-game time limit of five days, the curtain was pulled to the daily struggles with the game itself.</p>
+    </div>
+    <img class="wp-post-image" src="https://jnovels.com/wp-content/uploads/2019/06/heroine-cover.jpg" />
+    </article>
+    """
+    soup_user = BeautifulSoup(sample_user_html, "html.parser")
+    desc_result = JNovelsProvider.parse_description_from_soup(soup_user)
+    assert desc_result is not None
+    assert "Even someone like me discovered a way to find a girlfriend!" in desc_result
+    assert "Mochizuki Rika" in desc_result
+    cover_result = JNovelsProvider.parse_cover_from_soup(soup_user)
+    assert cover_result == "https://jnovels.com/wp-content/uploads/2019/06/heroine-cover.jpg"
+    print("  ✓ JNovelsProvider correctly extracts full description from #editdescription and novel cover image")
+
+    # Test series_tracking description and cover_url update
+    app_db.update_series_details(
+        1,
+        description="Bell Cranel is a solo adventurer in Orario.",
+        cover_url="https://jnovels.com/danmachi-cover.jpg",
+        website_url="https://jnovels.com/danmachi-light-novel-epub/"
+    )
+    all_s = app_db.get_all_series()
+    s_danmachi = [s for s in all_s if s["id"] == 1][0]
+    assert s_danmachi["description"] == "Bell Cranel is a solo adventurer in Orario."
+    print("  ✓ Successfully verified series_tracking description persistence")
+
     print("\n" + "=" * 60)
     print("ALL TESTS (INCLUDING SECURITY & SYNOPSIS DISCOVERY) PASSED WITH 100% SUCCESS!")
     print("=" * 60)

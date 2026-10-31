@@ -71,6 +71,16 @@ class Database:
             except sqlite3.OperationalError:
                 pass
 
+            try:
+                cur.execute("ALTER TABLE series_tracking ADD COLUMN description TEXT DEFAULT '';")
+            except sqlite3.OperationalError:
+                pass
+
+            try:
+                cur.execute("ALTER TABLE series_tracking ADD COLUMN cover_url TEXT DEFAULT '';")
+            except sqlite3.OperationalError:
+                pass
+
             # Series blacklist table
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS series_blacklist (
@@ -231,6 +241,18 @@ class Database:
         with self.get_connection() as conn:
             cur = conn.cursor()
             cur.execute("UPDATE series_tracking SET website_url = ? WHERE id = ?;", (website_url.strip(), series_id))
+            conn.commit()
+
+    def update_series_details(self, series_id: int, description: Optional[str] = None, cover_url: Optional[str] = None, website_url: Optional[str] = None):
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                UPDATE series_tracking SET
+                    description = COALESCE(?, description),
+                    cover_url = COALESCE(?, cover_url),
+                    website_url = COALESCE(?, website_url)
+                WHERE id = ?;
+            """, (description, cover_url, website_url, series_id))
             conn.commit()
 
     # --- Release Operations ---

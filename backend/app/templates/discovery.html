@@ -129,9 +129,9 @@
                     </p>
                     {% else %}
                     <div class="mt-2.5 flex items-center justify-between text-[11px] text-slate-500 bg-slate-950/30 px-2.5 py-1.5 rounded-xl border border-slate-800/40" id="synopsis-box-{{ item.id }}">
-                        <span class="italic text-[10px]">No synopsis loaded</span>
+                        <span class="italic text-[10px]">No description loaded</span>
                         <button data-release-id="{{ item.id }}" onclick="handleFetchSynopsis(this)" class="text-brand-400 hover:text-brand-300 font-semibold flex items-center gap-1 hover:underline text-[10px]">
-                            <i data-lucide="sparkles" class="w-3 h-3"></i> Load Synopsis
+                            <i data-lucide="sparkles" class="w-3 h-3"></i> Load Description
                         </button>
                     </div>
                     {% endif %}
@@ -490,9 +490,9 @@
                 if (box) {
                     box.outerHTML = `<p class="text-xs text-slate-300/90 mt-2.5 line-clamp-3 leading-relaxed bg-slate-950/40 p-2.5 rounded-xl border border-slate-800/60" title="${data.synopsis}">${data.synopsis}</p>`;
                 }
-                showToast('Synopsis updated!', 'success');
+                showToast('Description updated successfully!', 'success');
             } else {
-                btn.innerHTML = '<span class="text-slate-500">Not found</span>';
+                btn.innerHTML = '<span class="text-slate-500">Not found on page</span>';
             }
         } catch (err) {
             btn.innerHTML = '<span class="text-rose-400">Error</span>';
