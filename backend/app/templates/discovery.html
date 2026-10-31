@@ -124,9 +124,7 @@
 
                     <!-- Synopsis / Description preview (Scrollable) -->
                     {% if item.description %}
-                    <div class="max-h-28 overflow-y-auto pr-1 text-xs text-slate-300/90 mt-2.5 leading-relaxed bg-slate-950/50 p-2.5 rounded-xl border border-slate-800/60 whitespace-pre-line custom-scrollbar" title="{{ item.description }}">
-                        {{ item.description }}
-                    </div>
+                    <div class="max-h-28 overflow-y-auto pr-1 text-xs text-slate-300/90 mt-2.5 leading-relaxed bg-slate-950/50 p-2.5 rounded-xl border border-slate-800/60 whitespace-pre-line custom-scrollbar" title="{{ item.description }}">{{ item.description.strip() }}</div>
                     {% else %}
                     <div class="mt-2.5 flex items-center justify-between text-[11px] text-slate-500 bg-slate-950/30 px-2.5 py-1.5 rounded-xl border border-slate-800/40" id="synopsis-box-{{ item.id }}">
                         <span class="italic text-[10px]">No description loaded</span>
@@ -488,7 +486,7 @@
             if (data.status === 'success' && data.synopsis) {
                 const box = document.getElementById(`synopsis-box-${releaseId}`);
                 if (box) {
-                    box.outerHTML = `<div class="max-h-28 overflow-y-auto pr-1 text-xs text-slate-300/90 mt-2.5 leading-relaxed bg-slate-950/50 p-2.5 rounded-xl border border-slate-800/60 whitespace-pre-line custom-scrollbar" title="${data.synopsis}">${data.synopsis}</div>`;
+                    box.outerHTML = `<div class="max-h-28 overflow-y-auto pr-1 text-xs text-slate-300/90 mt-2.5 leading-relaxed bg-slate-950/50 p-2.5 rounded-xl border border-slate-800/60 whitespace-pre-line custom-scrollbar" title="${data.synopsis}">${data.synopsis.trim()}</div>`;
                 }
                 if (data.cover_url) {
                     const coverBox = document.getElementById(`cover-box-${releaseId}`);

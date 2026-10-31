@@ -64,7 +64,9 @@ class JNovelsProvider(BaseFeedProvider):
     def clean_description_text(text: str) -> str:
         if not text:
             return ""
-        cleaned = re.sub(r'AVAILABLE IN ZEROBOOKS APP.*?(iOS|\n|$)', '', text, flags=re.I)
+        # Strip leading "Description" or "Synopsis" labels and subsequent linebreaks
+        cleaned = re.sub(r'^\s*(\*\*)?(description|synopsis|summary|story|about\s+the\s+book)(\*\*)?\s*[:\-–—]?\s*\n*', '', text, flags=re.I)
+        cleaned = re.sub(r'AVAILABLE IN ZEROBOOKS APP.*?(iOS|\n|$)', '', cleaned, flags=re.I)
         cleaned = re.sub(r'DIGITAL EXCLUSIVE!?\s*', '', cleaned, flags=re.I)
         cleaned = re.sub(r'You can now Download .*? Epub', '', cleaned, flags=re.I)
         cleaned = re.sub(r'You can now download .*? Format', '', cleaned, flags=re.I)
@@ -74,14 +76,30 @@ class JNovelsProvider(BaseFeedProvider):
         return cleaned
 
     @staticmethod
-    def parse_description_from_soup(soup: BeautifulSoup) -> Optional[str]:
+    def parse_description_from_soup(orig_soup: BeautifulSoup) -> Optional[str]:
         """
         Extracts novel description/synopsis from J-Novels or WordPress DOM.
-        Handles #editdescription, #description, headings, inline labels,
-        and fallback narrative paragraph detection.
+        Handles #editdescription, #description, #synopsis, headings, inline labels,
+        and fallback narrative paragraph detection while strictly ignoring comments.
         """
-        # 1. Direct container match (#editdescription, #description, etc.)
-        desc_container = soup.select_one("#editdescription, #description, .entry-description, div[id*='description']")
+        if not orig_soup:
+            return None
+
+        # Work on a cloned soup to avoid mutating caller DOM
+        soup = BeautifulSoup(str(orig_soup), "html.parser")
+
+        # 0. Strictly strip comments, user discussions, widgets, and footers
+        for unwanted in soup.select(
+            "#comments, .comments-area, .comment-list, .comment, .wpd-comment, "
+            "#respond, .wpdiscuz_top_clearing, .post-meta-container, .sharedaddy, "
+            ".jp-relatedposts, footer, script, style, nav, aside, .sidebar"
+        ):
+            unwanted.decompose()
+
+        # 1. Direct container match (#editdescription, #description, #synopsis, .item-synopsis, etc.)
+        desc_container = soup.select_one(
+            "#editdescription, #description, #synopsis, .item-synopsis, .entry-description, div[id*='description'], div[id*='synopsis']"
+        )
         if desc_container:
             c_id = (desc_container.get("id") or "").lower()
             c_class = " ".join(desc_container.get("class") or []).lower()
@@ -91,7 +109,7 @@ class JNovelsProvider(BaseFeedProvider):
                 if len(cleaned) > 20:
                     return cleaned
 
-        content = soup.select_one(".entry-content, article, .post-content") or soup
+        content = soup.select_one(".post-content, .entry-content, .entry, .post-inner, article") or soup
         keywords = ('description', 'synopsis', 'plot', 'summary', 'about the book', 'about the novel', 'story')
 
         # 2. Look for headings or labels in entry content
@@ -122,8 +140,8 @@ class JNovelsProvider(BaseFeedProvider):
 
                 # Check subsequent siblings of the block
                 curr = block.find_next_sibling()
-                while curr and curr.name not in ('h1', 'h2', 'h3', 'h4', 'ol', 'ul'):
-                    if curr.name == 'p':
+                while curr and curr.name not in ('h1', 'h2', 'h3', 'h4', 'ol', 'ul', 'table'):
+                    if curr.name in ('p', 'blockquote'):
                         ptxt = curr.get_text(separator="\n", strip=True)
                         p_lower = ptxt.lower().strip()
                         if any(p_lower.startswith(bad) for bad in ['download', 'zerobooks', 'associated names', 'associated titles', 'genre', 'related series']):
@@ -133,10 +151,11 @@ class JNovelsProvider(BaseFeedProvider):
                     elif curr.name == 'div':
                         c_id = (curr.get('id') or '').lower()
                         c_cls = " ".join(curr.get('class') or []).lower()
-                        if any(bad in c_cls for bad in ('share', 'sharedaddy', 'related', 'comments', 'meta', 'code-block')):
+                        if any(bad in c_cls for bad in ('share', 'sharedaddy', 'related', 'comments', 'meta', 'code-block', 'ai-track')):
                             break
-                        if c_id == 'editdescription' or 'description' in c_id:
-                            paragraphs.append(curr.get_text(separator="\n", strip=True))
+                        dtxt = curr.get_text(separator="\n", strip=True)
+                        if dtxt and len(dtxt) > 25:
+                            paragraphs.append(dtxt)
                             break
                     curr = curr.find_next_sibling()
 
@@ -155,10 +174,12 @@ class JNovelsProvider(BaseFeedProvider):
                 continue
             if any(p_lower.startswith(bad) for bad in [
                 'you can now download', 'you can download', 'download', 'available in zerobooks',
-                'share this', 'subscribe', 'genre', 'associated names', 'associated titles'
+                'share this', 'subscribe', 'genre', 'associated names', 'associated titles', 'type your email'
             ]):
                 continue
             if 'zerobooks' in p_lower:
+                continue
+            if p.find_parent(['ol', 'ul', 'form', 'nav', 'header', 'footer']):
                 continue
             candidate_paragraphs.append(ptxt)
             if len(candidate_paragraphs) >= 4:

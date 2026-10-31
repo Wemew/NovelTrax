@@ -382,6 +382,61 @@ def run_e2e_test():
     assert "A college student spends an evening out" in desc_3
     assert "Associated Titles" not in desc_3
     print("  ✓ Edge case 3 passed: deeply nested span/b Synopsis heading correctly parsed")
+
+    # Edge Case 4: Post with no synopsis but user comments (e.g. The Devil is a Part-Timer) -> Must NOT pull comments
+    sample_edge_4 = """
+    <article class="post">
+    <div class="post-content">
+        <p><b>You can now Download The Devil is a Part Timer Light Novel PDF volumes in (.epub) Format</b></p>
+        <ol>
+            <li>VOLUME 01 ———– <a href="http://example.com/1">DOWNLOAD</a></li>
+            <li>VOLUME 02 ———– <a href="http://example.com/2">DOWNLOAD</a></li>
+        </ol>
+    </div>
+    <div class="comments-area" id="comments">
+        <div class="comment">
+            <p>So. . .apparently the link for Vol 2 actually leads to 10!</p>
+        </div>
+        <div class="comment">
+            <p>When are you going to upload volume 16 bruh?</p>
+        </div>
+    </div>
+    </article>
+    """
+    desc_4 = JNovelsProvider.parse_description_from_soup(BeautifulSoup(sample_edge_4, "html.parser"))
+    assert desc_4 is None, f"Expected None for post with no description, but got: {desc_4}"
+    print("  ✓ Edge case 4 passed: pages without description strictly ignore comments and return None")
+
+    # Edge Case 5: Post with expander div synopsis + comments (e.g. The Disabled Tyrant's Pet Fish)
+    sample_edge_5 = """
+    <article class="post">
+    <div class="post-content">
+        <p>You can now Download The Disabled Tyrant’s Beloved Pet Fish Light Novel</p>
+        <h2><span style="color: #ff0000;"><strong>Synopsis</strong></span></h2>
+        <div class="a-expander-content">
+            <div id="synopsis">
+                When Li Yu falls asleep reading a webnovel about a ruthless, mute tyrant, he wakes up inside the world of the novel as a fish!
+            </div>
+            Associated Names: Can Ji Bao Jun
+        </div>
+        <ol>
+            <li>VOLUME 01 ———– <a href="http://example.com/1">DOWNLOAD</a></li>
+        </ol>
+    </div>
+    <div id="comments">
+        <div class="wpd-comment">
+            <p>Pretty sure vol 2 translation is up and ty!</p>
+        </div>
+    </div>
+    </article>
+    """
+    desc_5 = JNovelsProvider.parse_description_from_soup(BeautifulSoup(sample_edge_5, "html.parser"))
+    assert desc_5 is not None
+    assert "When Li Yu falls asleep" in desc_5
+    assert not desc_5.startswith("\n")
+    assert "Pretty sure vol 2" not in desc_5
+    assert "Associated Names" not in desc_5
+    print("  ✓ Edge case 5 passed: expander div synopsis cleanly extracted without comments or leading newlines")
     app_db.update_series_details(
         1,
         description="Bell Cranel is a solo adventurer in Orario.",

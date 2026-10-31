@@ -67,7 +67,7 @@
                             <div class="min-w-0">
                                 <span class="text-sm font-bold text-white hover:text-brand-400 transition-colors">{{ s.name }}</span>
                                 {% if s.description %}
-                                <div class="max-h-16 overflow-y-auto pr-1 text-[11px] text-slate-400 font-normal mt-1 leading-relaxed bg-slate-950/40 p-1.5 rounded-lg border border-slate-800/40 whitespace-pre-line custom-scrollbar max-w-sm" title="{{ s.description }}">{{ s.description }}</div>
+                                <div class="max-h-16 overflow-y-auto pr-1 text-[11px] text-slate-400 font-normal mt-1 leading-relaxed bg-slate-950/40 p-1.5 rounded-lg border border-slate-800/40 whitespace-pre-line custom-scrollbar max-w-sm" title="{{ s.description }}">{{ s.description.strip() }}</div>
                                 {% endif %}
                                 {% if s.calibre_series_id %}
                                 <span class="block text-[10px] text-slate-500 font-mono mt-0.5">Calibre ID: #{{ s.calibre_series_id }}</span>
