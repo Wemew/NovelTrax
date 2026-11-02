@@ -10,6 +10,11 @@ Covers two gaps this milestone closes:
 2. The "Add New Feed" preset dropdown in ``feeds.html`` offers the Nyaa
    category 3_1 preset, and ``onFeedTypeChange()`` fills the provider's default
    category 3_1 RSS URL for it.
+3. The dedicated Audiobooks section exists end-to-end at the source level: the
+   ``/audiobooks`` page route in ``main.py`` reads the two audiobook database
+   methods, ``base.html`` links it in the nav with a headphones icon and the
+   ``active_page == 'audiobooks'`` active state, and ``audiobooks.html`` renders
+   an empty state plus an escaped, ``|localdate``-formatted table of feed rows.
 
 Why static instead of a render test: the Calibre embedded interpreter on this
 machine has neither ``jinja2`` nor ``fastapi`` installed, so templates cannot be
@@ -43,7 +48,22 @@ SERIES_PARTIAL = os.path.join(
 )
 BASE_TEMPLATE = os.path.join(TEMPLATES_DIR, "base.html")
 FEEDS_TEMPLATE = os.path.join(TEMPLATES_DIR, "feeds.html")
+AUDIOBOOKS_TEMPLATE = os.path.join(TEMPLATES_DIR, "audiobooks.html")
 MAIN_PY = os.path.join(PROJECT_ROOT, "backend", "app", "main.py")
+
+# Dedicated Audiobooks section wiring (route -> data source -> nav -> page).
+AUDIOBOOKS_ENDPOINT = '@app.get("/audiobooks", response_class=HTMLResponse)'
+AUDIOBOOKS_TEMPLATE_NAME = 'name="audiobooks.html"'
+AUDIOBOOKS_LIST_CALL = "db.get_audiobook_releases(limit=200)"
+AUDIOBOOKS_COUNT_CALL = "db.count_audiobook_releases()"
+AUDIOBOOKS_ACTIVE_CONTEXT = '"active_page": "audiobooks"'
+AUDIOBOOKS_NAV_HREF = 'href="/audiobooks"'
+AUDIOBOOKS_NAV_ICON = 'data-lucide="headphones"'
+AUDIOBOOKS_NAV_ACTIVE = "{% if active_page == 'audiobooks' %}"
+AUDIOBOOKS_EMPTY_TEXT = "No audiobook releases yet."
+AUDIOBOOKS_NYAA_HINT = "[Audiobook]"
+AUDIOBOOKS_DATE_FILTER = "row.pub_date|localdate"
+AUDIOBOOKS_OPEN_REL = 'rel="noopener noreferrer"'
 
 # Nyaa preset markup required by the feature (category 3_1 = Literature,
 # English-translated); the value must be the registry key accepted by
@@ -221,6 +241,97 @@ def check_endpoint_contract():
     )
 
 
+def check_audiobooks_page():
+    """The dedicated /audiobooks page must be routed, nav-linked and escaped."""
+    main_source = read_text(MAIN_PY)
+
+    require(
+        AUDIOBOOKS_ENDPOINT in main_source,
+        "main.py: dedicated audiobooks page route %r is missing"
+        % AUDIOBOOKS_ENDPOINT,
+    )
+    require(
+        AUDIOBOOKS_TEMPLATE_NAME in main_source,
+        "main.py: the /audiobooks route does not render audiobooks.html",
+    )
+    require(
+        AUDIOBOOKS_LIST_CALL in main_source,
+        "main.py: the /audiobooks route does not read "
+        "db.get_audiobook_releases(limit=200)",
+    )
+    require(
+        AUDIOBOOKS_COUNT_CALL in main_source,
+        "main.py: the /audiobooks route does not read db.count_audiobook_releases()",
+    )
+    require(
+        AUDIOBOOKS_ACTIVE_CONTEXT in main_source,
+        "main.py: the /audiobooks route does not set active_page to 'audiobooks'",
+    )
+
+    base_source = read_text(BASE_TEMPLATE)
+    require(
+        AUDIOBOOKS_NAV_HREF in base_source,
+        'base.html: missing the Audiobooks nav link (href="/audiobooks")',
+    )
+    require(
+        AUDIOBOOKS_NAV_ICON in base_source,
+        'base.html: the Audiobooks nav link does not use '
+        'data-lucide="headphones"',
+    )
+    require(
+        AUDIOBOOKS_NAV_ACTIVE in base_source,
+        "base.html: the Audiobooks nav link has no "
+        "active_page == 'audiobooks' active state",
+    )
+    require(
+        "Audiobooks" in base_source,
+        "base.html: the /audiobooks nav entry is not labelled Audiobooks",
+    )
+
+    page_source = read_text(AUDIOBOOKS_TEMPLATE)
+    require(
+        '{% extends "base.html" %}' in page_source,
+        "audiobooks.html: does not extend base.html",
+    )
+    require(
+        "{% block content %}" in page_source,
+        "audiobooks.html: missing the content block that base.html renders",
+    )
+    require(
+        "book_rows" in page_source,
+        "audiobooks.html: does not iterate the book_rows context key",
+    )
+    require(
+        "total_audiobooks" in page_source,
+        "audiobooks.html: does not show the total_audiobooks count badge",
+    )
+    require(
+        AUDIOBOOKS_EMPTY_TEXT in page_source,
+        "audiobooks.html: missing the empty state text %r"
+        % AUDIOBOOKS_EMPTY_TEXT,
+    )
+    require(
+        AUDIOBOOKS_NYAA_HINT in page_source,
+        "audiobooks.html: the empty state does not mention the Nyaa "
+        "[Audiobook] tag detection",
+    )
+    require(
+        AUDIOBOOKS_DATE_FILTER in page_source,
+        "audiobooks.html: published dates are not formatted through the "
+        "globally registered |localdate filter",
+    )
+    require(
+        'target="_blank"' in page_source and AUDIOBOOKS_OPEN_REL in page_source,
+        'audiobooks.html: the Open link is not target="_blank" '
+        'rel="noopener noreferrer"',
+    )
+    require(
+        "|safe" not in page_source,
+        "audiobooks.html: feed-controlled values must be auto-escaped, never "
+        "rendered with |safe",
+    )
+
+
 def check_balanced_jinja(path, label):
     """Balanced Jinja block tags and balanced ``{{ ... }}`` expressions."""
     source = read_text(path)
@@ -261,6 +372,7 @@ def main():
     check_download_action(SERIES_PARTIAL, "partials/series_card_chunk.html")
     check_base_helper()
     check_feeds_nyaa_preset()
+    check_audiobooks_page()
     check_endpoint_contract()
 
     templates = (
@@ -268,6 +380,7 @@ def main():
         (SERIES_PARTIAL, "partials/series_card_chunk.html"),
         (BASE_TEMPLATE, "base.html"),
         (FEEDS_TEMPLATE, "feeds.html"),
+        (AUDIOBOOKS_TEMPLATE, "audiobooks.html"),
     )
     for path, label in templates:
         check_balanced_jinja(path, label)
@@ -275,7 +388,8 @@ def main():
     print(
         "ui-wiring static guard PASSED: download button wired in both release "
         "partials, downloadRelease() helper present, Nyaa preset present, "
-        "Jinja delimiters balanced in %d edited template(s)" % len(templates)
+        "audiobooks route/nav/page wired, Jinja delimiters balanced in %d "
+        "edited template(s)" % len(templates)
     )
     raise SystemExit(0)
 

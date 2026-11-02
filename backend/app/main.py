@@ -510,6 +510,24 @@ async def downloads_view(request: Request):
         }
     )
 
+@app.get("/audiobooks", response_class=HTMLResponse)
+async def audiobooks_view(request: Request):
+    """Renders the dedicated Audiobooks page for light-novel audio releases."""
+    book_rows = db.get_audiobook_releases(limit=200)
+    total_audiobooks = db.count_audiobook_releases()
+    settings = db.get_all_settings()
+
+    return templates.TemplateResponse(
+        request=request,
+        name="audiobooks.html",
+        context={
+            "active_page": "audiobooks",
+            "book_rows": book_rows,
+            "total_audiobooks": total_audiobooks,
+            "settings": settings
+        }
+    )
+
 # --- API Endpoints ---
 
 @app.post("/api/calibre/sync")

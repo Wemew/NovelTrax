@@ -278,10 +278,10 @@ All remediations were independently executed and verified under the Calibre 7.x 
 5. **UI wiring and template-integrity guard (`tests/test_ui_wiring.py`)**:
    - Stdlib-only static guard (no Jinja2 required) that proves the release Download button is wired in both release partials, the global `downloadRelease()` helper calls the documented endpoint contract, the Nyaa Add-Feed preset exists, and every edited template has balanced Jinja block tags and delimiters. This is the regression guard for SEC-23; runtime rendering is not executable in the Calibre interpreter (see RR-09).
 
-6. **Final attestation run (Lead-executed, all 45 suites)**:
-   - Every suite in `tests/` was executed through Calibre's interpreter with assertions live. Result: **45 of 45 exit 0, zero `[FAIL]`/`[ERROR]` markers**.
+6. **Final attestation run (Lead-executed, all 46 suites)**:
+   - Every suite in `tests/` was executed through Calibre's interpreter with assertions live. Result: **46 of 46 exit 0, zero `[FAIL]`/`[ERROR]` markers**.
    - Primary suites: `test_e2e_suite.py` 255/255; `test_full_workflow.py` all 17 stages; `test_tier5_adversarial_core.py` 85/85; `test_tier5_adversarial_db_providers.py` 280/280; `test_nyaa.py` 107/107; `test_downloader.py` 184/184; `test_omnibus_timezone.py` 30/30; `test_security_audit.py` 100%; `test_challenger_m4_it2_empiric.py` 82/82.
-   - Integrity precondition: `tests/test_assert_hygiene.py` reports **0 bare asserts across the 46 `.py` files under `tests/`** (45 test modules plus `mock_calibre.py`), which is what makes the counts above meaningful rather than vacuous.
+   - Integrity precondition: `tests/test_assert_hygiene.py` reports **0 bare asserts across the 47 `.py` files under `tests/`** (46 test modules plus `mock_calibre.py`), which is what makes the counts above meaningful rather than vacuous.
 
 ---
 

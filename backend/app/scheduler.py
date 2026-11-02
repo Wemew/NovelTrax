@@ -42,6 +42,41 @@ class TaskManager:
         self.is_checking_feeds = False
         self.is_backfilling = False
         self.stop_backfill_requested = False
+        self.media_resolver = self._build_media_resolver()
+
+    def _build_media_resolver(self):
+        from app.media_type import MediaTypeResolver
+        enabled = self.db.get_setting("filter_non_novels", "true").strip().lower() != "false"
+        try:
+            budget = int(self.db.get_setting("media_verify_budget", "25"))
+        except Exception:
+            budget = 25
+        resolver = MediaTypeResolver(self.db, enabled=enabled)
+        resolver.begin_run(budget)
+        return resolver
+
+    def classify_media(self, release) -> str:
+        """
+        Resolves a release's media type (novel / audiobook / manga / unknown).
+
+        Manga must never enter the database; audiobooks are stored but excluded
+        from the tracking views. Anything inconclusive is kept as 'unknown'.
+        """
+        from app.media_type import UNKNOWN
+
+        resolver = getattr(self, "media_resolver", None)
+        if resolver is None:
+            return UNKNOWN
+        title = release.get("title", "") if isinstance(release, dict) else getattr(release, "title", "")
+        link = release.get("link", "") if isinstance(release, dict) else getattr(release, "link", "")
+        guid = release.get("guid", "") if isinstance(release, dict) else getattr(release, "guid", "")
+        download = release.get("download_url", "") if isinstance(release, dict) else getattr(release, "download_url", "")
+        try:
+            return resolver.resolve(guid or "", title or "", link, download)
+        except Exception as exc:
+            logger.debug(f"Media classification failed for {title!r}: {exc}")
+            return UNKNOWN
+
 
     def get_notifier(self) -> NotificationService:
         discord_url = self.db.get_setting("discord_webhook_url", "")
@@ -207,6 +242,12 @@ class TaskManager:
         self.is_checking_feeds = True
         total_found = 0
         total_requested = 0
+        skipped_manga = 0
+        skipped_audiobooks = 0
+
+        # Refresh the per-scan verification budget so a large backlog of
+        # unverified releases drains over successive scans.
+        self.media_resolver = self._build_media_resolver()
 
         try:
             calibre_dir = self.db.get_setting("calibre_path", self.calibre_path)
@@ -271,13 +312,24 @@ class TaskManager:
 
                         final_volume = r.volume if r.volume is not None else (eff_vol if (is_monitored or status in ("IN_CALIBRE", "REQUESTED")) else None)
 
+                        # Light-novel tracking: manga is dropped, audiobooks are
+                        # stored but kept out of the Releases/Discovery/wishlist views.
+                        from app.media_type import MANGA, AUDIOBOOK, UNKNOWN
+                        media_type = self.classify_media(r)
+                        if media_type == MANGA:
+                            skipped_manga += 1
+                            continue
+                        if media_type == AUDIOBOOK:
+                            skipped_audiobooks += 1
+
                         rel_dict = r.to_dict()
                         rel_dict.update({
                             "source_feed_id": feed_id,
                             "source_feed_name": feed_name,
                             "status": status,
                             "volume": final_volume,
-                            "calibre_matched_book_id": match_result.get("matched_book_id")
+                            "calibre_matched_book_id": match_result.get("matched_book_id"),
+                            "media_type": media_type if media_type else UNKNOWN
                         })
 
                         is_new, rel_id = self.db.upsert_release(rel_dict)
@@ -311,7 +363,9 @@ class TaskManager:
             return {
                 "status": "success",
                 "total_found": total_found,
-                "total_requested": total_requested
+                "total_requested": total_requested,
+                "skipped_manga": skipped_manga,
+                "skipped_audiobooks": skipped_audiobooks
             }
         except Exception as e:
             logger.error(f"Error checking feeds: {e}", exc_info=True)
@@ -524,6 +578,11 @@ class TaskManager:
                         if s_name.lower() in blacklisted_series:
                             continue
 
+                        from app.media_type import MANGA, UNKNOWN
+                        media_type = self.classify_media(r)
+                        if media_type == MANGA:
+                            continue
+
                         if s_name.lower() in monitored:
                             m_res = matcher.check_release(r.to_dict(), auto_request_monitored=True)
                             eff_vol = m_res.get("effective_volume") or r.volume or 1.0
@@ -531,7 +590,8 @@ class TaskManager:
                             rel_dict.update({
                                 "status": m_res["status"],
                                 "volume": r.volume if r.volume is not None else eff_vol,
-                                "calibre_matched_book_id": m_res.get("matched_book_id")
+                                "calibre_matched_book_id": m_res.get("matched_book_id"),
+                                "media_type": media_type or UNKNOWN
                             })
                             is_new, _ = self.db.upsert_release(rel_dict)
                             if r.cover_url:
@@ -545,7 +605,8 @@ class TaskManager:
                                 rel_dict.update({
                                     "status": "IN_CALIBRE",
                                     "volume": r.volume if r.volume is not None else eff_vol,
-                                    "calibre_matched_book_id": m_res.get("matched_book_id")
+                                    "calibre_matched_book_id": m_res.get("matched_book_id"),
+                                    "media_type": media_type or UNKNOWN
                                 })
                                 self.db.upsert_release(rel_dict)
                             elif r.volume is None or r.volume == 1.0:
@@ -553,7 +614,8 @@ class TaskManager:
                                 rel_dict = r.to_dict()
                                 rel_dict.update({
                                     "status": "NEW",
-                                    "calibre_matched_book_id": None
+                                    "calibre_matched_book_id": None,
+                                    "media_type": media_type or UNKNOWN
                                 })
                                 is_new, _ = self.db.upsert_release(rel_dict)
                                 if r.cover_url:
@@ -668,6 +730,11 @@ class TaskManager:
             if is_pdf_release(rel.title, rel.link, rel.guid):
                 continue
 
+            from app.media_type import MANGA, UNKNOWN
+            media_type = self.classify_media(rel)
+            if media_type == MANGA:
+                continue
+
             total_found += 1
             m_eval = matcher.check_release(rel.to_dict(), auto_request_monitored=True)
             st = m_eval["status"]
@@ -678,7 +745,8 @@ class TaskManager:
             rel_dict.update({
                 "status": st,
                 "calibre_matched_book_id": matched_id,
-                "release_group": rg or ""
+                "release_group": rg or "",
+                "media_type": media_type or UNKNOWN
             })
 
             is_new, rel_id = self.db.upsert_release(rel_dict)

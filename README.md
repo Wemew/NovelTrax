@@ -33,6 +33,13 @@ Runs seamlessly in **Docker**, mounts your Calibre library network share safely 
    - **Custom HTML Scraper**: Point NovelTrax at any website and provide CSS selectors.
    - **Live Test Mode**: Test any feed extraction in real time directly from the web dashboard.
 
+4b. **Light-Novels Only: Manga & Audiobook Separation**
+   - Nyaa's Literature category is heavily polluted (roughly 75% of the live `3_1` feed is manga volumes, chapter compilations and dumps), so category filtering alone is not enough. NovelTrax classifies every release by media type.
+   - **Manga is never stored.** Detection uses the release-title convention first — manga rips carry parenthesised scanlation metadata (`… v01-03 (2025-2026) (Digital) (1r0n, Anon)`, `(Digital-Compilation)`, `as v01-02`, `Chapter 222`, `[JPEG-XL]`), while light novels carry bracketed publisher/format tags (`… v01-04 [Seven Seas] [Stick]`, `… v01-17 [J-Novel Club] [CleanBookGuy]`, `[EPUB]`).
+   - **Ambiguous titles are verified against the torrent itself.** The `.torrent` metainfo is fetched (~40 KB, cached per release, rate-limited, bounded per scan) and its file list decides: `.epub`/`.azw3`/`.mobi` = novel, `.cbz`/`.cbr`/images = manga, `.m4b`/`.mp3` = audiobook. A release whose format cannot be determined is kept as *unverified* rather than silently dropped, and retried on a later scan.
+   - **Audiobooks get their own section** at `/audiobooks`. They are stored (tagged `[Audiobook]`, `[M4B]`, `[Seven Seas Siren]`, or detected from audio files) but never appear in Releases, Discovery or the wishlist.
+   - Existing rows are reclassified once on startup: manga-tagged rows are removed, audiobook rows are re-typed, and rows already matched to Calibre are never touched. Set the `filter_non_novels` setting to `false` to disable the whole filter.
+
 5. **Prioritized Release Groups**
    - Maintains a `prioritized_groups` list of trusted release groups and publishers, managed from the **Prioritized** tab.
    - Seeded with `Yen Press`, `J-Novel Club`, `Seven Seas`, `Stick` and `One Peace Books`, and editable at any time (add, note, remove).
