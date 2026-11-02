@@ -6,7 +6,98 @@ import logging
 from datetime import datetime
 from typing import List, Dict, Any, Optional, Tuple, Set, Union
 
+from app.status_precedence import resolve_status
+
 logger = logging.getLogger("noveltrax.database")
+
+# §12.11.2: a release has a *set* of release groups, so whole-string equality
+# against prioritized_groups misses joint releases. The JSON set is authoritative
+# and the legacy single `release_group` column is honoured for rows that predate
+# the one-shot split (un-backfilled rows still carry an empty JSON array).
+_PRIORITIZED_GROUP_MATCH_SQL = """(
+    EXISTS (
+        SELECT 1
+        FROM json_each(
+            CASE WHEN json_valid(r.release_groups_json)
+                 THEN r.release_groups_json ELSE '[]' END
+        ) AS jg
+        JOIN prioritized_groups pg
+          ON lower(trim(CAST(jg.value AS TEXT))) = lower(trim(pg.name))
+    )
+    OR (
+        CASE WHEN json_valid(r.release_groups_json)
+             THEN json_array_length(r.release_groups_json) ELSE 0 END = 0
+        AND lower(trim(COALESCE(r.release_group, '')))
+            IN (SELECT lower(trim(name)) FROM prioritized_groups)
+    )
+)"""
+
+# Split a legacy/compound group tag into the set of groups it names (§12.11.1).
+_GROUP_DELIMITER_RE = re.compile(r"\s*(?:,|&|/|\+|\band\b)\s*", re.IGNORECASE)
+
+
+def _split_group_string(value: Optional[str]) -> List[str]:
+    """Splits one legacy/compound group value on ``,``, ``&``, ``/``, ``+`` and ``and``."""
+    if not value:
+        return []
+    text = str(value)
+    # Known group/publisher names may themselves contain a delimiter
+    # ("Square Enix Manga & Books"); never split a recognised single name.
+    try:
+        from app.parser import DEFAULT_KNOWN_GROUPS, KNOWN_PUBLISHERS
+        known_names = {name.strip().lower() for name in DEFAULT_KNOWN_GROUPS}
+        known_names |= {name.strip().lower() for name in KNOWN_PUBLISHERS}
+        if text.strip().lower() in known_names:
+            return [text.strip()]
+    except Exception:
+        pass
+    groups: List[str] = []
+    seen: Set[str] = set()
+    for part in _GROUP_DELIMITER_RE.split(text):
+        clean = part.strip()
+        if not clean:
+            continue
+        key = clean.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        groups.append(clean)
+    return groups
+
+
+def _coerce_group_list(raw: Any) -> List[str]:
+    """Normalises an explicit groups payload into a de-duplicated list of strings."""
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return []
+        if text.startswith("["):
+            try:
+                parsed = json.loads(text)
+            except (TypeError, ValueError):
+                parsed = None
+            raw = parsed if isinstance(parsed, list) else [text]
+        else:
+            raw = [text]
+    elif not isinstance(raw, (list, tuple, set)):
+        raw = [raw]
+
+    groups: List[str] = []
+    seen: Set[str] = set()
+    for item in raw:
+        if item is None:
+            continue
+        clean = str(item).strip()
+        if not clean:
+            continue
+        key = clean.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        groups.append(clean)
+    return groups
 
 class Database:
     def __init__(self, db_path: str):
@@ -119,6 +210,13 @@ class Database:
                 ("release_group", "TEXT DEFAULT ''"),
                 ("ignored", "INTEGER DEFAULT 0"),
                 ("media_type", "TEXT DEFAULT 'unknown'"),
+                # Consolidated detection columns (release groups as a set,
+                # publisher vs group, revision marker, chapter data).
+                ("release_groups_json", "TEXT DEFAULT '[]'"),
+                ("publisher", "TEXT DEFAULT ''"),
+                ("revision", "INTEGER DEFAULT 0"),
+                ("chapter_number", "REAL"),
+                ("chapter_ranges_json", "TEXT DEFAULT '[]'"),
             ]:
                 try:
                     cur.execute(f"ALTER TABLE releases ADD COLUMN {col_def[0]} {col_def[1]};")
@@ -292,8 +390,10 @@ class Database:
 
             conn.commit()
 
+        self._run_groups_backfill_once()
         self._run_chapter_purge_once()
         self._run_media_reclassify_once()
+        self._run_series_key_repair_once()
 
     def _run_chapter_purge_once(self):
         """One-shot cleanup of chapter rows stored before chapter filtering existed."""
@@ -398,6 +498,7 @@ class Database:
                     item["volumes"] = json.loads(item.get("volumes_json") or "[]")
                 except Exception:
                     item["volumes"] = [item["volume"]] if item.get("volume") is not None else []
+                self._attach_detection_fields(item)
             return items
 
     def count_audiobook_releases(self) -> int:
@@ -463,6 +564,169 @@ class Database:
                 logger.info(f"Media reclassify: {typed_audio} audiobook(s), {typed_manga} manga tagged (nothing deleted).")
         except Exception as exc:
             logger.warning(f"Media reclassify skipped: {exc}")
+
+    # --- Consolidated detection fields (groups, publisher, revision, chapters) ---
+    @staticmethod
+    def _attach_detection_fields(item: Dict[str, Any]) -> Dict[str, Any]:
+        """Adds the parsed detection fields to a release row read from SQLite."""
+        groups = _coerce_group_list(item.get("release_groups_json"))
+        if not groups:
+            # Legacy row that predates the set backfill: the single column is
+            # still the authoritative value for display/matching fallback.
+            legacy = (item.get("release_group") or "").strip()
+            if legacy:
+                groups = [legacy]
+        item["release_groups"] = groups
+
+        try:
+            ranges = json.loads(item.get("chapter_ranges_json") or "[]")
+        except (TypeError, ValueError):
+            ranges = []
+        item["chapter_ranges"] = ranges if isinstance(ranges, list) else []
+
+        try:
+            item["revision"] = int(item.get("revision") or 0)
+        except (TypeError, ValueError):
+            item["revision"] = 0
+        if item.get("publisher") is None:
+            item["publisher"] = ""
+        return item
+
+    @staticmethod
+    def _stable_series_name(existing: Optional[str], incoming: Optional[str]) -> Optional[str]:
+        """Returns the stored stable series key for an existing release (§12.1).
+
+        ``releases.series_name`` is the Calibre/tracked matching key. A feed
+        re-poll or metadata provider may enrich a row, but it must never re-key
+        the series: once a non-empty name is stored it is preserved verbatim.
+        """
+        existing_clean = (existing or "").strip()
+        incoming_clean = (incoming or "").strip()
+        if existing_clean:
+            return existing_clean
+        return incoming_clean or None
+
+    def backfill_release_groups(self) -> int:
+        """Splits legacy ``release_group`` values into ``release_groups_json``.
+
+        Idempotent: rows that already carry a non-empty JSON set are untouched.
+        Returns the number of rows repaired.
+        """
+        repaired = 0
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT id, release_group FROM releases
+                WHERE release_group IS NOT NULL AND trim(release_group) != ''
+                  AND (release_groups_json IS NULL OR trim(release_groups_json) IN ('', '[]'));
+            """)
+            for row in cur.fetchall():
+                groups = _split_group_string(row["release_group"])
+                if not groups:
+                    continue
+                # The first split part becomes the display/back-compat primary.
+                cur.execute(
+                    "UPDATE releases SET release_groups_json = ?, release_group = ? WHERE id = ?;",
+                    (json.dumps(groups), groups[0], row["id"]),
+                )
+                repaired += 1
+            conn.commit()
+        return repaired
+
+    def _run_groups_backfill_once(self):
+        """One-shot split of legacy group strings, guarded by a setting."""
+        try:
+            marker = (self.get_setting("groups_backfill_applied", "") or "").strip()
+            if marker not in ("", "0"):
+                return
+            repaired = self.backfill_release_groups()
+            self.set_setting("groups_backfill_applied", "1")
+            if repaired:
+                logger.info(f"Release groups backfill: split {repaired} legacy group tag(s) into sets.")
+        except Exception as exc:
+            logger.warning(f"Release groups backfill skipped: {exc}")
+
+    def repair_rekeyed_series_names(self) -> int:
+        """Re-keys releases stored under a provider/canonical title (§12.1).
+
+        The stable matching key for a series is the name tracked in
+        ``series_tracking`` (normally the Calibre series name or the user-typed
+        name). Releases ingested under a canonical/provider alias are re-keyed to
+        that stable name. The pass is:
+
+        * **idempotent** -- a re-keyed row normalises to the tracked name and is
+          skipped on the next run;
+        * **non-destructive** -- only ``series_name`` is updated, no row is
+          deleted or merged;
+        * **ambiguous-safe** -- when one canonical alias is claimed by more than
+          one tracked series the row is left untouched and a warning is logged.
+
+        Returns the number of rows re-keyed.
+        """
+        try:
+            from app.parser import normalize_text, get_canonical_series_name
+        except Exception:
+            return 0
+
+        rekeyed = 0
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT name FROM series_tracking WHERE name IS NOT NULL AND trim(name) != '';")
+            tracked_names = [row["name"].strip() for row in cur.fetchall()]
+            if not tracked_names:
+                return 0
+
+            tracked_norms = {normalize_text(name) for name in tracked_names}
+            # canonical key -> tracked stable names claiming it
+            claims: Dict[str, Set[str]] = {}
+            for name in tracked_names:
+                try:
+                    canonical = get_canonical_series_name(name) or name
+                except Exception:
+                    canonical = name
+                claims.setdefault(normalize_text(canonical), set()).add(name)
+
+            cur.execute("SELECT id, series_name FROM releases WHERE series_name IS NOT NULL AND trim(series_name) != '';")
+            for row in cur.fetchall():
+                current = row["series_name"].strip()
+                current_norm = normalize_text(current)
+                if not current_norm or current_norm in tracked_norms:
+                    continue
+                try:
+                    canonical = get_canonical_series_name(current) or current
+                except Exception:
+                    continue
+                targets = claims.get(normalize_text(canonical), set())
+                if len(targets) > 1:
+                    logger.warning(
+                        "Stable-key repair skipped ambiguous alias %r (claimed by %s)",
+                        current, sorted(targets),
+                    )
+                    continue
+                if len(targets) != 1:
+                    continue
+                target = next(iter(targets))
+                if normalize_text(target) == current_norm:
+                    continue
+                cur.execute("UPDATE releases SET series_name = ? WHERE id = ?;", (target, row["id"]))
+                rekeyed += 1
+            conn.commit()
+        if rekeyed:
+            logger.info(f"Stable-key repair: re-keyed {rekeyed} release(s) to their tracked series name.")
+        return rekeyed
+
+    def _run_series_key_repair_once(self):
+        """One-shot stable-key repair, guarded by a setting (safe to run twice)."""
+        try:
+            marker = (self.get_setting("stable_key_repair_applied", "") or "").strip()
+            if marker not in ("", "0"):
+                return
+            repaired = self.repair_rekeyed_series_names()
+            self.set_setting("stable_key_repair_applied", "1")
+            if repaired:
+                logger.info(f"Stable-key repair pass re-keyed {repaired} release(s).")
+        except Exception as exc:
+            logger.warning(f"Stable-key repair skipped: {exc}")
 
     # --- Setting Operations ---
     def get_setting(self, key: str, default: str = "") -> str:
@@ -619,6 +883,79 @@ class Database:
         with self.get_connection() as conn:
             cur = conn.cursor()
 
+            # --- Consolidated detection fields (groups, publisher, revision,
+            # chapter data) — §12.11, §12.13, §12.13.2. The optional parser
+            # helpers may not be deployed yet; every import degrades to the
+            # legacy single-value paths so the DB keeps working either way.
+            title_val = release_data.get("title") or ""
+            explicit_primary = (release_data.get("release_group") or "").strip()
+            groups = _coerce_group_list(release_data.get("release_groups"))
+            if not groups and explicit_primary:
+                groups = [explicit_primary]
+            if not groups and title_val:
+                derived_groups: List[str] = []
+                try:
+                    from app.parser import extract_release_groups
+                    derived_groups = _coerce_group_list(extract_release_groups(title_val))
+                except Exception:
+                    derived_groups = []
+                if not derived_groups:
+                    try:
+                        from app.parser import extract_release_group
+                        single_group = extract_release_group(title_val)
+                        derived_groups = [str(single_group).strip()] if single_group else []
+                    except Exception:
+                        derived_groups = []
+                groups = [group for group in derived_groups if group]
+            rel_group_val = groups[0] if groups else explicit_primary
+            groups_val = json.dumps(groups)
+
+            publisher_val = str(release_data.get("publisher") or "").strip()
+            if not publisher_val and title_val:
+                try:
+                    from app.parser import extract_publisher
+                    publisher_val = str(extract_publisher(title_val) or "").strip()
+                except Exception:
+                    publisher_val = ""
+
+            revision_val = 0
+            if release_data.get("revision") is not None:
+                try:
+                    revision_val = int(release_data.get("revision") or 0)
+                except (TypeError, ValueError):
+                    revision_val = 0
+            elif title_val:
+                try:
+                    from app.parser import parse_revision_marker
+                    revision_val = int((parse_revision_marker(title_val) or {}).get("revision") or 0)
+                except Exception:
+                    revision_val = 0
+
+            chapter_number_val = release_data.get("chapter_number")
+            chapter_ranges_val = release_data.get("chapter_ranges")
+            if "chapter_number" not in release_data or chapter_ranges_val is None:
+                parsed_detection: Dict[str, Any] = {}
+                try:
+                    from app.parser import extract_series_and_volume
+                    parsed_detection = extract_series_and_volume(title_val) if title_val else {}
+                except Exception:
+                    parsed_detection = {}
+                if "chapter_number" not in release_data:
+                    chapter_number_val = parsed_detection.get("chapter_number")
+                if chapter_ranges_val is None:
+                    chapter_ranges_val = parsed_detection.get("chapter_ranges")
+            if chapter_number_val is not None:
+                try:
+                    chapter_number_val = float(chapter_number_val)
+                except (TypeError, ValueError):
+                    chapter_number_val = None
+            if not isinstance(chapter_ranges_val, list):
+                chapter_ranges_val = []
+            try:
+                chapter_ranges_json_val = json.dumps(chapter_ranges_val)
+            except (TypeError, ValueError):
+                chapter_ranges_json_val = "[]"
+
             # Blacklist guard: never let a release for a blacklisted series become
             # requested/discoverable. The lookup reuses this connection (no nested
             # connection, no extra lock) instead of calling is_series_blacklisted().
@@ -659,6 +996,12 @@ class Database:
                                 WHEN COALESCE(?, 'unknown') != 'unknown' THEN ?
                                 ELSE media_type
                             END,
+                            release_group = COALESCE(NULLIF(?, ''), release_group),
+                            release_groups_json = CASE WHEN ? != '[]' THEN ? ELSE release_groups_json END,
+                            publisher = COALESCE(NULLIF(?, ''), publisher),
+                            revision = MAX(COALESCE(revision, 0), ?),
+                            chapter_number = COALESCE(?, chapter_number),
+                            chapter_ranges_json = CASE WHEN ? != '[]' THEN ? ELSE chapter_ranges_json END,
                             updated_at = CURRENT_TIMESTAMP
                         WHERE id = ?;
                     """, (
@@ -668,6 +1011,14 @@ class Database:
                         use_title,
                         release_data.get("media_type") or "unknown",
                         release_data.get("media_type") or "unknown",
+                        rel_group_val,
+                        groups_val,
+                        groups_val,
+                        publisher_val,
+                        revision_val,
+                        chapter_number_val,
+                        chapter_ranges_json_val,
+                        chapter_ranges_json_val,
                         rel_id
                     ))
                     conn.commit()
@@ -692,17 +1043,11 @@ class Database:
                     pass
             missing_val = json.dumps(missing_list or [])
 
-            # Extract release_group if omitted
-            rel_group_val = release_data.get("release_group")
-            if not rel_group_val and release_data.get("title"):
-                try:
-                    from app.parser import extract_release_group
-                    rel_group_val = extract_release_group(release_data["title"])
-                except Exception:
-                    rel_group_val = ""
-            rel_group_val = (rel_group_val or "").strip()
-
             dl_url_val = release_data.get("download_url") or release_data.get("link") or ""
+            status_supplied = (
+                ("status" in release_data and release_data.get("status") is not None)
+                or bool(release_data.get("ignored"))
+            )
             status_in = (release_data.get("status") or "REQUESTED").strip().upper()
             is_ignored = (status_in == "IGNORED") or bool(release_data.get("ignored"))
             ignored_val = 1 if is_ignored else 0
@@ -711,14 +1056,27 @@ class Database:
             if blacklisted and status_val in ("NEW", "REQUESTED"):
                 status_val = "BLACKLISTED"
 
-            cur.execute("SELECT id, status FROM releases WHERE guid = ?;", (guid,))
+            cur.execute("SELECT id, status, ignored, series_name FROM releases WHERE guid = ?;", (guid,))
             existing = cur.fetchone()
 
             if existing:
                 rel_id = existing["id"]
-                # Re-ingest updates the payload only: whatever lifecycle status the
-                # row already carries (IN_CALIBRE, IGNORED, REQUESTED, ...) is kept
-                # so that a later feed scan cannot resurrect or downgrade it.
+                # Re-ingest updates the payload only. When the caller supplies a
+                # lifecycle status it is resolved through the §12.6 precedence
+                # rules, so a feed scan can recompute NEW/DISCOVERY but can never
+                # resurrect or downgrade a user decision (REQUESTED / IN_CALIBRE /
+                # IGNORED / BLACKLISTED). Payload-only upserts keep the status.
+                if status_supplied:
+                    resolved_status = resolve_status(existing["status"], status_val)
+                    resolved_ignored = 1 if resolved_status == "IGNORED" else 0
+                else:
+                    resolved_status = existing["status"]
+                    resolved_ignored = existing["ignored"] if existing["ignored"] is not None else 0
+                # §12.1: a metadata/provider title must never rewrite the stored
+                # stable series key once it exists.
+                stable_series_val = self._stable_series_name(
+                    existing["series_name"], release_data.get("series_name")
+                )
                 cur.execute("""
                     UPDATE releases SET
                         title = ?,
@@ -736,12 +1094,19 @@ class Database:
                         is_official = ?,
                         download_url = COALESCE(?, download_url),
                         release_group = COALESCE(NULLIF(?, ''), release_group),
+                        release_groups_json = CASE WHEN ? != '[]' THEN ? ELSE release_groups_json END,
+                        publisher = COALESCE(NULLIF(?, ''), publisher),
+                        revision = MAX(COALESCE(revision, 0), ?),
+                        chapter_number = COALESCE(?, chapter_number),
+                        chapter_ranges_json = CASE WHEN ? != '[]' THEN ? ELSE chapter_ranges_json END,
                         media_type = CASE WHEN COALESCE(?, 'unknown') != 'unknown' THEN ? ELSE media_type END,
+                        status = ?,
+                        ignored = ?,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE id = ?;
                 """, (
                     release_data["title"],
-                    release_data.get("series_name"),
+                    stable_series_val,
                     release_data.get("volume"),
                     release_data.get("link"),
                     release_data.get("pub_date"),
@@ -755,8 +1120,17 @@ class Database:
                     is_official_val,
                     dl_url_val,
                     rel_group_val,
+                    groups_val,
+                    groups_val,
+                    publisher_val,
+                    revision_val,
+                    chapter_number_val,
+                    chapter_ranges_json_val,
+                    chapter_ranges_json_val,
                     release_data.get("media_type") or "unknown",
                     release_data.get("media_type") or "unknown",
+                    resolved_status,
+                    resolved_ignored,
                     rel_id
                 ))
                 conn.commit()
@@ -768,8 +1142,9 @@ class Database:
                         cover_url, description, author, source_feed_id,
                         source_feed_name, series_link, status, calibre_matched_book_id,
                         is_bundle, volumes_json, missing_vols_json, is_official,
-                        download_url, release_group, ignored, media_type
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                        download_url, release_group, ignored, media_type,
+                        release_groups_json, publisher, revision, chapter_number, chapter_ranges_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                 """, (
                     guid,
                     release_data["title"],
@@ -792,7 +1167,12 @@ class Database:
                     dl_url_val,
                     rel_group_val,
                     ignored_val,
-                    release_data.get("media_type") or "unknown"
+                    release_data.get("media_type") or "unknown",
+                    groups_val,
+                    publisher_val,
+                    revision_val,
+                    chapter_number_val,
+                    chapter_ranges_json_val
                 ))
                 rel_id = cur.lastrowid
 
@@ -809,10 +1189,32 @@ class Database:
                 conn.commit()
                 return True, rel_id
 
-    def update_release_status(self, release_id: int, status: str, matched_book_id: Optional[int] = None):
+    def update_release_status(
+        self,
+        release_id: int,
+        status: str,
+        matched_book_id: Optional[int] = None,
+        enforce_precedence: bool = False,
+    ):
+        """Updates a release status.
+
+        The default is the deliberate UI/API contract: the supplied status is
+        written verbatim (an explicit action may lift a user veto). Automated
+        callers pass ``enforce_precedence=True`` to route the write through the
+        §12.6 precedence rules instead.
+        """
         with self.get_connection() as conn:
             cur = conn.cursor()
-            clean_status = (status or "").strip().upper()
+            if enforce_precedence:
+                cur.execute("SELECT status FROM releases WHERE id = ?;", (release_id,))
+                current = cur.fetchone()
+                clean_status = resolve_status(
+                    current["status"] if current else "",
+                    status,
+                    enforce_precedence=True,
+                )
+            else:
+                clean_status = (status or "").strip().upper()
             ignored_val = 1 if clean_status == 'IGNORED' else 0
             cur.execute("""
                 UPDATE releases 
@@ -930,8 +1332,21 @@ class Database:
         with self.get_connection() as conn:
             cur = conn.cursor()
             cur.execute("""
-                SELECT pg.*, 
-                       (SELECT count(*) FROM releases r WHERE lower(trim(COALESCE(r.release_group, ''))) = lower(trim(pg.name))) as release_count
+                SELECT pg.*,
+                       (SELECT count(*) FROM releases r WHERE
+                           EXISTS (
+                               SELECT 1 FROM json_each(
+                                   CASE WHEN json_valid(r.release_groups_json)
+                                        THEN r.release_groups_json ELSE '[]' END
+                               ) AS jg
+                               WHERE lower(trim(CAST(jg.value AS TEXT))) = lower(trim(pg.name))
+                           )
+                           OR (
+                               CASE WHEN json_valid(r.release_groups_json)
+                                    THEN json_array_length(r.release_groups_json) ELSE 0 END = 0
+                               AND lower(trim(COALESCE(r.release_group, ''))) = lower(trim(pg.name))
+                           )
+                       ) as release_count
                 FROM prioritized_groups pg
                 ORDER BY pg.priority DESC, pg.name COLLATE NOCASE ASC;
             """)
@@ -986,7 +1401,7 @@ class Database:
         with self.get_connection() as conn:
             cur = conn.cursor()
             where_clauses = [
-                "lower(trim(COALESCE(r.release_group, ''))) IN (SELECT lower(trim(name)) FROM prioritized_groups)"
+                _PRIORITIZED_GROUP_MATCH_SQL
             ]
             params: List[Any] = []
             if status == "IGNORED":
@@ -1033,6 +1448,7 @@ class Database:
                     item["missing_volumes"] = json.loads(item.get("missing_vols_json") or "[]")
                 except Exception:
                     item["missing_volumes"] = []
+                self._attach_detection_fields(item)
             return items
 
     def count_prioritized_releases(self, status: Optional[str] = None, search: Optional[str] = None) -> int:
@@ -1041,7 +1457,7 @@ class Database:
         with self.get_connection() as conn:
             cur = conn.cursor()
             where_clauses = [
-                "lower(trim(COALESCE(r.release_group, ''))) IN (SELECT lower(trim(name)) FROM prioritized_groups)"
+                _PRIORITIZED_GROUP_MATCH_SQL
             ]
             params: List[Any] = []
             if status == "IGNORED":
@@ -1084,7 +1500,11 @@ class Database:
             cur = conn.cursor()
             cur.execute("SELECT * FROM releases WHERE id = ?;", (release_id,))
             row = cur.fetchone()
-            return dict(row) if row else None
+            if not row:
+                return None
+            item = dict(row)
+            self._attach_detection_fields(item)
+            return item
 
     def get_releases(
         self,
@@ -1151,8 +1571,9 @@ class Database:
                 p_groups = set()
 
             for item in items:
-                rg = (item.get("release_group") or "").strip().lower()
-                item["is_prioritized"] = bool(rg and rg in p_groups)
+                self._attach_detection_fields(item)
+                group_keys = {group.strip().lower() for group in item["release_groups"] if group}
+                item["is_prioritized"] = bool(group_keys & p_groups)
                 item["ignored"] = bool(item.get("ignored", 0) or item.get("status") == "IGNORED")
                 try:
                     item["volumes"] = json.loads(item.get("volumes_json") or "[]")
@@ -1263,8 +1684,9 @@ class Database:
                 p_groups = set()
 
             for r in raw_releases:
-                rg = (r.get("release_group") or "").strip().lower()
-                r["is_prioritized"] = bool(rg and rg in p_groups)
+                self._attach_detection_fields(r)
+                group_keys = {group.strip().lower() for group in r["release_groups"] if group}
+                r["is_prioritized"] = bool(group_keys & p_groups)
                 r["ignored"] = bool(r.get("ignored", 0) or r.get("status") == "IGNORED")
                 try:
                     r["volumes"] = json.loads(r.get("volumes_json") or "[]")
@@ -1341,7 +1763,13 @@ class Database:
 
                     groups_dict[matched_key] = {
                         "series_key": matched_key,
+                        # `series_name` and `display_name` are the canonical
+                        # English display title; the stable matching key used
+                        # for grouping is `series_key` (and `stable_name` for
+                        # the Calibre/tracked spelling). §12.1
                         "series_name": canonical_title,
+                        "display_name": canonical_title,
+                        "stable_name": (calibre_match.get("name") if calibre_match else None) or s_name,
                         "raw_name": s_name,
                         "cover_url": cover,
                         "in_calibre": calibre_match is not None,
@@ -1792,6 +2220,7 @@ class Database:
                     d["series_name"] = NovelMetadataProvider.clean_novel_title(d["series_name"])
                 if d.get("title"):
                     d["title"] = NovelMetadataProvider.clean_novel_title(d["title"])
+                self._attach_detection_fields(d)
                 items.append(d)
             return items
 
@@ -1900,15 +2329,29 @@ class Database:
                    OR title LIKE '%(LN)%';
             """)
 
-            # 5. Apply canonical series names across all releases
-            for group in SERIES_ALIASES:
-                canon = group["canonical"]
-                for alias in group["aliases"]:
-                    cur.execute("""
-                        UPDATE releases 
-                        SET series_name = ?
-                        WHERE lower(trim(series_name)) = lower(trim(?));
-                    """, (canon, alias))
+            # 5. Alias -> canonical for display, but never overwrite a tracked
+            #    stable matching key (§12.1): series_tracking holds the name the
+            #    Calibre library / user uses, and re-keying it would break matching.
+            cur.execute("SELECT name FROM series_tracking;")
+            tracked_norms = {
+                normalize_text(row["name"])
+                for row in cur.fetchall()
+                if row["name"]
+            }
+            cur.execute("""
+                SELECT id, series_name FROM releases
+                WHERE series_name IS NOT NULL AND trim(series_name) != '';
+            """)
+            for row in cur.fetchall():
+                current_name = row["series_name"].strip()
+                if normalize_text(current_name) in tracked_norms:
+                    continue
+                canonical_name = get_canonical_series_name(current_name)
+                if canonical_name and canonical_name != current_name:
+                    cur.execute(
+                        "UPDATE releases SET series_name = ? WHERE id = ?;",
+                        (canonical_name, row["id"]),
+                    )
 
             # 6. Alias & series_link fast O(N) deduplication for 'NEW' status discovery releases
             cur.execute("""
@@ -1979,6 +2422,24 @@ class Database:
     def update_release_details(self, release_id: int, description: Optional[str] = None, series_link: Optional[str] = None, cover_url: Optional[str] = None, title: Optional[str] = None, series_name: Optional[str] = None):
         with self.get_connection() as conn:
             cur = conn.cursor()
+            series_val = series_name
+            if series_name is not None:
+                # §12.1: a provider's canonical English title is display data, not
+                # identity. Never rewrite a stored series spelling to the canonical
+                # form of the same alias group (the tracked/stable key wins).
+                cur.execute("SELECT series_name FROM releases WHERE id = ?;", (release_id,))
+                existing_row = cur.fetchone()
+                existing_name = (existing_row["series_name"] or "").strip() if existing_row else ""
+                incoming_name = series_name.strip()
+                if existing_name and incoming_name:
+                    try:
+                        from app.parser import get_canonical_series_name, normalize_text
+                        if normalize_text(existing_name) == normalize_text(incoming_name):
+                            series_val = existing_name
+                        elif get_canonical_series_name(existing_name) == get_canonical_series_name(incoming_name):
+                            series_val = existing_name
+                    except Exception:
+                        pass
             cur.execute("""
                 UPDATE releases 
                 SET description = COALESCE(?, description),
@@ -1988,7 +2449,7 @@ class Database:
                     series_name = COALESCE(?, series_name),
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?;
-            """, (description, series_link, cover_url, title, series_name, release_id))
+            """, (description, series_link, cover_url, title, series_val, release_id))
             conn.commit()
 
     def track_discovered_series(self, series_name: str, release_id: Optional[int] = None) -> bool:

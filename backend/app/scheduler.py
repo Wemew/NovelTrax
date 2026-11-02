@@ -83,6 +83,181 @@ class TaskManager:
         generic_url = self.db.get_setting("apprise_url", "")
         return NotificationService(discord_webhook=discord_url, generic_webhook=generic_url)
 
+    # --- Chapter handling & release enrichment (spec §12.2 / §12.8 / §12.11) ---
+
+    def chapter_context(self) -> set:
+        """
+        Normalised names of series we already know: the Calibre library plus the
+        tracked rows. Used to decide whether a bare-numbered release is a chapter
+        of a known series or the only instalment of a series we have never seen.
+        """
+        from app.parser import normalize_text
+
+        names: set = set()
+        try:
+            calibre_dir = self.db.get_setting("calibre_path", self.calibre_path)
+            scanner = CalibreScanner(calibre_dir)
+            if scanner.is_available():
+                for entry in scanner.get_all_series():
+                    if entry.get("name"):
+                        names.add(normalize_text(entry["name"]))
+        except Exception as exc:
+            logger.debug(f"Chapter context: Calibre lookup skipped: {exc}")
+        try:
+            for row in self.db.get_all_series(monitored_only=False):
+                if row.get("name"):
+                    names.add(normalize_text(row["name"]))
+        except Exception as exc:
+            logger.debug(f"Chapter context: tracked-series lookup skipped: {exc}")
+        return names
+
+    def should_discard_chapter(self, title: str, known_series: Optional[set] = None) -> bool:
+        """
+        Context-guarded chapter discard (spec §12.2).
+
+        * an explicit chapter marker ("Ch. 179", "c374") is always a chapter;
+        * a bare trailing number is a chapter only when stripping it yields a
+          series we already know -- otherwise it may be the first volume of a
+          series we have never seen, so it is kept (with the number exposed as
+          chapter data, not as a volume).
+        """
+        if not title:
+            return False
+        try:
+            from app.parser import normalize_text, _CHAPTER_MARKER_RE, _VOLUME_KEYWORD_RE
+        except Exception:
+            return False
+
+        setting = (self.db.get_setting("discard_unmarked_chapters", "true") or "").strip().lower()
+        if setting == "false":
+            return False
+
+        try:
+            from app.parser import extract_series_and_volume, is_chapter_release
+            if not is_chapter_release(title):
+                return False
+            parsed = extract_series_and_volume(title)
+        except Exception:
+            return False
+
+        base_series = (parsed.get("series_name") or "").strip()
+        explicit_marker = bool(_CHAPTER_MARKER_RE.search(title)) and not _VOLUME_KEYWORD_RE.search(title)
+        if explicit_marker:
+            logger.debug(f"Discarding chapter (explicit marker): {title!r}")
+            return True
+        if not base_series:
+            return False
+        if known_series is None:
+            # No context available: keep (never guess).
+            return False
+        if normalize_text(base_series) in known_series:
+            logger.debug(f"Discarding chapter of known series '{base_series}': {title!r}")
+            return True
+        logger.info(f"Keeping unmarked number for unknown series '{base_series}': {title!r}")
+        return False
+
+    def filter_chapter_releases(self, releases: List[Any], known_series: Optional[set] = None) -> List[Any]:
+        """
+        Drops chapter instalments from a provider batch.
+
+        With ``known_series`` (normal ingestion) the discard is context-guarded;
+        without it the strict rule applies (every bare-numbered release is a
+        chapter), which keeps legacy callers and tests deterministic.
+        """
+        from app.parser import is_chapter_release
+
+        kept: List[Any] = []
+        discarded: List[str] = []
+        for item in releases:
+            title = item.get("title", "") if isinstance(item, dict) else getattr(item, "title", "")
+            if known_series is None:
+                if is_chapter_release(title):
+                    discarded.append(title)
+                    continue
+            elif self.should_discard_chapter(title, known_series):
+                discarded.append(title)
+                continue
+            kept.append(item)
+
+        if discarded:
+            # Discards must be auditable rather than silent (spec §12.2). One
+            # summary event per batch avoids flooding the activity log on
+            # chapter-heavy feeds; the release names are included (capped).
+            preview = "; ".join(discarded[:10])
+            suffix = "" if len(discarded) <= 10 else f" … (+{len(discarded) - 10} more)"
+            try:
+                self.db.log_activity(
+                    "CHAPTER_DISCARDED",
+                    f"Discarded {len(discarded)} chapter release(s)",
+                    preview + suffix
+                )
+            except Exception as exc:
+                logger.debug(f"Chapter discard activity log failed: {exc}")
+            logger.info(f"Chapter filter: discarded {len(discarded)} release(s), kept {len(kept)}.")
+        return kept
+
+    def _enrich_release(self, rel_dict: dict) -> dict:
+        """
+        Adds the consolidated detection fields to a release payload before it is
+        persisted: group set, publisher, revision marker, chapter data.
+
+        Degrades gracefully while optional parser helpers are unavailable.
+        """
+        title = rel_dict.get("title") or ""
+        if not title:
+            return rel_dict
+
+        try:
+            from app.parser import extract_series_and_volume
+            parsed = extract_series_and_volume(title)
+            chapter_number = parsed.get("chapter_number")
+            if chapter_number is None and parsed.get("is_chapter"):
+                # Pre-consolidation parsers only expose the number as `volume`.
+                chapter_number = parsed.get("volume")
+            rel_dict.setdefault("chapter_number", chapter_number)
+            rel_dict.setdefault("chapter_ranges", parsed.get("chapter_ranges") or [])
+            # A retained chapter of an unknown series must not masquerade as a volume.
+            if parsed.get("is_chapter") and chapter_number is not None and rel_dict.get("volume") is not None:
+                same = abs(float(rel_dict.get("volume") or 0) - float(chapter_number or 0)) < 0.001
+                if same:
+                    rel_dict["volume"] = None
+                    rel_dict["is_bundle"] = False
+        except Exception as exc:
+            logger.debug(f"Enrich: parse failed for {title!r}: {exc}")
+
+        if not rel_dict.get("release_groups"):
+            groups: List[str] = []
+            try:
+                from app.parser import extract_release_groups
+                groups = list(extract_release_groups(title) or [])
+            except Exception:
+                groups = []
+            if not groups and rel_dict.get("release_group"):
+                groups = [rel_dict["release_group"]]
+            rel_dict["release_groups"] = groups
+            if groups and not rel_dict.get("release_group"):
+                rel_dict["release_group"] = groups[0]
+
+        if not rel_dict.get("publisher"):
+            try:
+                from app.parser import extract_publisher
+                rel_dict["publisher"] = extract_publisher(title) or ""
+            except Exception:
+                rel_dict["publisher"] = ""
+
+        if "revision" not in rel_dict:
+            try:
+                from app.parser import parse_revision_marker
+                marker = parse_revision_marker(title) or {}
+                rel_dict["revision"] = int(marker.get("revision") or 0)
+            except Exception:
+                rel_dict["revision"] = 0
+        return rel_dict
+
+    def _upsert(self, rel_dict: dict):
+        """Enriches a payload with the consolidated detection fields, then persists it."""
+        return self.db.upsert_release(self._enrich_release(rel_dict))
+
     def start(self):
         calibre_min = int(self.db.get_setting("calibre_sync_interval_minutes", "15"))
         feed_min = int(self.db.get_setting("feed_check_interval_minutes", "60"))
@@ -210,27 +385,6 @@ class TaskManager:
         finally:
             self.is_syncing_calibre = False
 
-    @staticmethod
-    def filter_chapter_releases(releases: List[Any]) -> List[Any]:
-        """
-        Drops chapter / manga-style instalments from a provider batch.
-
-        A number only counts as a volume when the title carries an explicit volume
-        keyword (Vol/Volume/V./Book/Part) or a multi-volume range. Bare trailing
-        numbers ("Dandadan 250") and explicit chapter markers ("Ch. 179") are
-        chapters, and must never reach Releases, Discovery or the wishlist.
-        See ``app.parser.is_chapter_release`` for the classification rules.
-        """
-        from app.parser import is_chapter_release
-
-        kept: List[Any] = []
-        for item in releases:
-            title = item.get("title", "") if isinstance(item, dict) else getattr(item, "title", "")
-            if is_chapter_release(title):
-                continue
-            kept.append(item)
-        return kept
-
     def check_feeds(self) -> Dict[str, Any]:
         """
         Polls all enabled feeds, checks releases against Calibre,
@@ -275,7 +429,7 @@ class TaskManager:
 
                 try:
                     provider = create_provider(feed_type, feed_name, url, config)
-                    releases = self.filter_chapter_releases(provider.fetch_releases())
+                    releases = self.filter_chapter_releases(provider.fetch_releases(), self.chapter_context())
                     total_found += len(releases)
 
                     new_requests_for_feed = 0
@@ -332,7 +486,7 @@ class TaskManager:
                             "media_type": media_type if media_type else UNKNOWN
                         })
 
-                        is_new, rel_id = self.db.upsert_release(rel_dict)
+                        is_new, rel_id = self._upsert(rel_dict)
 
                         # Pre-cache cover image asynchronously without blocking feed scanning
                         if r.cover_url:
@@ -424,7 +578,7 @@ class TaskManager:
                         # series rows are novels by provenance.
                         "media_type": "novel"
                     }
-                    is_new, _ = self.db.upsert_release(rel_dict)
+                    is_new, _ = self._upsert(rel_dict)
                     if is_new:
                         new_discoveries += 1
 
@@ -569,7 +723,7 @@ class TaskManager:
                     paged_url = provider._build_paged_url("https://jnovels.com/?s=epub", page_num)
                     page_provider = JNovelsProvider(url=paged_url, config={"max_pages": 1})
                     releases = await asyncio.to_thread(page_provider.fetch_releases)
-                    releases = self.filter_chapter_releases(releases)
+                    releases = self.filter_chapter_releases(releases, self.chapter_context())
                     if not releases:
                         logger.info(f"Historical backfill reached end of available feed pages at page {page_num}.")
                         break
@@ -596,7 +750,7 @@ class TaskManager:
                                 "calibre_matched_book_id": m_res.get("matched_book_id"),
                                 "media_type": media_type or UNKNOWN
                             })
-                            is_new, _ = self.db.upsert_release(rel_dict)
+                            is_new, _ = self._upsert(rel_dict)
                             if r.cover_url:
                                 self.cover_cache.cache_sync(r.cover_url)
                         else:
@@ -611,7 +765,7 @@ class TaskManager:
                                     "calibre_matched_book_id": m_res.get("matched_book_id"),
                                     "media_type": media_type or UNKNOWN
                                 })
-                                self.db.upsert_release(rel_dict)
+                                self._upsert(rel_dict)
                             elif r.volume is None or r.volume == 1.0:
                                 # Vol 1 or standalone unmonitored series -> Add to Discovery!
                                 rel_dict = r.to_dict()
@@ -620,7 +774,7 @@ class TaskManager:
                                     "calibre_matched_book_id": None,
                                     "media_type": media_type or UNKNOWN
                                 })
-                                is_new, _ = self.db.upsert_release(rel_dict)
+                                is_new, _ = self._upsert(rel_dict)
                                 if r.cover_url:
                                     self.cover_cache.cache_sync(r.cover_url)
 
@@ -726,7 +880,7 @@ class TaskManager:
         except Exception as e:
             logger.debug(f"Nyaa provider search skipped or unavailable: {e}")
 
-        all_incoming = self.filter_chapter_releases(nyaa_releases)
+        all_incoming = self.filter_chapter_releases(nyaa_releases, self.chapter_context())
         for rel in all_incoming:
             if self.stop_backfill_requested:
                 break
@@ -752,7 +906,7 @@ class TaskManager:
                 "media_type": media_type or UNKNOWN
             })
 
-            is_new, rel_id = self.db.upsert_release(rel_dict)
+            is_new, rel_id = self._upsert(rel_dict)
             if st == "REQUESTED":
                 total_requested += 1
                 if is_new and rel_id > 0:

@@ -237,6 +237,15 @@ services:
    - Example: a `DanMachi Vol 1-18` pack when Calibre owns volumes 1-15 downloads only files for volumes 16-18.
    - Monolithic single-file archives are downloaded whole (the BitTorrent protocol cannot deselect inside one file), and unparseable book files are kept rather than risk missing a volume.
 
+5. **Consolidated Detection Rules** (shared with MangaTrax — see `AI-Workspace/RELEASE_DETECTION_SPEC.md`):
+   - **Chapter-range → volume mapping**: `Reading Our Way … 001-009 as v01-02 + 010-012 (Digital-Compilation) (Oak)` resolves to series `Reading Our Way to a Happy New World`, volumes `[1, 2]`, chapter data `[[1,9],[10,12]]`, group `Oak`. Chapter numbers never become volumes, and the whole clause is removed from the Calibre matching key.
+   - **Context-guarded chapter discard**: an explicit `Ch.`/`c` marker is always a chapter; a *bare* trailing number is treated as a chapter only when the base series is already known (Calibre library or tracked series). Otherwise the release is kept — with the number stored as chapter data, not as a volume — so the first instalment of a series you have never seen is no longer lost. Toggle with the `discard_unmarked_chapters` setting; drops are recorded as `CHAPTER_DISCARDED` activity events.
+   - **Group sets instead of one group**: a joint release `(1r0n, Ushi)`, `(1r0n & Ushi)` or `[1r0n] [Ushi]` stores both groups (`release_groups_json`), keeps the primary for display, and prioritized-group matching is a set-membership test — configuring either group is enough to prioritise the release.
+   - **Publishers are not groups**: `(Square Enix)`, `(K-MANGA)`, `[Yen Press]` are recorded in the separate `publisher` field and never occupy the release-group slot; a fallback prefers the last valid bracketed candidate.
+   - **Revision markers**: `(f)`, `(f2)`, `(F)` parse to `revision` / `is_rerelease` (never a group); a higher revision supersedes on re-ingest, making re-releases visible as upgrade candidates.
+   - **Status precedence**: automated feed re-polls can no longer downgrade a deliberate status — `REQUESTED` / `IN_CALIBRE` are never replaced by a classification, and `IGNORED` / `BLACKLISTED` can only be lifted by an explicit action.
+   - **Stable identity key**: the stored `series_name` is the matching key and is never rewritten to a metadata-provider title; canonical English is used for display only. A non-destructive startup repair re-keys rows saved under a provider alias back to the tracked name and skips (never merges) ambiguous aliases.
+
 ---
 
 ## 🧪 Testing Locally

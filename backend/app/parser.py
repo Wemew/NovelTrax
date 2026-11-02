@@ -272,11 +272,433 @@ def clean_feed_title(raw_title: str) -> str:
     cleaned = re.sub(r"^[\s\-–—:;,|]+|[\s\-–—:;,|]+$", "", cleaned)
     return " ".join(cleaned.split())
 
-def extract_series_and_volume(raw_title: str) -> Dict[str, Any]:
+# ---------------------------------------------------------------------------
+# Part II (RELEASE_DETECTION_SPEC §12.8 / §12.12 / §12.13):
+# chapter-range -> volume-range mapping, composite "+" tails, chapter data,
+# publisher and re-release revision markers.
+# ---------------------------------------------------------------------------
+
+# "<chapters A-B> as v<X>-<Y>".  The volume numbers come from the "v" half ONLY:
+# chapters 1-9 mapping to volumes 1-2 means volumes [1, 2], never volumes 1-9.
+# The whole clause (chapter range + literal "as" + volume token) is removed from
+# the series name, so `Reading Our Way to a Happy New World 001-009 as v01-02`
+# keeps the clean series and does not leak "001-009 as" into the identity key.
+_CHAPTER_AS_VOLUME_RE = re.compile(
+    r"^(?P<series>.+?)\s+"
+    r"(?P<chapter_start>\d{1,4}(?:\.\d+)?)\s*[-–—~]\s*(?P<chapter_end>\d{1,4}(?:\.\d+)?)"
+    r"\s+as\s+"
+    r"(?:volumes?|vols?|books?|v)\.?\s*"
+    r"(?P<volume_start>\d{1,3}(?:\.\d+)?)"
+    r"(?:\s*[-–—~]\s*(?P<volume_end>\d{1,3}(?:\.\d+)?))?"
+    r"(?P<tail>.*)$",
+    re.IGNORECASE,
+)
+
+# A trailing CHAIN of "+"-joined bare chapter ranges without any volume mapping:
+# "Not Quite Love 001-005 + 006-009 + 010-012" -> series "Not Quite Love" and
+# chapter ranges [[1,5],[6,9],[10,12]]; never volumes (§12.8 rule 6, §12.12 rule 5).
+_TRAILING_CHAPTER_RANGE_CHAIN_RE = re.compile(
+    r"^(?P<series>.+?)[\s\-–—:|]+"
+    r"(?P<ranges>\d{1,4}(?:\.\d+)?\s*[-–—~]\s*\d{1,4}(?:\.\d+)?"
+    r"(?:\s*\+\s*\d{1,4}(?:\.\d+)?\s*[-–—~]\s*\d{1,4}(?:\.\d+)?)+)$"
+)
+_RANGE_PAIR_RE = re.compile(r"(\d{1,4}(?:\.\d+)?)\s*[-–—~]\s*(\d{1,4}(?:\.\d+)?)")
+
+# Composite "+ tails" after a parsed volume range (§12.12):
+#   explicit volume continuation: "+ v10-12", "+ Vol 10" -> EXTENDS the volumes;
+#   bare/zero-padded numeric range: "+ 047-051" -> chapter data only.
+_VOLUME_TAIL_SEGMENT_RE = re.compile(
+    r"(?:^|[+&,])\s*(?:\b(?:volumes?|vols?|books?|v)\.?)\s*(\d{1,3}(?:\.\d+)?)"
+    r"(?:\s*[-–—~]\s*(?:\b(?:volumes?|vols?|books?|v)\.?\s*)?(\d{1,3}(?:\.\d+)?))?",
+    re.IGNORECASE,
+)
+_BARE_TAIL_RANGE_RE = re.compile(
+    r"(?:^|[+&,])\s*(\d{1,4}(?:\.\d+)?)\s*[-–—~]\s*(\d{1,4}(?:\.\d+)?)\b",
+    re.IGNORECASE,
+)
+
+# Explicit chapter markers with a captured number: "Chapter 179", "Ch. 250", "c374", "#01".
+_EXPLICIT_CHAPTER_NUMBER_RE = re.compile(
+    r"(?i)(?:\b(?:chapters?|chap|ch)\.?\s*[-–—:]?\s*(\d{1,4}(?:\.\d+)?)\b"
+    r"|\bc(\d{1,4}(?:\.\d+)?)\b"
+    r"|#\s*(\d{1,4}(?:\.\d+)?))"
+)
+
+# Re-release / fix revision marker: "(f)" = 1, "(f2)" = second, "(f10)" = tenth.
+# Case-insensitive; either bracket style. It is metadata — never a group signal
+# and never allowed to alter series/volume/chapter extraction.
+_REVISION_RE = re.compile(r"[\(\[]\s*f\s*(\d{0,3})\s*[\)\]]", re.IGNORECASE)
+
+# Complete-series compilation tags: "[Completed]", "[Complete]", "(all volumes)".
+_COMPLETE_SERIES_RE = re.compile(
+    r"(?i)[\(\[]\s*(?:complete|completed|complete\s*series|completed\s*series|"
+    r"all\s*volumes?|full\s*series)\s*[\)\]]"
+)
+
+
+def _is_padded_number(text: str) -> bool:
+    """Zero-padded numbers ("001", "047") are chapter notation in manga feeds."""
+    text = (text or "").strip()
+    return len(text) > 1 and text[0] == "0"
+
+
+def _expand_volume_span(start: float, end: float) -> List[float]:
+    """Integer-stepped expansion of a volume span (start/end may be fractional)."""
+    steps = int(round(end - start))
+    if steps <= 0:
+        return [start]
+    return [start + i for i in range(steps + 1)]
+
+
+def _parse_tail_segments(tail: str) -> Tuple[List[float], List[List[float]], str]:
+    """Parse the ``+ ...`` continuation of a volume-range release (§12.12).
+
+    Returns ``(volumes, chapter_ranges, cleaned_tail)``:
+
+    * an explicit volume continuation ("+ v10-12", "+ Vol 10") EXTENDS the volumes;
+    * a bare numeric range ("+ 047-051") is CHAPTER data, never volumes;
+    * a bare single number ("+ 047") is chapter data too.
+    """
+    volumes: List[float] = []
+    chapter_ranges: List[List[float]] = []
+    if not tail:
+        return volumes, chapter_ranges, tail
+
+    def _blank(text: str, start: int, end: int) -> str:
+        return text[:start] + " " * (end - start) + text[end:]
+
+    cleaned = tail
+    for match in _VOLUME_TAIL_SEGMENT_RE.finditer(tail):
+        try:
+            start = float(match.group(1))
+            end = float(match.group(2)) if match.group(2) else start
+        except (TypeError, ValueError):
+            continue
+        if start > end:
+            start, end = end, start
+        if not (0 < start <= 300) or not (0 < end <= 300) or (end - start) > 100:
+            continue
+        for volume in _expand_volume_span(start, end):
+            if volume not in volumes:
+                volumes.append(volume)
+        cleaned = _blank(cleaned, match.start(), match.end())
+
+    for match in _BARE_TAIL_RANGE_RE.finditer(tail):
+        try:
+            start = float(match.group(1))
+            end = float(match.group(2))
+        except (TypeError, ValueError):
+            continue
+        if start > end:
+            start, end = end, start
+        if 1900 <= start <= 2099 and 1900 <= end <= 2099:
+            continue  # an edition-year range is not chapter data
+        if [start, end] not in chapter_ranges:
+            chapter_ranges.append([start, end])
+        cleaned = _blank(cleaned, match.start(), match.end())
+
+    # Remaining bare single numbers are chapter data ("+ 047"), never volumes.
+    for part in re.split(r"[+&,]", cleaned):
+        part = part.strip()
+        if not re.fullmatch(r"\d{1,4}(?:\.\d+)?", part or ""):
+            continue
+        number = float(part)
+        if 1900 <= number <= 2099:
+            continue
+        single = [number, number]
+        if single not in chapter_ranges:
+            chapter_ranges.append(single)
+
+    cleaned = " ".join(cleaned.replace("+", " ").replace("&", " ").replace(",", " ").split())
+    return volumes, chapter_ranges, cleaned
+
+
+def _extract_chapter_as_volume(parse_title: str) -> Optional[Dict[str, Any]]:
+    """Parse the "<chapters A-B> as v<X>-<Y> [+ <chapters C-D>]" idiom (§12.8).
+
+    Requires an explicit ``as`` plus an explicit volume token preceded by a
+    chapter range, so it cannot consume an ordinary title (§12.8 rule 5).
+    Returns the volumes from the ``v`` half, the chapter ranges as data, and a
+    ``clean_title`` with the whole clause removed.
+    """
+    if not parse_title or not isinstance(parse_title, str):
+        return None
+    m = _CHAPTER_AS_VOLUME_RE.match(parse_title.strip())
+    if not m:
+        return None
+    series = (m.group("series") or "").strip()
+    if not series:
+        return None
+    try:
+        chapter_start = float(m.group("chapter_start"))
+        chapter_end = float(m.group("chapter_end"))
+        volume_start = float(m.group("volume_start"))
+        volume_end = float(m.group("volume_end")) if m.group("volume_end") else volume_start
+    except (TypeError, ValueError):
+        return None
+    # An edition-year "range" is not a chapter range.
+    if 1900 <= chapter_start <= 2099 and 1900 <= chapter_end <= 2099:
+        return None
+    if chapter_start > chapter_end:
+        chapter_start, chapter_end = chapter_end, chapter_start
+    if volume_start > volume_end:
+        volume_start, volume_end = volume_end, volume_start
+    # Same sanity guards as Pattern 1b: real volume ranges are small.
+    if not (0 < volume_start <= 300) or not (0 < volume_end <= 300) or (volume_end - volume_start) > 100:
+        return None
+
+    tail = m.group("tail") or ""
+    tail_volumes, tail_chapters, clean_tail = _parse_tail_segments(tail)
+    chapter_ranges: List[List[float]] = [[chapter_start, chapter_end]]
+    for chapter_range in tail_chapters:
+        if chapter_range not in chapter_ranges:
+            chapter_ranges.append(chapter_range)
+    volumes = _expand_volume_span(volume_start, volume_end)
+    for volume in tail_volumes:
+        if volume not in volumes:
+            volumes.append(volume)
+    volumes = sorted(set(volumes))
+    return {
+        "series_prefix": series,
+        "clean_title": f"{series} {clean_tail}".strip(),
+        "chapter_ranges": chapter_ranges,
+        "volumes": volumes,
+        "volume_start": min(volumes),
+        "volume_end": max(volumes),
+    }
+
+
+def _match_chapter_range_chain(cleaned: str) -> Optional[Dict[str, Any]]:
+    """Match a trailing chain of "+"-joined bare chapter ranges (§12.12 rule 5)."""
+    if not cleaned or not isinstance(cleaned, str):
+        return None
+    m = _TRAILING_CHAPTER_RANGE_CHAIN_RE.match(cleaned.strip())
+    if not m:
+        return None
+    series = (m.group("series") or "").strip(" -–—:,|.")
+    if not series:
+        return None
+    chapter_ranges: List[List[float]] = []
+    for pair in _RANGE_PAIR_RE.finditer(m.group("ranges")):
+        try:
+            start = float(pair.group(1))
+            end = float(pair.group(2))
+        except (TypeError, ValueError):
+            continue
+        chapter_ranges.append([min(start, end), max(start, end)])
+    if not chapter_ranges:
+        return None
+    return {"series": series, "chapter_ranges": chapter_ranges}
+
+
+def _chapter_number_from_title(raw_title: str) -> Optional[float]:
+    """Explicit chapter marker number (Chapter/Ch./c/#) when the title has one."""
+    if not raw_title or not isinstance(raw_title, str):
+        return None
+    m = _EXPLICIT_CHAPTER_NUMBER_RE.search(raw_title)
+    if not m:
+        return None
+    for group in m.groups():
+        if group:
+            try:
+                return float(group)
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def _is_complete_series_title(raw_title: str) -> bool:
+    """True for a complete-series compilation tag ("[Completed]", "[Complete]")."""
+    if not raw_title or not isinstance(raw_title, str):
+        return False
+    return bool(_COMPLETE_SERIES_RE.search(raw_title))
+
+
+def parse_revision_marker(raw_title: str) -> Dict[str, Any]:
+    """Parse a re-release/fix revision marker: ``(f)`` -> 1, ``(f2)`` -> 2.
+
+    Returns ``{"revision": int | None, "is_rerelease": bool}``.  A revision is
+    metadata about WHICH revision of the same upload this is: it must never
+    alter series, volumes, chapters, publisher or release group (§12.13.2).
+    """
+    result: Dict[str, Any] = {"revision": None, "is_rerelease": False}
+    if not raw_title or not isinstance(raw_title, str):
+        return result
+    m = _REVISION_RE.search(raw_title)
+    if not m:
+        return result
+    digits = (m.group(1) or "").strip()
+    if not digits:
+        revision = 1
+    else:
+        try:
+            revision = int(digits)
+        except ValueError:
+            revision = None
+    if revision is None or revision <= 0:
+        return result
+    result["revision"] = revision
+    result["is_rerelease"] = True
+    return result
+
+
+def _strip_trailing_metadata_blocks(text: str) -> str:
+    """Remove trailing ``(metadata)`` / ``[metadata]`` blocks from a title.
+
+    Used by the chapter fallback so a bare trailing number is still detected when
+    the release ends in parenthesised feed metadata ("Dandadan 250 (Digital)
+    (1r0n)") — the normal Nyaa form (§12.2.1 trap 1).
+    """
+    if not text or not isinstance(text, str):
+        return text or ""
+    cleaned = text.strip()
+    previous = None
+    while cleaned and cleaned != previous:
+        previous = cleaned
+        cleaned = re.sub(r"\s*[\(\[]\s*[^\(\[]*?\s*[\)\]]\s*$", "", cleaned).strip()
+    return cleaned
+
+
+def _strip_chapter_residue(series: str) -> str:
+    """Strip a trailing chapter marker/number from a chapter release's series key.
+
+    A chapter release must not keep the chapter number in the series identity
+    (§12.2.1 trap 2), otherwise every chapter of an untracked series creates a
+    new phantom series ("Dandadan 250", "Dandadan 251", ...).
+    """
+    if not series or not isinstance(series, str):
+        return series
+    stripped = series.strip()
+    stripped = re.sub(
+        r"(?i)\s*(?:\b(?:chapters?|chap|ch)\.?\s*[-–—:]?\s*\d{1,4}(?:\.\d+)?"
+        r"|\bc\d{1,4}(?:\.\d+)?"
+        r"|#\s*\d{1,4}(?:\.\d+)?)\s*$",
+        "",
+        stripped,
+    )
+    stripped = re.sub(r"(?i)\s*\b(?:chapters?|chap|ch)\.?\s*$", "", stripped)
+    stripped = stripped.strip(" -–—:,|.")
+    return stripped if stripped else series
+
+
+def _finalize_parse(raw_title: str, result: Dict[str, Any]) -> Dict[str, Any]:
+    """Add the Part II detection fields and chapter data to a parse result."""
+    raw = raw_title if isinstance(raw_title, str) else ""
+    result.setdefault("chapter_number", None)
+    result.setdefault("chapter_ranges", [])
+    result.setdefault("chapter_range", None)
+    result.setdefault("chapter_start", None)
+    result.setdefault("chapter_end", None)
+    result.setdefault("numbered_series_name", "")
+    result.setdefault("publisher", None)
+    result.setdefault("release_group", None)
+    result.setdefault("release_groups", [])
+    result.setdefault("revision", None)
+    result.setdefault("is_rerelease", False)
+    result.setdefault("is_complete", False)
+
+    # Complete-series compilation tags are status information, never a volume
+    # override: explicit volume markers always outrank them (§12.12 rule 4).
+    result["is_complete"] = bool(_is_complete_series_title(raw))
+    result["is_complete_series"] = result["is_complete"]
+
+    # Publisher / ordered group set / revision: all metadata, never volume signals.
+    groups: List[str] = list(result.get("release_groups") or [])
+    if not groups:
+        try:
+            groups = list(extract_release_groups(raw) or [])
+        except Exception:
+            groups = []
+    result["release_groups"] = groups
+    if not result.get("release_group"):
+        if groups:
+            result["release_group"] = groups[0]
+        else:
+            try:
+                result["release_group"] = extract_release_group(raw)
+            except Exception:
+                result["release_group"] = None
+    if not result.get("publisher"):
+        try:
+            result["publisher"] = extract_publisher(raw)
+        except Exception:
+            result["publisher"] = None
+    revision_marker = parse_revision_marker(raw)
+    if result.get("revision") is None:
+        result["revision"] = revision_marker["revision"]
+    if not result.get("is_rerelease"):
+        result["is_rerelease"] = revision_marker["is_rerelease"]
+
+    # ----- Chapter data (spec §12.2 traps 2/3, §12.8 rule 4) ----------------
+    is_chapter = bool(result.get("is_chapter"))
+    if (
+        not is_chapter
+        and result.get("volume") is None
+        and not result.get("is_bundle")
+        and not (result.get("chapter_ranges") or [])
+        and not result["is_complete"]
+        and not _VOLUME_KEYWORD_RE.search(raw)
+    ):
+        marker_number = _chapter_number_from_title(raw)
+        if marker_number is not None:
+            is_chapter = True
+            result["is_chapter"] = True
+            result["chapter_number"] = marker_number
+        else:
+            cleaned_title = (result.get("clean_title") or "").strip()
+            trailing = _TRAILING_BARE_NUMBER_RE.search(cleaned_title)
+            if trailing:
+                try:
+                    number = float(trailing.group(1))
+                except (TypeError, ValueError):
+                    number = None
+                # Edition years are not chapter numbers (spec §5 Pattern 2 guard).
+                if number is not None and not (1900 <= number <= 2099):
+                    is_chapter = True
+                    result["is_chapter"] = True
+                    result["chapter_number"] = number
+
+    if is_chapter and not result.get("is_bundle"):
+        if result.get("chapter_number") is None and result.get("volume") is not None:
+            try:
+                result["chapter_number"] = float(result["volume"])
+            except (TypeError, ValueError):
+                pass
+        cleaned_series = (result.get("series_name") or "").strip()
+        stripped_series = _strip_chapter_residue(cleaned_series)
+        if stripped_series and stripped_series != cleaned_series:
+            result["numbered_series_name"] = cleaned_series
+            result["series_name"] = stripped_series
+        elif not result.get("numbered_series_name"):
+            # Pre-strip title (e.g. "Mob Psycho 100" for series "Mob Psycho"):
+            # lets context-aware callers protect genuinely numbered series names.
+            result["numbered_series_name"] = (
+                result.get("clean_title") or cleaned_series or ""
+            ).strip()
+
+    ranges: List[List[float]] = []
+    for chapter_range in result.get("chapter_ranges") or []:
+        if isinstance(chapter_range, (list, tuple)) and len(chapter_range) >= 2:
+            try:
+                ranges.append([float(chapter_range[0]), float(chapter_range[1])])
+            except (TypeError, ValueError):
+                continue
+    result["chapter_ranges"] = ranges
+    if ranges:
+        result["chapter_range"] = [ranges[0][0], ranges[0][1]]
+        result["chapter_start"] = min(r[0] for r in ranges)
+        result["chapter_end"] = max(r[1] for r in ranges)
+        if result.get("chapter_number") is None and len(ranges) == 1 and ranges[0][0] == ranges[0][1]:
+            result["chapter_number"] = ranges[0][0]
+    return result
+
+
+def _extract_series_and_volume_inner(raw_title: str) -> Dict[str, Any]:
     """
     Intelligently extracts series name, volume(s), bundle ranges, and optional subtitle
     from raw release titles commonly found on J-Novels, NovelUpdates, RSS feeds, etc.
     """
+    parse_title = raw_title.strip() if isinstance(raw_title, str) else ""
     cleaned = clean_feed_title(raw_title)
 
     # Pattern 0: Parenthetical volume range preceded by an omnibus/edition number,
@@ -288,13 +710,59 @@ def extract_series_and_volume(raw_title: str) -> Dict[str, Any]:
         r"(?P<range>(?:volumes?|vols?|books?|book)\.?\s*\d+(?:\.\d+)?\s*[-–—~to]+\s*"
         r"(?:(?:volumes?|vols?|books?|book)\.?\s*)?\d+(?:\.\d+)?)"
         r"\s*\)(?P<rest>.*)$",
-        raw_title.strip() if isinstance(raw_title, str) else "",
+        parse_title,
         re.IGNORECASE,
     )
     if m_paren_bundle:
-        cleaned = clean_feed_title(
-            f"{m_paren_bundle.group('series')} {m_paren_bundle.group('range')} {m_paren_bundle.group('rest')}"
+        parse_title = (
+            f"{m_paren_bundle.group('series')} {m_paren_bundle.group('range')} "
+            f"{m_paren_bundle.group('rest')}"
         )
+        cleaned = clean_feed_title(parse_title)
+
+    # §12.8 pre-pass: "<chapters A-B> as v<X>-<Y> [+ <chapters C-D>]".  This must
+    # run BEFORE the volume patterns so the "v" half (not the chapter numbers)
+    # supplies the volumes and the literal "as" clause never pollutes the series.
+    chapter_meta = _extract_chapter_as_volume(parse_title)
+    if chapter_meta:
+        mapped_clean = clean_feed_title(chapter_meta["clean_title"])
+        return {
+            "raw_title": raw_title,
+            "clean_title": mapped_clean,
+            "series_name": mapped_clean,
+            "volume": chapter_meta["volumes"][0] if chapter_meta["volumes"] else None,
+            "is_bundle": len(chapter_meta["volumes"]) > 1,
+            "is_chapter": False,
+            "volume_start": chapter_meta["volume_start"],
+            "volume_end": chapter_meta["volume_end"],
+            "volumes": list(chapter_meta["volumes"]),
+            "subtitle": "",
+            "confidence": 0.95,
+            "chapter_number": None,
+            "chapter_ranges": [list(r) for r in chapter_meta["chapter_ranges"]],
+        }
+
+    # §12.12 rule 5 pre-pass: a chain of "+"-joined bare chapter ranges with no
+    # volume mapping at all is a chapter batch.  Every range is chapter data and
+    # the whole chain (plus the "+" separators) leaves the series key clean.
+    if not _VOLUME_KEYWORD_RE.search(cleaned):
+        chapter_chain = _match_chapter_range_chain(cleaned)
+        if chapter_chain:
+            return {
+                "raw_title": raw_title,
+                "clean_title": cleaned,
+                "series_name": chapter_chain["series"],
+                "volume": None,
+                "is_bundle": False,
+                "is_chapter": True,
+                "volume_start": None,
+                "volume_end": None,
+                "volumes": [],
+                "subtitle": "",
+                "confidence": 0.80,
+                "chapter_number": None,
+                "chapter_ranges": [list(r) for r in chapter_chain["chapter_ranges"]],
+            }
 
     # Result defaults
     result = {
@@ -317,19 +785,20 @@ def extract_series_and_volume(raw_title: str) -> Dict[str, Any]:
     # Pattern 0a: Multi-volume bundle range:
     # e.g., "Overlord Vol 1-14", "Classroom of the Elite Volume 1-11", "v01-v07", "Vol 1 to 5", "Vol. 01~10",
     # "DanMachi Vols 01-18" (plural forms Vol/Vols/Volumes)
+    # Composite "+" tails (§12.12): an explicit volume continuation ("+ v10-12")
+    # extends the volume set, while a bare range ("+ 047-051") is chapter data.
     bundle_pattern = re.compile(
         r"^(?P<series>.+?)\s*(?:[-–—:,]\s*)?"
         r"(?:\b(?:volumes?|vols?|books?|book)\b\.?|\bv\.?)\s*(?P<start>\d+(?:\.\d+)?)"
         r"\s*[-–—~to]+\s*"
         r"(?:(?:volumes?|vols?|books?|book)\b\.?|\bv\.?)?\s*(?P<end>\d+(?:\.\d+)?)"
-        r"(?:\s*[:\-–—]\s*(?P<subtitle>.*))?$",
+        r"(?P<tail>.*)$",
         re.IGNORECASE
     )
     m_bundle = bundle_pattern.match(cleaned)
     if m_bundle:
         series = m_bundle.group("series").strip(" -–—:,|")
         series = re.sub(r"(?i)\b(?:volumes|volume|vol\.?|books?)\b$", "", series).strip(" -–—:,|")
-        subtitle = (m_bundle.group("subtitle") or "").strip(" -–—:,|")
         try:
             start_vol = float(m_bundle.group("start"))
             end_vol = float(m_bundle.group("end"))
@@ -344,19 +813,35 @@ def extract_series_and_volume(raw_title: str) -> Dict[str, Any]:
             if not vols:
                 vols = [start_vol, end_vol]
 
+            # The remainder is either a composite "+" tail (§12.12) or a subtitle
+            # introduced by ":"/"-".  Explicit volume continuations EXTEND the
+            # volumes; a bare numeric tail is chapter data only (never 47-51).
+            tail = (m_bundle.group("tail") or "").strip()
+            if tail and tail[0] in "+&,":
+                tail_volumes, tail_chapters, _tail_rest = _parse_tail_segments(tail)
+                subtitle = ""
+            else:
+                tail_volumes, tail_chapters = [], []
+                subtitle = tail.strip(" -–—:,|")
+            if tail_volumes:
+                vols = sorted(set(vols) | set(tail_volumes))
+                end_vol = max(end_vol, max(tail_volumes))
+
             clean_series = re.sub(r'(?i)\s*\(?\b(light\s+novel|web\s+novel|novel|ln|wn)\b\)?', '', series).strip(" -–—:,|")
             return {
                 "raw_title": raw_title,
                 "clean_title": cleaned,
                 "series_name": clean_series,
-                "volume": start_vol,
+                "volume": vols[0] if vols else start_vol,
                 "is_bundle": True,
                 "is_chapter": False,
-                "volume_start": start_vol,
+                "volume_start": vols[0] if vols else start_vol,
                 "volume_end": end_vol,
                 "volumes": vols,
                 "subtitle": subtitle,
-                "confidence": 0.95
+                "confidence": 0.95,
+                "chapter_number": None,
+                "chapter_ranges": [list(r) for r in tail_chapters],
             }
         except ValueError:
             pass
@@ -432,6 +917,9 @@ def extract_series_and_volume(raw_title: str) -> Dict[str, Any]:
     # A range cannot be a chapter number, so it is treated as a bundle and kept
     # (and expanded). Without this, the bare number would fall through to
     # Pattern 2 and be misread as a single chapter/volume number.
+    #
+    # Zero-padded ranges are chapter notation in manga feeds ("Series 001-009"):
+    # they are chapter data, never invented volumes (§12.8 rule 6).
     p1b = re.compile(
         r"^(?P<series>.+?)\s*(?:[-–—:,]\s*)?(?P<start>\d{1,3}(?:\.\d+)?)\s*[-–—~]\s*(?P<end>\d{1,3}(?:\.\d+)?)$",
         re.IGNORECASE
@@ -444,6 +932,25 @@ def extract_series_and_volume(raw_title: str) -> Dict[str, Any]:
             end = float(m1b.group("end"))
         except ValueError:
             start = end = -1.0
+        if series and start >= 0 and end >= 0 and (
+            _is_padded_number(m1b.group("start")) or _is_padded_number(m1b.group("end"))
+        ):
+            clean_series = re.sub(r'(?i)\s*\(?\b(light\s+novel|web\s+novel|novel|ln|wn)\b\)?', '', series).strip(" -–—:,|")
+            return {
+                "raw_title": raw_title,
+                "clean_title": cleaned,
+                "series_name": clean_series,
+                "volume": None,
+                "is_bundle": False,
+                "is_chapter": True,
+                "volume_start": None,
+                "volume_end": None,
+                "volumes": [],
+                "subtitle": "",
+                "confidence": 0.80,
+                "chapter_number": None,
+                "chapter_ranges": [[min(start, end), max(start, end)]],
+            }
         # Sanity bounds: real volume ranges are small and ascending. Anything
         # else (years, chapter counts, junk) falls through to the later patterns.
         if series and 0 < start <= 300 and start <= end <= 300 and (end - start) <= 100:
@@ -465,6 +972,42 @@ def extract_series_and_volume(raw_title: str) -> Dict[str, Any]:
                 "subtitle": "",
                 "confidence": 0.85
             }
+
+    # Pattern 3: Chapter / Volume hybrid: "Series Name - Volume 3 Chapter 12".
+    # Evaluated before Pattern 2 so the explicit volume keyword wins over the
+    # trailing chapter number, and the chapter number is captured as data (§9.2).
+    p3 = re.compile(
+        r"^(?P<series>.+?)\s*[-–—:]\s*(?:Volume|Vol\.?|v|Book|Part)\s*(?P<vol>\d+(?:\.\d+)?)"
+        r"(?:\s*(?:Chapter|c)\s*(?P<chap>\d+(?:\.\d+)?))?",
+        re.IGNORECASE
+    )
+    m3 = p3.match(cleaned)
+    if m3:
+        series = m3.group("series").strip(" -–—:,|")
+        series = re.sub(r'^(?:\s*(?:free\s+)?download\b\s*[:\-–—]?\s*|\s*(?:read|get)\s*[:\-–—]\s*)', '', series, flags=re.IGNORECASE).strip(" -–—:,|")
+        vol_str = m3.group("vol")
+        chap_str = m3.group("chap")
+        try:
+            vol = float(vol_str)
+            chapter_number = float(chap_str) if chap_str else None
+            clean_series = re.sub(r'(?i)\s*\(?\b(light\s+novel|web\s+novel|novel|ln|wn)\b\)?', '', series).strip(" -–—:,|")
+            return {
+                "raw_title": raw_title,
+                "clean_title": cleaned,
+                "series_name": clean_series,
+                "volume": vol,
+                "is_bundle": False,
+                "is_chapter": False,
+                "volume_start": vol,
+                "volume_end": vol,
+                "volumes": [vol],
+                "subtitle": "",
+                "confidence": 0.85,
+                "chapter_number": chapter_number,
+                "chapter_ranges": [[chapter_number, chapter_number]] if chapter_number is not None else [],
+            }
+        except ValueError:
+            pass
 
     # Pattern 2: Series followed by a BARE number, with no volume keyword.
     # e.g. "Sword Art Online 28: Unital Ring VII", "Re:Zero 25", "Dandadan 250"
@@ -507,36 +1050,6 @@ def extract_series_and_volume(raw_title: str) -> Dict[str, Any]:
         except ValueError:
             pass
 
-    # Pattern 3: Chapter / Volume hybrid: "Series Name - Volume 3 Chapter 12"
-    p3 = re.compile(
-        r"^(?P<series>.+?)\s*[-–—:]\s*(?:Volume|Vol\.?|v|Book|Part)\s*(?P<vol>\d+(?:\.\d+)?)"
-        r"(?:\s*(?:Chapter|c)\s*(?P<chap>\d+(?:\.\d+)?))?",
-        re.IGNORECASE
-    )
-    m3 = p3.match(cleaned)
-    if m3:
-        series = m3.group("series").strip(" -–—:,|")
-        series = re.sub(r'^(?:\s*(?:free\s+)?download\b\s*[:\-–—]?\s*|\s*(?:read|get)\s*[:\-–—]\s*)', '', series, flags=re.IGNORECASE).strip(" -–—:,|")
-        vol_str = m3.group("vol")
-        try:
-            vol = float(vol_str)
-            clean_series = re.sub(r'(?i)\s*\(?\b(light\s+novel|web\s+novel|novel|ln|wn)\b\)?', '', series).strip(" -–—:,|")
-            return {
-                "raw_title": raw_title,
-                "clean_title": cleaned,
-                "series_name": clean_series,
-                "volume": vol,
-                "is_bundle": False,
-                "is_chapter": False,
-                "volume_start": vol,
-                "volume_end": vol,
-                "volumes": [vol],
-                "subtitle": "",
-                "confidence": 0.85
-            }
-        except ValueError:
-            pass
-
     # Check if raw_title is an 'all volumes' / bundle release
     if re.search(r'(?i)\b(?:all\s+volumes?|complete\s+(?:series|collection)?|box\s*set)\b', raw_title):
         result["is_bundle"] = True
@@ -563,7 +1076,15 @@ def extract_series_and_volume(raw_title: str) -> Dict[str, Any]:
 
     # Ensure series_name and clean_title have no dangling light novel / novel / download / all volumes keywords
     clean_series = result["series_name"]
-    clean_series = re.sub(r'^(?:\s*download|\s*free\s+download|\s*read|\s*get)\s*[:\-–—]?\s*', '', clean_series, flags=re.IGNORECASE)
+    # Site prefix: "download"/"free download" always; "read"/"get" ONLY when followed
+    # by a separator (§2 step 2).  Without this guard "Reading Our Way to a Happy
+    # New World" loses its first four letters on the no-pattern path.
+    clean_series = re.sub(
+        r'^(?:\s*(?:free\s+)?download\b\s*[:\-–—]?\s*|\s*(?:read|get)\s*[:\-–—]\s*)',
+        '',
+        clean_series,
+        flags=re.IGNORECASE,
+    )
     clean_series = re.sub(r'(?i)\b(?:all\s+volumes?|complete\s+(?:series|collection|set)?|box\s*set)\b', '', clean_series)
     clean_series = re.sub(r'(?i)\s*\(?\b(light\s+novel|web\s+novel|novel|ln|wn|epub|pdf)\b\)?', '', clean_series)
     clean_series = re.sub(r'(?i)\s*\[?\b(light\s+novel|web\s+novel|novel|ln|wn|epub|pdf)\b\]?', '', clean_series)
@@ -571,6 +1092,19 @@ def extract_series_and_volume(raw_title: str) -> Dict[str, Any]:
     result["series_name"] = clean_series
     result["clean_title"] = re.sub(r'(?i)\s*\(?\b(light\s+novel|web\s+novel|novel|ln|wn|epub|pdf)\b\)?', '', result["clean_title"]).strip(" -–—:,|")
     return result
+
+
+def extract_series_and_volume(raw_title: str) -> Dict[str, Any]:
+    """Intelligently extract series name, volume(s), bundle ranges and subtitle.
+
+    Part II additions (RELEASE_DETECTION_SPEC §12.2/§12.8/§12.11/§12.12/§12.13):
+    the returned dict additionally exposes ``chapter_number``, ``chapter_ranges``,
+    ``chapter_range`` (first range for convenience), ``chapter_start`` /
+    ``chapter_end``, ``numbered_series_name`` and the metadata fields
+    ``release_group`` (legacy primary), ``release_groups`` (ordered set),
+    ``publisher``, ``revision``, ``is_rerelease`` and ``is_complete``.
+    """
+    return _finalize_parse(raw_title, _extract_series_and_volume_inner(raw_title))
 
 
 # Explicit chapter markers, e.g. "Chapter 250", "Ch. 250", "Ch 250", "chap 12".
@@ -628,9 +1162,21 @@ def is_chapter_release(raw_title: str) -> bool:
     # colons, apostrophes, brackets): a title that ends in a bare number with no
     # volume keyword anywhere is a chapter. "Sword Art Online 2024 Edition Vol 1"
     # is protected by the keyword test.
+    #
+    # The trailing test runs on the title with its trailing metadata blocks
+    # stripped (§12.2.1 trap 1): virtually every real release ends in
+    # "(Digital) (1r0n)", which would otherwise defeat the check.
     if _VOLUME_KEYWORD_RE.search(raw_title) is None:
-        if _TRAILING_BARE_NUMBER_RE.search(raw_title.strip()):
-            return True
+        stripped_title = _strip_trailing_metadata_blocks(raw_title)
+        trailing = _TRAILING_BARE_NUMBER_RE.search(stripped_title)
+        if trailing:
+            try:
+                number = float(trailing.group(1))
+            except (TypeError, ValueError):
+                number = None
+            # Edition years are not chapter numbers (spec §5 Pattern 2 year guard).
+            if number is None or not (1900 <= number <= 2099):
+                return True
     return False
 
 
@@ -684,10 +1230,19 @@ def match_series_in_calibre(extracted_series: str, calibre_series_list: list, th
 
 KNOWN_PUBLISHERS = {
     'yen press', 'yen on', 'j-novel club', 'j-novel heart', 'seven seas',
-    'seven seas entertainment', 'airship', 'ghost ship', 'one peace books',
-    'cross infinite world', 'tentai books', 'hanashi media', 'square enix',
-    'square enix manga & books', 'kodansha', 'kodansha usa', 'viz', 'viz media',
-    'tokyopop', 'dark horse', 'kaiten books', 'denpa', 'vertical', 'monogatari'
+    'seven seas entertainment', 'seven seas siren', 'airship', 'ghost ship',
+    'one peace books', 'cross infinite world', 'tentai books', 'hanashi media',
+    'square enix', 'square enix manga & books', 'kodansha', 'kodansha comics',
+    'kodansha usa', 'kodansha digital', 'viz', 'viz media', 'tokyopop',
+    'dark horse', 'dark horse comics', 'kaiten books', 'denpa', 'vertical',
+    'monogatari', 'sol press',
+    # Official digital platforms / manga publishers seen in Nyaa release titles
+    # (§12.13.3).  Normalised for case and hyphenation before comparison, so
+    # "(K-MANGA)", "(K MANGA)" and "(KManga)" all resolve to a publisher and can
+    # never capture the release-group slot.
+    'k-manga', 'k manga', 'kmanga', 'manga up', 'manga up!', 'shueisha',
+    'shueisha manga', 'bookwalker', 'comikey', 'azuki', 'mangamo', 'inkr',
+    'coolmic', 'tappytoon', 'tapas', 'manta', 'yen plus',
 }
 
 DEFAULT_KNOWN_GROUPS = [
@@ -726,85 +1281,259 @@ BUZZWORDS = {
     "v1", "v2", "v3", "v4", "v5"
 }
 
+# §7.1 vocabulary gap: compound format/edition tags ("Digital-Compilation",
+# "Batched", "Complete-Collection") are built from words that were not all in
+# BUZZWORDS, so `is_valid_group_candidate`'s all-tokens rule accepted them as
+# release groups and they shadowed the real group.  FORMAT_TOKENS is the
+# superset used by the validity filter: only candidates made _entirely_ of
+# format/edition words are rejected, so publishers and genuine groups (including
+# "Square Enix Manga & Books", "danke-Empire", non-ASCII names) are unaffected.
+_COMPOUND_FORMAT_TOKENS = {
+    "compilation", "compilations", "digital-compilation", "digital compilation",
+    "digital+digital-compilation", "digital + digital-compilation",
+    "batched", "batch", "complete-collection", "complete collection",
+    "complete-series", "complete series", "full-series", "full series",
+    "all-volumes", "all volumes", "collection", "collections",
+    "omnibus", "edition", "editions", "special", "deluxe",
+    "collector", "collectors", "box", "boxset", "box-set",
+    "colored", "coloured", "color", "colour",
+    "remaster", "uncensored",
+}
+FORMAT_TOKENS = set(BUZZWORDS) | _COMPOUND_FORMAT_TOKENS
+
+
+def _normalise_publisher_key(name: str) -> str:
+    """Normalise a publisher name for case- and hyphen-insensitive comparison."""
+    if not name:
+        return ""
+    key = str(name).strip().lower()
+    key = re.sub(r"[-–—_]+", " ", key)
+    key = re.sub(r"\s+", " ", key).strip()
+    return key
+
+
+_NORMALISED_PUBLISHERS = {_normalise_publisher_key(name) for name in KNOWN_PUBLISHERS}
+
+
+def _is_known_publisher(name: str) -> bool:
+    """True when *name* is a recognised publisher/platform token (§12.13)."""
+    if not name:
+        return False
+    return _normalise_publisher_key(name) in _NORMALISED_PUBLISHERS
+
+
 def is_valid_group_candidate(clean: str, known_groups: Optional[List[str]] = None) -> bool:
-    clean = clean.strip()
+    """True when a bracket/paren candidate can be a release group name."""
+    clean = (clean or "").strip() if isinstance(clean, str) else ""
     if not clean or len(clean) < 2 or len(clean) > 40:
         return False
     # Explicitly recognized groups bypass buzzwords
     groups = {g.lower() for g in (known_groups or DEFAULT_KNOWN_GROUPS)}
     if clean.lower() in groups:
         return True
+    # Re-release/fix revision markers ("f", "f2", "f10") are metadata, never groups.
+    if re.match(r"^f\s*\d{0,3}$", clean, re.IGNORECASE):
+        return False
     if re.match(r"^(?:19|20)\d{2}(?:\s*[-–—~to/]\s*(?:19|20)\d{2})?$", clean):
         return False
-    if re.match(r"^(?:vol\.?|volume|v|ch\.?|chapter|c|book)\s*\d+", clean, re.IGNORECASE):
+    # Volume/chapter tags — including plural forms — are never release groups.
+    if re.match(
+        r"^(?:vols?\.?|volumes?|v|chapters?|chap|ch\.?|c|books?|parts?|pts?)\.?\s*\d+",
+        clean,
+        re.IGNORECASE,
+    ):
         return False
     if re.match(r"^\d+(?:\s*[-–—~to/]\s*\d+)?$", clean):
         return False
     lower = clean.lower()
-    if lower in BUZZWORDS:
+    if lower in FORMAT_TOKENS:
         return False
     tokens = [t.strip().lower() for t in re.split(r"[\s\-–—~_.+/|,:&]+", clean) if t.strip()]
-    if tokens and all(t in BUZZWORDS or re.match(r"^\d+(?:p|bit|k|kbps)?$|^\d+x\d+$", t) or re.match(r"^(?:19|20)\d{2}$", t) for t in tokens):
+    if tokens and all(
+        t in FORMAT_TOKENS
+        or re.match(r"^\d+(?:p|bit|k|kbps|i|fps)?$", t)
+        or re.match(r"^\d+x\d+$", t)
+        or re.match(r"^(?:19|20)\d{2}$", t)
+        for t in tokens
+    ):
         return False
     return True
 
+
+# Multi-group tag separators: "(1r0n, Ushi)", "(1r0n & Ushi)", "(1r0n/Ushi)",
+# "(1r0n + Ushi)", "(1r0n and Ushi)".  Each piece is validated individually so a
+# format tag or a publisher can never enter a multi-group list (§12.11).
+_GROUP_SPLIT_RE = re.compile(r"\s*(?:[,&+]|/|\band\b)\s*", re.IGNORECASE)
+
+
+def split_release_group_value(value: str) -> List[str]:
+    """Split a stored/tagged release-group value into validated group names."""
+    if not value:
+        return []
+    groups: List[str] = []
+    for part in _GROUP_SPLIT_RE.split(str(value).strip()):
+        part = (part or "").strip()
+        if not part:
+            continue
+        if not is_valid_group_candidate(part) or _is_known_publisher(part):
+            continue
+        if part not in groups:
+            groups.append(part)
+    return groups
+
+
+def _split_group_list(candidate: str) -> Optional[List[str]]:
+    """Split a multi-group bracket candidate into individually valid groups."""
+    if not candidate or not _GROUP_SPLIT_RE.search(candidate):
+        return None
+    groups = split_release_group_value(candidate)
+    return groups if groups else None
+
+
+def extract_release_groups(raw_title: str, known_groups: Optional[List[str]] = None) -> List[str]:
+    """Extract release groups as an ordered list; the first entry is primary.
+
+    Ordering rules (position matters, not just vocabulary):
+
+    1. known / prioritized groups win;
+    2. otherwise the LAST valid bracket candidate is the group -- the convention is
+       ``... (Publisher) (Group)``, so an unrecognised publisher-shaped token in an
+       earlier bracket must never steal the group slot (§12.13.3);
+    3. then the scene-style ``-GROUP`` suffix, then a bounded known-group substring.
+
+    Format tags, publishers (``KNOWN_PUBLISHERS``), revision markers (``f``/``fN``)
+    and single-character tokens are filtered out first.  "+"-joined candidates are
+    split and validated one by one (§12.11), so ``(1r0n, Ushi)`` yields
+    ``["1r0n", "Ushi"]`` rather than one concatenated pseudo-group.
+    """
+    if not raw_title or not isinstance(raw_title, str):
+        return []
+
+    groups_to_check = sorted(list(known_groups or []) + DEFAULT_KNOWN_GROUPS, key=len, reverse=True)
+
+    # 1. Bracket candidates: split multi-group tags FIRST, then validate every
+    #    piece independently (§12.11.1), so a noise word in the same block cannot
+    #    hide a real group.  A recognised publisher block is never split.
+    bracket_groups: List[List[str]] = []
+    for b1, b2 in re.findall(r'\[([^\]]+)\]|\(([^\)]+)\)', raw_title):
+        cand = (b1 or b2).strip()
+        if not cand or _is_known_publisher(cand):
+            continue
+        split = _split_group_list(cand)
+        if split is not None:
+            bracket_groups.append(split)
+            continue
+        if is_valid_group_candidate(cand, known_groups=groups_to_check):
+            bracket_groups.append([cand])
+
+    ordered: List[str] = []
+
+    def _add(name: str):
+        if name and not _is_known_publisher(name) and name not in ordered:
+            ordered.append(name)
+
+    # 1a. Known/prioritized groups win (in bracket order).
+    for parts in bracket_groups:
+        for part in parts:
+            for kg in groups_to_check:
+                if part.lower() == kg.lower() and not _is_known_publisher(kg):
+                    _add(part)
+
+    # 1b. Prefer-last: the last valid bracket candidate is the conventional group
+    #     slot; its "+"-split parts keep their order, so the first part is primary.
+    for parts in reversed(bracket_groups):
+        for part in parts:
+            _add(part)
+
+    if ordered:
+        return ordered
+
+    # 2. Scene-style suffix: -GROUP before trailing brackets or end of string.
+    m_scene = re.search(r'[-–—]([A-Za-z0-9_]{2,30})(?:\s*[\(\[]|\s*$)', raw_title)
+    if m_scene:
+        cand = m_scene.group(1).strip()
+        if is_valid_group_candidate(cand, known_groups=groups_to_check) and not _is_known_publisher(cand):
+            return [cand]
+
+    # 3. Bounded known-group substring search (publishers are not groups).
+    for kg in groups_to_check:
+        if _is_known_publisher(kg):
+            continue
+        escaped = re.escape(kg)
+        if re.search(r'(?:^|[\s_.\-\(\[])' + escaped + r'(?:$|[\s_.\-\)\]])', raw_title, re.IGNORECASE):
+            return [kg]
+
+    return []
+
+
+def _legacy_publisher_group(raw_title: str, known_groups: Optional[List[str]] = None) -> Optional[str]:
+    """Backward-compatible publisher fallback for :func:`extract_release_group`.
+
+    Legacy callers (VIP prioritisation, ingestion tests) expect a lone publisher
+    tag such as ``[Yen Press]`` to still be returned by the single-value
+    ``extract_release_group``.  The new list API deliberately excludes publishers
+    (§12.13.1), so the legacy wrapper falls back to the publisher only when there
+    is no real group at all.
+    """
+    if not raw_title or not isinstance(raw_title, str):
+        return None
+    groups_to_check = sorted(list(known_groups or []) + DEFAULT_KNOWN_GROUPS, key=len, reverse=True)
+    publishers: List[str] = []
+    for b1, b2 in re.findall(r'\[([^\]]+)\]|\(([^\)]+)\)', raw_title):
+        cand = (b1 or b2).strip()
+        if not _is_known_publisher(cand):
+            continue
+        if not is_valid_group_candidate(cand, known_groups=groups_to_check):
+            continue
+        publishers.append(cand)
+    if not publishers:
+        return None
+    # A known-group name among the publishers wins (e.g. "[Kodansha USA] [Seven Seas]").
+    for cand in publishers:
+        for kg in groups_to_check:
+            if cand.lower() == kg.lower():
+                return kg
+    return publishers[0]
+
+
 def extract_release_group(raw_title: str, known_groups: Optional[List[str]] = None) -> Optional[str]:
     """
-    Extracts release group or publisher tag from raw release titles.
+    Extracts the primary release group or publisher tag from raw release titles.
     e.g. '[Yen Press] Overlord Vol. 1' -> 'Yen Press'
          '[Seven Seas] [Stick] Mushoku Tensei v01' -> 'Stick'
          'Re:Zero Vol 1 (J-Novel Club)' -> 'J-Novel Club'
          '[danke-Empire] Bleach v01-v20 [Completed]' -> 'danke-Empire'
+
+    Backward-compatible single-value wrapper over :func:`extract_release_groups`.
+    The full ordered set is available from that function and is exposed as
+    ``release_groups`` in the parse result.
     """
-    if not raw_title:
+    groups = extract_release_groups(raw_title, known_groups=known_groups)
+    if groups:
+        return groups[0]
+    return _legacy_publisher_group(raw_title, known_groups=known_groups)
+
+
+def extract_publisher(raw_title: str) -> Optional[str]:
+    """Return the publisher named in a bracket/paren block, or ``None``.
+
+    Publishers are not scanlation groups: they are recognised separately from
+    ``KNOWN_PUBLISHERS`` (``[Square Enix]``, ``(K-MANGA)``, ``[J-Novel Club]``, …)
+    and surfaced as their own field rather than allowed to stand in for a group
+    (§12.13.1/§12.13.3).  Either bracket style works; the bracket text is returned.
+    """
+    if not raw_title or not isinstance(raw_title, str):
         return None
-
-    groups_to_check = sorted(list(known_groups or []) + DEFAULT_KNOWN_GROUPS, key=len, reverse=True)
-
-    # 1. Extract bracketed candidates [Group] or (Group)
-    bracket_pairs = re.findall(r'\[([^\]]+)\]|\(([^\)]+)\)', raw_title)
-    all_candidates = []
-    for b1, b2 in bracket_pairs:
-        cand = (b1 or b2).strip()
-        if is_valid_group_candidate(cand, known_groups=groups_to_check):
-            all_candidates.append(cand)
-
-    if all_candidates:
-        # Separate into ripper groups vs publishers
-        non_publishers = [c for c in all_candidates if c.lower() not in KNOWN_PUBLISHERS]
-        publishers = [c for c in all_candidates if c.lower() in KNOWN_PUBLISHERS]
-
-        # Check against known groups first among non_publishers
-        if non_publishers:
-            for cand in non_publishers:
-                for kg in groups_to_check:
-                    if cand.lower() == kg.lower():
-                        return kg
-            return non_publishers[0]
-
-        # If only publishers, match against known groups or return first publisher
-        if publishers:
-            for cand in publishers:
-                for kg in groups_to_check:
-                    if cand.lower() == kg.lower():
-                        return kg
-            return publishers[0]
-
-    # 2. Trailing scene group pattern e.g. Title-Stick (Digital)
-    m_scene = re.search(r'[-–—]([A-Za-z0-9_]{2,30})(?:\s*[\(\[]|\s*$)', raw_title)
-    if m_scene:
-        cand = m_scene.group(1).strip()
-        if is_valid_group_candidate(cand, known_groups=groups_to_check):
-            for kg in groups_to_check:
-                if cand.lower() == kg.lower():
-                    return kg
-            return cand
-
-    # 3. Known groups substring match
-    for kg in groups_to_check:
-        escaped = re.escape(kg)
-        if re.search(r'(?:^|[\s_.\-\(\[])' + escaped + r'(?:$|[\s_.\-\)\]])', raw_title, re.IGNORECASE):
-            return kg
-
+    for candidate in re.findall(r"[\(\[]([^\)\]]+)[\)\]]", raw_title):
+        candidate = candidate.strip()
+        if not candidate:
+            continue
+        if _is_known_publisher(candidate):
+            return candidate
+        # A multi-tag block may still carry the publisher ("(Parser + K-MANGA)").
+        for part in re.split(r"\s*(?:[,&+/]|\band\b)\s*", candidate, flags=re.IGNORECASE):
+            part = (part or "").strip()
+            if part and _is_known_publisher(part):
+                return part
     return None
 
