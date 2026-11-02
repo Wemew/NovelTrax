@@ -31,7 +31,7 @@ def run_forensic_checks():
     ]
     for raw, expected in test_cases:
         res = NovelMetadataProvider.clean_novel_title(raw)
-        assert res == expected, f"clean_novel_title mismatch: got {res!r}, expected {expected!r}"
+        if not (res == expected): raise AssertionError(f"clean_novel_title mismatch: got {res!r}, expected {expected!r}")
     print("[PASS] Check 1: clean_novel_title authentic regex transformation without mangling")
 
     # 2. is_valid_group_candidate & BUZZWORDS
@@ -73,7 +73,7 @@ def run_forensic_checks():
     ]
     for c in invalid_candidates:
         valid = is_valid_group_candidate(c)
-        assert not valid, f"Candidate {c!r} should be invalid but was accepted!"
+        if not (not valid): raise AssertionError(f"Candidate {c!r} should be invalid but was accepted!")
     print(f"[PASS] Check 2: is_valid_group_candidate rejected all {len(invalid_candidates)} technical/buzzword tags")
 
     # 3. Genuine Group Preservation
@@ -101,7 +101,7 @@ def run_forensic_checks():
     ]
     for c in valid_candidates:
         valid = is_valid_group_candidate(c)
-        assert valid, f"Candidate {c!r} should be valid but was rejected!"
+        if not (valid): raise AssertionError(f"Candidate {c!r} should be valid but was rejected!")
     print(f"[PASS] Check 3: is_valid_group_candidate preserved all {len(valid_candidates)} genuine release groups")
 
     # 4. Database.upsert_release raw title & group extraction
@@ -117,9 +117,9 @@ def run_forensic_checks():
     })
     with db.get_connection() as conn:
         row = conn.execute("SELECT title, series_name, release_group FROM releases WHERE id = ?;", (rel_id,)).fetchone()
-        assert row["title"] == "[J-Novel Club] Ascendance of a Bookworm Vol. 1", f"Title corrupted: {row['title']}"
-        assert row["series_name"] == "Ascendance of a Bookworm"
-        assert row["release_group"] == "J-Novel Club", f"Group extraction failed: {row['release_group']}"
+        if not (row["title"] == "[J-Novel Club] Ascendance of a Bookworm Vol. 1"): raise AssertionError(f"Title corrupted: {row['title']}")
+        if not (row["series_name"] == "Ascendance of a Bookworm"): raise AssertionError("assertion failed at line 121")
+        if not (row["release_group"] == "J-Novel Club"): raise AssertionError(f"Group extraction failed: {row['release_group']}")
     print("[PASS] Check 4: Database.upsert_release strictly preserves raw title and extracts release group")
 
     # 5. Database self-healing migration in init_db
@@ -132,11 +132,11 @@ def run_forensic_checks():
 
     with db.get_connection() as conn:
         r1 = conn.execute("SELECT title, release_group FROM releases WHERE guid = 'legacy-corrupted-1';").fetchone()
-        assert r1["title"] == "[J-Novel Club] Ascendance of a Bookworm Vol. 2", f"Migration failed for J- Club: {r1['title']}"
-        assert r1["release_group"] == "J-Novel Club", f"Migration failed to backfill release_group: {r1['release_group']}"
+        if not (r1["title"] == "[J-Novel Club] Ascendance of a Bookworm Vol. 2"): raise AssertionError(f"Migration failed for J- Club: {r1['title']}")
+        if not (r1["release_group"] == "J-Novel Club"): raise AssertionError(f"Migration failed to backfill release_group: {r1['release_group']}")
         r2 = conn.execute("SELECT title, release_group FROM releases WHERE guid = 'legacy-missing-bracket';").fetchone()
-        assert r2["title"] == "[Yen Press] Overlord Vol. 1", f"Migration failed to restore bracket: {r2['title']}"
-        assert r2["release_group"] == "Yen Press", f"Migration failed to extract Yen Press: {r2['release_group']}"
+        if not (r2["title"] == "[Yen Press] Overlord Vol. 1"): raise AssertionError(f"Migration failed to restore bracket: {r2['title']}")
+        if not (r2["release_group"] == "Yen Press"): raise AssertionError(f"Migration failed to extract Yen Press: {r2['release_group']}")
     print("[PASS] Check 5: Database.init_db self-healing SQL migration genuinely restores legacy mangled titles & groups")
 
     print("=" * 70)

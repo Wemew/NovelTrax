@@ -70,7 +70,7 @@ def run_exotic_ssrf_stress_tests():
 
     for payload in exotic_loopback_payloads:
         is_safe = is_safe_public_url(payload)
-        assert not is_safe, f"CRITICAL: Exotic SSRF vector was NOT blocked: {payload}"
+        if not (not is_safe): raise AssertionError(f"CRITICAL: Exotic SSRF vector was NOT blocked: {payload}")
         print(f"  [PASS] Blocked exotic IP representation: {payload}")
 
     # 2. IPv6 exotic representations (IPv4-mapped, ULA, Link-Local, Unspecified)
@@ -98,7 +98,7 @@ def run_exotic_ssrf_stress_tests():
 
     for payload in ipv6_payloads:
         is_safe = is_safe_public_url(payload)
-        assert not is_safe, f"CRITICAL: IPv6 SSRF vector was NOT blocked: {payload}"
+        if not (not is_safe): raise AssertionError(f"CRITICAL: IPv6 SSRF vector was NOT blocked: {payload}")
         print(f"  [PASS] Blocked IPv6 SSRF vector: {payload}")
 
     # 3. Disallowed protocols & URI schemes
@@ -122,7 +122,7 @@ def run_exotic_ssrf_stress_tests():
 
     for proto in disallowed_protocols:
         is_safe = is_safe_public_url(proto)
-        assert not is_safe, f"CRITICAL: Disallowed protocol was NOT blocked: {proto}"
+        if not (not is_safe): raise AssertionError(f"CRITICAL: Disallowed protocol was NOT blocked: {proto}")
         print(f"  [PASS] Blocked disallowed protocol: {proto}")
 
     # 4. Obfuscation, userinfo, trailing dot, whitespace, and case sensitivity
@@ -146,7 +146,7 @@ def run_exotic_ssrf_stress_tests():
 
     for payload in obfuscated_payloads:
         is_safe = is_safe_public_url(payload)
-        assert not is_safe, f"CRITICAL: Obfuscated SSRF payload was NOT blocked: {repr(payload)}"
+        if not (not is_safe): raise AssertionError(f"CRITICAL: Obfuscated SSRF payload was NOT blocked: {repr(payload)}")
         print(f"  [PASS] Blocked obfuscated SSRF payload: {repr(payload)}")
 
     # 5. Legitimate safe public URLs must NOT be falsely rejected
@@ -161,7 +161,7 @@ def run_exotic_ssrf_stress_tests():
 
     for url in legitimate_urls:
         is_safe = is_safe_public_url(url)
-        assert is_safe, f"FALSE POSITIVE: Valid public URL was incorrectly blocked: {url}"
+        if not (is_safe): raise AssertionError(f"FALSE POSITIVE: Valid public URL was incorrectly blocked: {url}")
         print(f"  [PASS] Correctly permitted legitimate public URL: {url}")
 
 
@@ -206,9 +206,9 @@ def run_redirect_ssrf_stress_tests():
         # which is the first line of defense.
         try:
             safe_http_get(f"http://127.0.0.1:{port}/redirect-to-loopback")
-            assert False, "Should have failed on initial loopback URL"
+            if not (False): raise AssertionError("Should have failed on initial loopback URL")
         except ValueError as e:
-            assert "SSRF blocked" in str(e)
+            if not ("SSRF blocked" in str(e)): raise AssertionError("assertion failed at line 211")
             print("  [PASS] Blocked initial loopback request before connection")
 
         # Now test the redirect handler unit directly:
@@ -218,25 +218,25 @@ def run_redirect_ssrf_stress_tests():
         # Test redirection to loopback
         try:
             handler.redirect_request(None, None, 302, "Found", {}, "http://127.0.0.1:8080/admin")
-            assert False, "Redirect handler should have blocked redirect to loopback"
+            if not (False): raise AssertionError("Redirect handler should have blocked redirect to loopback")
         except ValueError as e:
-            assert "SSRF blocked" in str(e)
+            if not ("SSRF blocked" in str(e)): raise AssertionError("assertion failed at line 223")
             print("  [PASS] SSRFSafeRedirectHandler intercepted redirect to 127.0.0.1")
 
         # Test redirection to metadata
         try:
             handler.redirect_request(None, None, 302, "Found", {}, "http://169.254.169.254/latest/meta-data/")
-            assert False, "Redirect handler should have blocked redirect to cloud metadata"
+            if not (False): raise AssertionError("Redirect handler should have blocked redirect to cloud metadata")
         except ValueError as e:
-            assert "SSRF blocked" in str(e)
+            if not ("SSRF blocked" in str(e)): raise AssertionError("assertion failed at line 231")
             print("  [PASS] SSRFSafeRedirectHandler intercepted redirect to cloud metadata")
 
         # Test redirection to file://
         try:
             handler.redirect_request(None, None, 302, "Found", {}, "file:///etc/passwd")
-            assert False, "Redirect handler should have blocked redirect to file:///"
+            if not (False): raise AssertionError("Redirect handler should have blocked redirect to file:///")
         except ValueError as e:
-            assert "SSRF blocked" in str(e)
+            if not ("SSRF blocked" in str(e)): raise AssertionError("assertion failed at line 239")
             print("  [PASS] SSRFSafeRedirectHandler intercepted redirect to file:// URI")
 
     finally:
@@ -259,18 +259,18 @@ def run_webhook_error_leak_stress_tests():
     ]
     for target in ssrf_targets:
         res = ns.test_webhook(discord_url=target, apprise_url=target)
-        assert res["status"] == "error"
+        if not (res["status"] == "error"): raise AssertionError("assertion failed at line 262")
         # Discord result
         d_res = res["results"]["discord"]
-        assert d_res["success"] is False
-        assert "Blocked by SSRF" in d_res["message"]
+        if not (d_res["success"] is False): raise AssertionError("assertion failed at line 265")
+        if not ("Blocked by SSRF" in d_res["message"]): raise AssertionError("assertion failed at line 266")
         # Generic result
         g_res = res["results"]["generic"]
-        assert g_res["success"] is False
-        assert "Blocked by SSRF" in g_res["message"]
+        if not (g_res["success"] is False): raise AssertionError("assertion failed at line 269")
+        if not ("Blocked by SSRF" in g_res["message"]): raise AssertionError("assertion failed at line 270")
         # Ensure no URL paths or internal terms leak in overall message
-        assert "identity-credentials" not in res["message"]
-        assert "internal-metrics" not in res["message"]
+        if not ("identity-credentials" not in res["message"]): raise AssertionError("assertion failed at line 272")
+        if not ("internal-metrics" not in res["message"]): raise AssertionError("assertion failed at line 273")
         print(f"  [PASS] Webhook diagnostic safely blocked and sanitized SSRF target: {target}")
 
     # Case 2: Simulating 4xx/5xx responses from external webhook server with sensitive response body
@@ -295,21 +295,21 @@ def run_webhook_error_leak_stress_tests():
         
         # Safe dummy public domain so it passes initial SSRF check
         res = ns.test_webhook(discord_url="https://discord.com/api/webhooks/mock", apprise_url="https://example.com/webhook")
-        assert res["status"] == "error"
+        if not (res["status"] == "error"): raise AssertionError("assertion failed at line 298")
         # Check that discord message is cleanly formatted status code only
-        assert res["results"]["discord"]["message"] == "Discord returned HTTP 500"
-        assert res["results"]["generic"]["message"] == "Generic webhook returned HTTP 500"
+        if not (res["results"]["discord"]["message"] == "Discord returned HTTP 500"): raise AssertionError("assertion failed at line 300")
+        if not (res["results"]["generic"]["message"] == "Generic webhook returned HTTP 500"): raise AssertionError("assertion failed at line 301")
         # Verify secret token is NOT leaked
-        assert "SUPER_SECRET_KEY_12345" not in res["results"]["discord"]["message"]
-        assert "SUPER_SECRET_KEY_12345" not in res["results"]["generic"]["message"]
-        assert "SUPER_SECRET_KEY_12345" not in res["message"]
+        if not ("SUPER_SECRET_KEY_12345" not in res["results"]["discord"]["message"]): raise AssertionError("assertion failed at line 303")
+        if not ("SUPER_SECRET_KEY_12345" not in res["results"]["generic"]["message"]): raise AssertionError("assertion failed at line 304")
+        if not ("SUPER_SECRET_KEY_12345" not in res["message"]): raise AssertionError("assertion failed at line 305")
         print("  [PASS] Verified 500 error response body is completely omitted from webhook diagnostics")
 
         # Mocking 404 response
         webhook_module._post_json = lambda url, data, timeout=10.0: SimpleHttpResponse(404, '{"error": "Webhook not found", "server_id": 99887766}')
         res = ns.test_webhook(discord_url="https://discord.com/api/webhooks/mock")
-        assert res["results"]["discord"]["message"] == "Discord returned HTTP 404"
-        assert "server_id" not in res["results"]["discord"]["message"]
+        if not (res["results"]["discord"]["message"] == "Discord returned HTTP 404"): raise AssertionError("assertion failed at line 311")
+        if not ("server_id" not in res["results"]["discord"]["message"]): raise AssertionError("assertion failed at line 312")
         print("  [PASS] Verified 404 error response body is completely omitted from webhook diagnostics")
 
     finally:
@@ -330,9 +330,9 @@ def run_calibre_path_sanitization_stress_tests():
     for p in null_byte_payloads:
         try:
             sanitize_calibre_path(p)
-            assert False, f"CRITICAL: Null byte path was NOT rejected: {repr(p)}"
+            if not (False): raise AssertionError(f"CRITICAL: Null byte path was NOT rejected: {repr(p)}")
         except ValueError as e:
-            assert "null bytes" in str(e).lower()
+            if not ("null bytes" in str(e).lower()): raise AssertionError("assertion failed at line 335")
             print(f"  [PASS] Rejected null byte injection: {repr(p)}")
 
     # 2. Blocked file extensions and sensitive system file probing
@@ -356,9 +356,9 @@ def run_calibre_path_sanitization_stress_tests():
     for probe in sensitive_file_probes:
         try:
             sanitize_calibre_path(probe)
-            assert False, f"CRITICAL: Sensitive/executable extension probe was NOT rejected: {probe}"
+            if not (False): raise AssertionError(f"CRITICAL: Sensitive/executable extension probe was NOT rejected: {probe}")
         except ValueError as e:
-            assert "disallowed" in str(e).lower()
+            if not ("disallowed" in str(e).lower()): raise AssertionError("assertion failed at line 361")
             print(f"  [PASS] Blocked sensitive file probe: {probe}")
 
     # 3. Path Traversal payloads combined with blocked extensions
@@ -371,9 +371,9 @@ def run_calibre_path_sanitization_stress_tests():
     for tp in traversal_payloads:
         try:
             sanitize_calibre_path(tp)
-            assert False, f"CRITICAL: Traversal probe was NOT rejected: {tp}"
+            if not (False): raise AssertionError(f"CRITICAL: Traversal probe was NOT rejected: {tp}")
         except ValueError as e:
-            assert "disallowed" in str(e).lower()
+            if not ("disallowed" in str(e).lower()): raise AssertionError("assertion failed at line 376")
             print(f"  [PASS] Blocked traversal attack to sensitive file: {tp}")
 
     # 4. Valid Calibre directory paths should be normalized cleanly
@@ -384,8 +384,8 @@ def run_calibre_path_sanitization_stress_tests():
     ]
     for in_path, _ in valid_library_paths:
         cleaned = sanitize_calibre_path(in_path)
-        assert cleaned, f"Valid path failed sanitization: {in_path}"
-        assert "\x00" not in cleaned
+        if not (cleaned): raise AssertionError(f"Valid path failed sanitization: {in_path}")
+        if not ("\x00" not in cleaned): raise AssertionError("assertion failed at line 388")
         print(f"  [PASS] Valid library path normalized cleanly: {in_path} -> {cleaned}")
 
 
@@ -399,8 +399,8 @@ def run_dom_xss_sanitization_stress_tests():
         disc_content = f.read()
 
     # Verify discovery.html uses createElement + textContent and does NOT use outerHTML or innerHTML for synopsis
-    assert "synDiv.textContent" in disc_content, "Missing synDiv.textContent in discovery.html"
-    assert "box.outerHTML =" not in disc_content, "Found dangerous box.outerHTML assignment in discovery.html"
+    if not ("synDiv.textContent" in disc_content): raise AssertionError("Missing synDiv.textContent in discovery.html")
+    if not ("box.outerHTML =" not in disc_content): raise AssertionError("Found dangerous box.outerHTML assignment in discovery.html")
     print("  [PASS] discovery.html uses safe textContent sink instead of innerHTML/outerHTML")
 
     with open(feeds_html, "r", encoding="utf-8") as f:
@@ -438,11 +438,11 @@ def run_dom_xss_sanitization_stress_tests():
     ]
     for title in adversarial_titles:
         escaped = escape_html(title)
-        assert "<script>" not in escaped
-        assert "<img" not in escaped
-        assert "<svg" not in escaped
-        assert '"' not in escaped
-        assert "'" not in escaped
+        if not ("<script>" not in escaped): raise AssertionError("assertion failed at line 441")
+        if not ("<img" not in escaped): raise AssertionError("assertion failed at line 442")
+        if not ("<svg" not in escaped): raise AssertionError("assertion failed at line 443")
+        if not ('"' not in escaped): raise AssertionError("assertion failed at line 444")
+        if not ("'" not in escaped): raise AssertionError("assertion failed at line 445")
         print(f"  [PASS] HTML escaping neutralized XSS title payload: {escaped[:40]}")
 
     # Test adversarial link strings
@@ -459,9 +459,9 @@ def run_dom_xss_sanitization_stress_tests():
     for link in adversarial_links:
         safe_link = sanitize_link(link)
         if not link.lower().startswith("http://") and not link.lower().startswith("https://"):
-            assert safe_link == "#", f"Dangerous link scheme was not neutralized to '#': {link} -> {safe_link}"
+            if not (safe_link == "#"): raise AssertionError(f"Dangerous link scheme was not neutralized to '#': {link} -> {safe_link}")
         else:
-            assert '"' not in safe_link, f"Quote was not escaped in HTTP link: {safe_link}"
+            if not ('"' not in safe_link): raise AssertionError(f"Quote was not escaped in HTTP link: {safe_link}")
         print(f"  [PASS] Safe link sanitizer neutralized dangerous link: {link} -> {safe_link}")
 
 

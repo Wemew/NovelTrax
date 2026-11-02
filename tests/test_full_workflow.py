@@ -38,9 +38,9 @@ def run_e2e_test():
     scanner = CalibreScanner(os.path.dirname(calibre_db_file))
     summary = scanner.get_library_summary()
     print("Library Summary:", summary)
-    assert summary["total_books"] == 39  # 18 + 15 + 6
-    assert summary["total_series"] == 3
-    assert summary["total_authors"] == 3
+    if not (summary["total_books"] == 39): raise AssertionError("assertion failed at line 41")  # 18 + 15 + 6
+    if not (summary["total_series"] == 3): raise AssertionError("assertion failed at line 42")
+    if not (summary["total_authors"] == 3): raise AssertionError("assertion failed at line 43")
 
     series_list = scanner.get_all_series()
     for s in series_list:
@@ -57,7 +57,7 @@ def run_e2e_test():
     print("App Series Table:")
     for s in db_series:
         print(f"  [ID {s['id']}] {s['name']} (Monitored: {bool(s['is_monitored'])}, Owned: {s['book_count']})")
-    assert len(db_series) == 3
+    if not (len(db_series) == 3): raise AssertionError("assertion failed at line 60")
 
     print("\n" + "=" * 60)
     print("STEP 4: SIMULATING J-NOVELS FEED SCRAPER DETECTING RELEASES")
@@ -103,7 +103,7 @@ def run_e2e_test():
     print(f"\nTotal Pending Requests in DB: {len(pending)}")
     for p in pending:
         print(f"  - WANTED: {p['title']} (Series: {p['series_name']}, Vol: {p['volume']})")
-    assert len(pending) == 2  # DanMachi Vol 19 and DCC Book 7
+    if not (len(pending) == 2): raise AssertionError("assertion failed at line 106")  # DanMachi Vol 19 and DCC Book 7
 
     print("\n" + "=" * 60)
     print("STEP 5: SIMULATING USER ADDING 'DanMachi Volume 19' TO CALIBRE")
@@ -130,8 +130,8 @@ def run_e2e_test():
     for p in remaining_pending:
         print(f"  - WANTED: {p['title']}")
 
-    assert len(remaining_pending) == 1
-    assert remaining_pending[0]["series_name"] == "Dungeon Crawler Carl"
+    if not (len(remaining_pending) == 1): raise AssertionError("assertion failed at line 133")
+    if not (remaining_pending[0]["series_name"] == "Dungeon Crawler Carl"): raise AssertionError("assertion failed at line 134")
     print("\nSUCCESS: DanMachi Vol 19 was automatically removed from pending requests!")
 
     print("\n" + "=" * 60)
@@ -168,19 +168,19 @@ def run_e2e_test():
     print(f"Discovered potential new series: {len(discovered)}")
     for d in discovered:
         print(f"  - DISCOVERED: '{d['title']}' (Series: {d['series_name']}, Vol: {d['volume']})")
-    assert len(discovered) >= 2
+    if not (len(discovered) >= 2): raise AssertionError("assertion failed at line 171")
 
     # User tracks "Solo Leveling"
     print("\nUser clicks 'Track Series' on Solo Leveling...")
     app_db.track_discovered_series("Solo Leveling")
     # Verify Solo Leveling is now in tracked series and in pending requests
     tracked_series = [s["name"] for s in app_db.get_all_series(monitored_only=True)]
-    assert "Solo Leveling" in tracked_series
+    if not ("Solo Leveling" in tracked_series): raise AssertionError("assertion failed at line 178")
     print("✓ 'Solo Leveling' is now actively monitored!")
 
     # Verify it is now removed from discovery (since it's monitored)
     discovered_after_track = [d["series_name"] for d in app_db.get_discovery_releases()]
-    assert "Solo Leveling" not in discovered_after_track
+    if not ("Solo Leveling" not in discovered_after_track): raise AssertionError("assertion failed at line 183")
     print("✓ 'Solo Leveling' moved from Discovery to Active Tracking.")
 
     print("\n" + "=" * 60)
@@ -189,12 +189,12 @@ def run_e2e_test():
     # User blacklists "Three Days of Happiness"
     print("User blacklists 'Three Days of Happiness'...")
     app_db.add_to_blacklist("Three Days of Happiness", reason="Not my genre")
-    assert app_db.is_series_blacklisted("Three Days of Happiness")
+    if not (app_db.is_series_blacklisted("Three Days of Happiness")): raise AssertionError("assertion failed at line 192")
     print("✓ Series is recorded in blacklist table!")
 
     # Verify it disappeared from Discovery
     discovered_after_bl = [d["series_name"] for d in app_db.get_discovery_releases()]
-    assert "Three Days of Happiness" not in discovered_after_bl
+    if not ("Three Days of Happiness" not in discovered_after_bl): raise AssertionError("assertion failed at line 197")
     print("✓ Blacklisted series is completely hidden from Discovery.")
 
     # Simulate incoming release for the blacklisted series (Vol 2)
@@ -213,14 +213,14 @@ def run_e2e_test():
 
     # Verify no pending request was created
     for p in app_db.get_pending_requests():
-        assert p["series_name"] != "Three Days of Happiness"
+        if not (p["series_name"] != "Three Days of Happiness"): raise AssertionError("assertion failed at line 216")
     print("✓ Future releases for blacklisted series were blocked from generating requests!")
 
     # Test removing from blacklist (editable)
     bl_list = app_db.get_blacklisted_series()
     target_bl = next(b for b in bl_list if b["name"] == "Three Days of Happiness")
     app_db.remove_from_blacklist(target_bl["id"])
-    assert not app_db.is_series_blacklisted("Three Days of Happiness")
+    if not (not app_db.is_series_blacklisted("Three Days of Happiness")): raise AssertionError("assertion failed at line 223")
     print("✓ Successfully removed/restored series from Blacklist!")
 
     print("\n" + "=" * 60)
@@ -241,20 +241,20 @@ def run_e2e_test():
         "javascript:alert(1)"
     ]
     for url in blocked_urls:
-        assert not is_safe_public_url(url), f"Failed to block unsafe URL: {url}"
+        if not (not is_safe_public_url(url)): raise AssertionError(f"Failed to block unsafe URL: {url}")
         print(f"  ✓ Blocked unsafe URL: {url}")
 
     print("\nTesting image magic-byte verification:")
-    assert detect_valid_image(b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x01\x00`\x00`\x00\x00") == "image/jpeg"
+    if not (detect_valid_image(b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x01\x00`\x00`\x00\x00") == "image/jpeg"): raise AssertionError("assertion failed at line 248")
     print("  ✓ Allowed valid JPEG binary header")
 
-    assert detect_valid_image(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x10") == "image/png"
+    if not (detect_valid_image(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x10") == "image/png"): raise AssertionError("assertion failed at line 251")
     print("  ✓ Allowed valid PNG binary header")
 
-    assert detect_valid_image(b"RIFF\x24\x00\x00\x00WEBPVP8 \x18\x00\x00\x00") == "image/webp"
+    if not (detect_valid_image(b"RIFF\x24\x00\x00\x00WEBPVP8 \x18\x00\x00\x00") == "image/webp"): raise AssertionError("assertion failed at line 254")
     print("  ✓ Allowed valid WEBP binary header")
 
-    assert detect_valid_image(b"GIF89a\x01\x00\x01\x00\x80\x00\x00\xff\xff\xff\x00\x00\x00!\xf9\x04") == "image/gif"
+    if not (detect_valid_image(b"GIF89a\x01\x00\x01\x00\x80\x00\x00\xff\xff\xff\x00\x00\x00!\xf9\x04") == "image/gif"): raise AssertionError("assertion failed at line 257")
     print("  ✓ Allowed valid GIF binary header")
 
     # Reject non-images and script payloads
@@ -267,7 +267,7 @@ def run_e2e_test():
         b"Short text"
     ]
     for payload in malicious_payloads:
-        assert detect_valid_image(payload) is None, f"Failed to reject malicious payload: {payload[:20]}"
+        if not (detect_valid_image(payload) is None): raise AssertionError(f"Failed to reject malicious payload: {payload[:20]}")
         print(f"  ✓ Rejected unsafe content payload: {payload[:20]!r}")
 
     print("\n" + "=" * 60)
@@ -288,8 +288,8 @@ def run_e2e_test():
         cur = conn.cursor()
         cur.execute("SELECT description, series_link FROM releases WHERE id = ?;", (test_rel["id"],))
         updated_row = cur.fetchone()
-        assert updated_row["description"] == sample_synopsis
-        assert updated_row["series_link"] == canonical_hub
+        if not (updated_row["description"] == sample_synopsis): raise AssertionError("assertion failed at line 291")
+        if not (updated_row["series_link"] == canonical_hub): raise AssertionError("assertion failed at line 292")
     print(f"  ✓ Successfully updated release #{test_rel['id']} with synopsis & original post link")
 
     # Test synopsis logic verifying sqlite3.Row dict conversion and title extraction
@@ -298,10 +298,10 @@ def run_e2e_test():
         cur = conn.cursor()
         cur.execute("SELECT * FROM releases WHERE id = ?;", (test_rel["id"],))
         raw_row = cur.fetchone()
-        assert raw_row is not None
+        if not (raw_row is not None): raise AssertionError("assertion failed at line 301")
         # Verify sqlite3.Row dict conversion prevents AttributeError on .get()
         row_dict = dict(raw_row)
-        assert row_dict.get("title") == test_rel["title"]
+        if not (row_dict.get("title") == test_rel["title"]): raise AssertionError("assertion failed at line 304")
 
     mock_details = {
         "synopsis": "Official synopsis loaded on-demand via API.",
@@ -322,9 +322,9 @@ def run_e2e_test():
         cur = conn.cursor()
         cur.execute("SELECT description, series_name, title FROM releases WHERE id = ?;", (test_rel["id"],))
         updated_r = cur.fetchone()
-        assert updated_r["description"] == "Official synopsis loaded on-demand via API."
-        assert updated_r["series_name"] == "Gate: Thus the JSDF Fought There"
-        assert updated_r["title"] == "Gate: Thus the JSDF Fought There"
+        if not (updated_r["description"] == "Official synopsis loaded on-demand via API."): raise AssertionError("assertion failed at line 325")
+        if not (updated_r["series_name"] == "Gate: Thus the JSDF Fought There"): raise AssertionError("assertion failed at line 326")
+        if not (updated_r["title"] == "Gate: Thus the JSDF Fought There"): raise AssertionError("assertion failed at line 327")
     print("  ✓ Synopsis logic safely handled sqlite3.Row dict conversion and updated database successfully")
 
     # Test ReleaseItem with source_feed_name
@@ -337,11 +337,11 @@ def run_e2e_test():
         series_link="https://jnovels.com/mushoku-tensei-epub/",
         source_feed_name="J-Novels Master Index"
     )
-    assert test_item.source_feed_name == "J-Novels Master Index"
+    if not (test_item.source_feed_name == "J-Novels Master Index"): raise AssertionError("assertion failed at line 340")
     item_dict = test_item.to_dict()
-    assert item_dict["source_feed_name"] == "J-Novels Master Index"
+    if not (item_dict["source_feed_name"] == "J-Novels Master Index"): raise AssertionError("assertion failed at line 342")
     is_new, rel_id = app_db.upsert_release(item_dict)
-    assert rel_id > 0
+    if not (rel_id > 0): raise AssertionError("assertion failed at line 344")
     print("  ✓ ReleaseItem successfully handles source_feed_name and persists cleanly to database")
 
     # Test parse_description_from_soup with #editdescription
@@ -362,11 +362,11 @@ def run_e2e_test():
     """
     soup_user = BeautifulSoup(sample_user_html, "html.parser")
     desc_result = JNovelsProvider.parse_description_from_soup(soup_user)
-    assert desc_result is not None
-    assert "Even someone like me discovered a way to find a girlfriend!" in desc_result
-    assert "Mochizuki Rika" in desc_result
+    if not (desc_result is not None): raise AssertionError("assertion failed at line 365")
+    if not ("Even someone like me discovered a way to find a girlfriend!" in desc_result): raise AssertionError("assertion failed at line 366")
+    if not ("Mochizuki Rika" in desc_result): raise AssertionError("assertion failed at line 367")
     cover_result = JNovelsProvider.parse_cover_from_soup(soup_user)
-    assert cover_result == "https://jnovels.com/wp-content/uploads/2019/06/heroine-cover.jpg"
+    if not (cover_result == "https://jnovels.com/wp-content/uploads/2019/06/heroine-cover.jpg"): raise AssertionError("assertion failed at line 369")
     print("  ✓ JNovelsProvider correctly extracts full description from #editdescription and novel cover image")
 
     # Test edge case 1: unlabelled narrative description paragraphs
@@ -381,9 +381,9 @@ def run_e2e_test():
     </article>
     """
     desc_1 = JNovelsProvider.parse_description_from_soup(BeautifulSoup(sample_edge_1, "html.parser"))
-    assert desc_1 is not None
-    assert "Mochizuki Souta" in desc_1
-    assert "Associated Names" not in desc_1
+    if not (desc_1 is not None): raise AssertionError("assertion failed at line 384")
+    if not ("Mochizuki Souta" in desc_1): raise AssertionError("assertion failed at line 385")
+    if not ("Associated Names" not in desc_1): raise AssertionError("assertion failed at line 386")
     print("  ✓ Edge case 1 passed: narrative paragraph detection cleanly isolates synopsis without associated names")
 
     # Test edge case 2: <b>Description</b><br/> with <b>Associated Names</b> in next <p>
@@ -397,10 +397,10 @@ def run_e2e_test():
     </article>
     """
     desc_2 = JNovelsProvider.parse_description_from_soup(BeautifulSoup(sample_edge_2, "html.parser"))
-    assert desc_2 is not None
-    assert "Demon God" in desc_2
-    assert "Nakajima Ryou" in desc_2
-    assert "Associated Names" not in desc_2
+    if not (desc_2 is not None): raise AssertionError("assertion failed at line 400")
+    if not ("Demon God" in desc_2): raise AssertionError("assertion failed at line 401")
+    if not ("Nakajima Ryou" in desc_2): raise AssertionError("assertion failed at line 402")
+    if not ("Associated Names" not in desc_2): raise AssertionError("assertion failed at line 403")
     print("  ✓ Edge case 2 passed: inline <b>Description</b><br/> correctly parsed without picking up Associated Names")
 
     # Test edge case 3: Nested <p><span><b>Synopsis</b></span><br/>...
@@ -413,9 +413,9 @@ def run_e2e_test():
     </article>
     """
     desc_3 = JNovelsProvider.parse_description_from_soup(BeautifulSoup(sample_edge_3, "html.parser"))
-    assert desc_3 is not None
-    assert "A college student spends an evening out" in desc_3
-    assert "Associated Titles" not in desc_3
+    if not (desc_3 is not None): raise AssertionError("assertion failed at line 416")
+    if not ("A college student spends an evening out" in desc_3): raise AssertionError("assertion failed at line 417")
+    if not ("Associated Titles" not in desc_3): raise AssertionError("assertion failed at line 418")
     print("  ✓ Edge case 3 passed: deeply nested span/b Synopsis heading correctly parsed")
 
     # Edge Case 4: Post with no synopsis but user comments (e.g. The Devil is a Part-Timer) -> Must NOT pull comments
@@ -439,7 +439,7 @@ def run_e2e_test():
     </article>
     """
     desc_4 = JNovelsProvider.parse_description_from_soup(BeautifulSoup(sample_edge_4, "html.parser"))
-    assert desc_4 is None, f"Expected None for post with no description, but got: {desc_4}"
+    if not (desc_4 is None): raise AssertionError(f"Expected None for post with no description, but got: {desc_4}")
     print("  ✓ Edge case 4 passed: pages without description strictly ignore comments and return None")
 
     # Edge Case 5: Post with expander div synopsis + comments (e.g. The Disabled Tyrant's Pet Fish)
@@ -466,20 +466,20 @@ def run_e2e_test():
     </article>
     """
     desc_5 = JNovelsProvider.parse_description_from_soup(BeautifulSoup(sample_edge_5, "html.parser"))
-    assert desc_5 is not None
-    assert "When Li Yu falls asleep" in desc_5
-    assert not desc_5.startswith("\n")
-    assert "Pretty sure vol 2" not in desc_5
-    assert "Associated Names" not in desc_5
+    if not (desc_5 is not None): raise AssertionError("assertion failed at line 469")
+    if not ("When Li Yu falls asleep" in desc_5): raise AssertionError("assertion failed at line 470")
+    if not (not desc_5.startswith("\n")): raise AssertionError("assertion failed at line 471")
+    if not ("Pretty sure vol 2" not in desc_5): raise AssertionError("assertion failed at line 472")
+    if not ("Associated Names" not in desc_5): raise AssertionError("assertion failed at line 473")
     print("  ✓ Edge case 5 passed: expander div synopsis cleanly extracted without comments or leading newlines")
 
     # STEP 9B: Test NovelMetadataProvider (Kitsu / AniList query and title cleaning)
     from app.providers.metadata import NovelMetadataProvider
-    assert NovelMetadataProvider.clean_search_title("The Devil is a Part-Timer all volumes EPUB") == "The Devil is a Part-Timer"
-    assert NovelMetadataProvider.clean_search_title("DanMachi Volume 19 Epub") == "DanMachi"
-    assert NovelMetadataProvider.clean_search_title("Overlord Volume 16") == "Overlord"
-    assert NovelMetadataProvider.clean_search_title("Solo Leveling Volume 1 Epub") == "Solo Leveling"
-    assert NovelMetadataProvider.clean_novel_title("The Disabled Tyrant's Beloved Pet Fish (Novel)") == "The Disabled Tyrant's Beloved Pet Fish"
+    if not (NovelMetadataProvider.clean_search_title("The Devil is a Part-Timer all volumes EPUB") == "The Devil is a Part-Timer"): raise AssertionError("assertion failed at line 478")
+    if not (NovelMetadataProvider.clean_search_title("DanMachi Volume 19 Epub") == "DanMachi"): raise AssertionError("assertion failed at line 479")
+    if not (NovelMetadataProvider.clean_search_title("Overlord Volume 16") == "Overlord"): raise AssertionError("assertion failed at line 480")
+    if not (NovelMetadataProvider.clean_search_title("Solo Leveling Volume 1 Epub") == "Solo Leveling"): raise AssertionError("assertion failed at line 481")
+    if not (NovelMetadataProvider.clean_novel_title("The Disabled Tyrant's Beloved Pet Fish (Novel)") == "The Disabled Tyrant's Beloved Pet Fish"): raise AssertionError("assertion failed at line 482")
     print("  ✓ NovelMetadataProvider: title normalizer cleanly strips release cruft and prioritizes clean English titles")
 
     # Verify release details update with English series name and title (no light novel suffix)
@@ -494,9 +494,9 @@ def run_e2e_test():
         cur = conn.cursor()
         cur.execute("SELECT series_name, title, description, cover_url FROM releases WHERE id = 6;")
         r6 = cur.fetchone()
-        assert r6["series_name"] == "Is It Wrong to Try to Pick Up Girls in a Dungeon?"
-        assert r6["title"] == "Is It Wrong to Try to Pick Up Girls in a Dungeon?"
-        assert r6["description"] == "Official English synopsis from AniList."
+        if not (r6["series_name"] == "Is It Wrong to Try to Pick Up Girls in a Dungeon?"): raise AssertionError("assertion failed at line 497")
+        if not (r6["title"] == "Is It Wrong to Try to Pick Up Girls in a Dungeon?"): raise AssertionError("assertion failed at line 498")
+        if not (r6["description"] == "Official English synopsis from AniList."): raise AssertionError("assertion failed at line 499")
     print("  ✓ Database correctly stores English series_name, title, and synopsis without (Light Novel) noise")
 
     # STEP 9C: Test Discovery Series Deduplication & (Light Novel) Removal
@@ -521,10 +521,10 @@ def run_e2e_test():
 
     disc_releases = app_db.get_discovery_releases()
     kubishime_cards = [d for d in disc_releases if "strangulation" in (d.get("series_name") or "").lower()]
-    assert len(kubishime_cards) == 1, f"Expected exactly 1 deduplicated card for Kubishime, but got {len(kubishime_cards)}"
-    assert "(light novel)" not in kubishime_cards[0]["series_name"].lower()
-    assert "(light novel)" not in kubishime_cards[0]["title"].lower()
-    assert kubishime_cards[0]["series_name"] == "Strangulation: Kubishime Romanticist"
+    if not (len(kubishime_cards) == 1): raise AssertionError(f"Expected exactly 1 deduplicated card for Kubishime, but got {len(kubishime_cards)}")
+    if not ("(light novel)" not in kubishime_cards[0]["series_name"].lower()): raise AssertionError("assertion failed at line 525")
+    if not ("(light novel)" not in kubishime_cards[0]["title"].lower()): raise AssertionError("assertion failed at line 526")
+    if not (kubishime_cards[0]["series_name"] == "Strangulation: Kubishime Romanticist"): raise AssertionError("assertion failed at line 527")
     print("  ✓ Discovery deduplication passed: Duplicate series merged and (Light Novel) tags removed")
 
     # Verify tracking carries over description and cover
@@ -533,9 +533,9 @@ def run_e2e_test():
         cur = conn.cursor()
         cur.execute("SELECT description, cover_url FROM series_tracking WHERE name = 'Is It Wrong to Try to Pick Up Girls in a Dungeon?';")
         st = cur.fetchone()
-        assert st is not None
-        assert st["description"] == "Official English synopsis from AniList."
-        assert st["cover_url"] == "https://s4.anilist.co/danmachi-large.jpg"
+        if not (st is not None): raise AssertionError("assertion failed at line 536")
+        if not (st["description"] == "Official English synopsis from AniList."): raise AssertionError("assertion failed at line 537")
+        if not (st["cover_url"] == "https://s4.anilist.co/danmachi-large.jpg"): raise AssertionError("assertion failed at line 538")
     print("  ✓ track_discovered_series carries over metadata description and cover into series_tracking")
 
     # Verify fallback integration when post has no synopsis
@@ -549,7 +549,7 @@ def run_e2e_test():
     """
     # Mock soup parser without network
     soup_empty = BeautifulSoup(sample_empty_post, "html.parser")
-    assert JNovelsProvider.parse_description_from_soup(soup_empty) is None
+    if not (JNovelsProvider.parse_description_from_soup(soup_empty) is None): raise AssertionError("assertion failed at line 552")
     print("  ✓ Empty post returns None from soup parser, ready for external metadata fallback")
 
     app_db.update_series_details(
@@ -560,7 +560,7 @@ def run_e2e_test():
     )
     all_s = app_db.get_all_series()
     s_danmachi = [s for s in all_s if s["id"] == 1][0]
-    assert s_danmachi["description"] == "Bell Cranel is a solo adventurer in Orario."
+    if not (s_danmachi["description"] == "Bell Cranel is a solo adventurer in Orario."): raise AssertionError("assertion failed at line 563")
     print("  ✓ Successfully verified series_tracking description persistence")
 
     print("\n" + "=" * 60)
@@ -568,27 +568,27 @@ def run_e2e_test():
     print("=" * 60)
     # Test setting retrieval for backfill_max_pages
     app_db.set_setting("backfill_max_pages", "45")
-    assert app_db.get_setting("backfill_max_pages") == "45"
+    if not (app_db.get_setting("backfill_max_pages") == "45"): raise AssertionError("assertion failed at line 571")
     print("  ✓ backfill_max_pages setting successfully saved and retrieved")
 
     # Test clear_all_descriptions
     cleared_desc_count = app_db.clear_all_descriptions()
-    assert cleared_desc_count >= 1
+    if not (cleared_desc_count >= 1): raise AssertionError("assertion failed at line 576")
     with app_db.get_connection() as conn:
         cur = conn.cursor()
         cur.execute("SELECT count(*) FROM releases WHERE description IS NOT NULL AND description != '';")
-        assert cur.fetchone()[0] == 0
+        if not (cur.fetchone()[0] == 0): raise AssertionError("assertion failed at line 580")
         cur.execute("SELECT count(*) FROM series_tracking WHERE description != '';")
-        assert cur.fetchone()[0] == 0
+        if not (cur.fetchone()[0] == 0): raise AssertionError("assertion failed at line 582")
     print(f"  ✓ clear_all_descriptions successfully cleared descriptions across {cleared_desc_count} records")
 
     # Test clear_discovered_series
     initial_requests = len(app_db.get_pending_requests())
     cleared_disc = app_db.clear_discovered_series()
-    assert cleared_disc >= 1
+    if not (cleared_disc >= 1): raise AssertionError("assertion failed at line 588")
     # Ensure active wishlist requests were NOT affected
-    assert len(app_db.get_pending_requests()) == initial_requests
-    assert len(app_db.get_discovery_releases()) == 0
+    if not (len(app_db.get_pending_requests()) == initial_requests): raise AssertionError("assertion failed at line 590")
+    if not (len(app_db.get_discovery_releases()) == 0): raise AssertionError("assertion failed at line 591")
     print(f"  ✓ clear_discovered_series successfully purged {cleared_disc} unreviewed discovery items without affecting requests")
 
     # Test CoverCache clear_cache
@@ -599,10 +599,10 @@ def run_e2e_test():
     dummy_file = os.path.join(c_cache.covers_dir, "test_cover.jpg")
     with open(dummy_file, "wb") as f:
         f.write(b"dummy image data")
-    assert os.path.isfile(dummy_file)
+    if not (os.path.isfile(dummy_file)): raise AssertionError("assertion failed at line 602")
     removed_files = c_cache.clear_cache()
-    assert removed_files == 1
-    assert not os.path.exists(dummy_file)
+    if not (removed_files == 1): raise AssertionError("assertion failed at line 604")
+    if not (not os.path.exists(dummy_file)): raise AssertionError("assertion failed at line 605")
     print(f"  ✓ CoverCache.clear_cache successfully purged {removed_files} cached image file")
 
     print("\n" + "=" * 60)
@@ -611,13 +611,13 @@ def run_e2e_test():
     # 1. Release counts and pagination
     tot_releases = app_db.count_releases()
     status_counts = app_db.get_release_status_counts()
-    assert tot_releases >= 1
-    assert "ALL" in status_counts and "REQUESTED" in status_counts
+    if not (tot_releases >= 1): raise AssertionError("assertion failed at line 614")
+    if not ("ALL" in status_counts and "REQUESTED" in status_counts): raise AssertionError("assertion failed at line 615")
     page1 = app_db.get_releases(limit=2, offset=0)
     page2 = app_db.get_releases(limit=2, offset=2)
-    assert len(page1) <= 2
+    if not (len(page1) <= 2): raise AssertionError("assertion failed at line 618")
     if tot_releases > 2:
-        assert page1[0]["id"] != page2[0]["id"]
+        if not (page1[0]["id"] != page2[0]["id"]): raise AssertionError("assertion failed at line 620")
     print(f"  ✓ Release pagination passed (Total: {tot_releases}, Page 1: {len(page1)}, Page 2: {len(page2)})")
 
     # 2. Discovery pagination & counts
@@ -637,19 +637,19 @@ def run_e2e_test():
         "status": "NEW"
     })
     disc_count = app_db.count_discovery_releases()
-    assert disc_count >= 2
+    if not (disc_count >= 2): raise AssertionError("assertion failed at line 640")
     d_page1 = app_db.get_discovery_releases(limit=1, offset=0)
     d_page2 = app_db.get_discovery_releases(limit=1, offset=1)
-    assert len(d_page1) == 1
-    assert len(d_page2) == 1
-    assert d_page1[0]["id"] != d_page2[0]["id"]
+    if not (len(d_page1) == 1): raise AssertionError("assertion failed at line 643")
+    if not (len(d_page2) == 1): raise AssertionError("assertion failed at line 644")
+    if not (d_page1[0]["id"] != d_page2[0]["id"]): raise AssertionError("assertion failed at line 645")
     print(f"  ✓ Discovery pagination passed (Total: {disc_count}, Offset 0: '{d_page1[0]['series_name']}', Offset 1: '{d_page2[0]['series_name']}')")
 
     # 3. Dynamic feed interval updates
     app_db.update_all_feed_intervals(42)
     feeds = app_db.get_all_feeds()
     for f in feeds:
-        assert f["check_interval_minutes"] == 42
+        if not (f["check_interval_minutes"] == 42): raise AssertionError("assertion failed at line 652")
     print(f"  ✓ Feed interval dynamic synchronization verified across {len(feeds)} feeds")
 
     # 4. TaskManager reschedule & backfill status
@@ -658,8 +658,8 @@ def run_e2e_test():
     tm.start()
     tm.reschedule_jobs(calibre_minutes=25, feed_minutes=45)
     b_status = tm.get_backfill_status()
-    assert "delay_seconds" in b_status
-    assert "max_pages" in b_status
+    if not ("delay_seconds" in b_status): raise AssertionError("assertion failed at line 661")
+    if not ("max_pages" in b_status): raise AssertionError("assertion failed at line 662")
     tm.stop()
     print("  ✓ TaskManager live job rescheduling & backfill status metadata verified")
 
@@ -667,12 +667,12 @@ def run_e2e_test():
     from app.notifier.webhook import NotificationService
     ns = NotificationService()
     empty_res = ns.test_webhook()
-    assert empty_res["status"] == "error"
+    if not (empty_res["status"] == "error"): raise AssertionError("assertion failed at line 670")
     # Test invalid connection gracefully handled
     invalid_res = ns.test_webhook(discord_url="http://127.0.0.1:59999/nonexistent")
-    assert invalid_res["status"] == "error"
-    assert "discord" in invalid_res["results"]
-    assert invalid_res["results"]["discord"]["success"] is False
+    if not (invalid_res["status"] == "error"): raise AssertionError("assertion failed at line 673")
+    if not ("discord" in invalid_res["results"]): raise AssertionError("assertion failed at line 674")
+    if not (invalid_res["results"]["discord"]["success"] is False): raise AssertionError("assertion failed at line 675")
     print("  ✓ Webhook diagnostics safely reported connection error without crashing")
 
     print("\n" + "=" * 60)
@@ -680,35 +680,35 @@ def run_e2e_test():
     print("=" * 60)
     # 1. Bundle parsing
     bundle1 = extract_series_and_volume("Overlord Vol 1-14 Epub")
-    assert bundle1["is_bundle"] is True
-    assert bundle1["series_name"] == "Overlord"
-    assert len(bundle1["volumes"]) == 14
-    assert bundle1["volumes"][0] == 1.0 and bundle1["volumes"][-1] == 14.0
+    if not (bundle1["is_bundle"] is True): raise AssertionError("assertion failed at line 683")
+    if not (bundle1["series_name"] == "Overlord"): raise AssertionError("assertion failed at line 684")
+    if not (len(bundle1["volumes"]) == 14): raise AssertionError("assertion failed at line 685")
+    if not (bundle1["volumes"][0] == 1.0 and bundle1["volumes"][-1] == 14.0): raise AssertionError("assertion failed at line 686")
     print(f"  ✓ Bundle range parsed: '{bundle1['clean_title']}' -> {len(bundle1['volumes'])} volumes")
 
     bundle2 = extract_series_and_volume("DanMachi Volumes 18-20 Epub")
-    assert bundle2["is_bundle"] is True
-    assert bundle2["series_name"] == "DanMachi"
-    assert bundle2["volumes"] == [18.0, 19.0, 20.0]
+    if not (bundle2["is_bundle"] is True): raise AssertionError("assertion failed at line 690")
+    if not (bundle2["series_name"] == "DanMachi"): raise AssertionError("assertion failed at line 691")
+    if not (bundle2["volumes"] == [18.0, 19.0, 20.0]): raise AssertionError("assertion failed at line 692")
 
     bundle3 = extract_series_and_volume("Monogatari Box Set Vol 1, 2, 3 Epub")
-    assert bundle3["is_bundle"] is True
-    assert bundle3["volumes"] == [1.0, 2.0, 3.0]
+    if not (bundle3["is_bundle"] is True): raise AssertionError("assertion failed at line 695")
+    if not (bundle3["volumes"] == [1.0, 2.0, 3.0]): raise AssertionError("assertion failed at line 696")
     print("  ✓ Comma-separated volume list bundle parsed")
 
     # 2. Bundle matching against Calibre
     # In Step 2, Overlord has 15 volumes in Calibre. Overlord 1-14 is fully owned:
     m_overlord = matcher.check_release(bundle1, auto_request_monitored=True)
-    assert m_overlord["status"] == "IN_CALIBRE"
-    assert len(m_overlord["missing_volumes"]) == 0
+    if not (m_overlord["status"] == "IN_CALIBRE"): raise AssertionError("assertion failed at line 702")
+    if not (len(m_overlord["missing_volumes"]) == 0): raise AssertionError("assertion failed at line 703")
     print("  ✓ Overlord Vol 1-14 bundle correctly evaluated as IN_CALIBRE (all owned)")
 
     # DanMachi has 18 volumes owned. Vol 18-20 should be REQUESTED with missing: [19.0, 20.0]
     # Note: earlier in test, book 19 was added in step 5, so DanMachi has 19 books!
     # Therefore Vol 18-20 has missing: [20.0]
     m_danmachi = matcher.check_release(bundle2, auto_request_monitored=True)
-    assert m_danmachi["status"] == "REQUESTED"
-    assert 20.0 in m_danmachi["missing_volumes"]
+    if not (m_danmachi["status"] == "REQUESTED"): raise AssertionError("assertion failed at line 710")
+    if not (20.0 in m_danmachi["missing_volumes"]): raise AssertionError("assertion failed at line 711")
     print(f"  ✓ DanMachi Vol 18-20 bundle evaluated as REQUESTED (missing: {m_danmachi['missing_volumes']})")
 
     # 3. Store bundles in DB
@@ -735,12 +735,12 @@ def run_e2e_test():
 
     # 4. Grouped by Series
     grouped = app_db.get_releases_grouped_by_series()
-    assert len(grouped) >= 2
+    if not (len(grouped) >= 2): raise AssertionError("assertion failed at line 738")
     overlord_group = next((g for g in grouped if g["series_name"].lower() == "overlord"), None)
-    assert overlord_group is not None
-    assert overlord_group["in_calibre"] is True
-    assert 1.0 in overlord_group["all_volumes"]
-    assert 14.0 in overlord_group["all_volumes"]
+    if not (overlord_group is not None): raise AssertionError("assertion failed at line 740")
+    if not (overlord_group["in_calibre"] is True): raise AssertionError("assertion failed at line 741")
+    if not (1.0 in overlord_group["all_volumes"]): raise AssertionError("assertion failed at line 742")
+    if not (14.0 in overlord_group["all_volumes"]): raise AssertionError("assertion failed at line 743")
     print(f"  ✓ Group by Series verified: {len(grouped)} canonical series groups created")
     print(f"    - Overlord Group: {overlord_group['releases_count']} releases, {len(overlord_group['all_volumes'])} detected volumes")
 
@@ -750,13 +750,13 @@ def run_e2e_test():
     from app.parser import is_pdf_release, should_merge_series
 
     # 1. Test PDF detection
-    assert is_pdf_release("DOWNLOAD AVATAR KORRA TURF WARS PART 1 PDF") is True
-    assert is_pdf_release("Tenkyou no Alderamin (Alderamin On The Sky) ALL VOLUMES PDF") is True
-    assert is_pdf_release("Download 86 All Volumes Pdf") is True
-    assert is_pdf_release("Download 86-Eighty Six Volume 1 Pdf") is True
-    assert is_pdf_release("Some Novel", link="https://example.com/book.pdf") is True
-    assert is_pdf_release("Her Royal Highness Seems to Be Angry Volume 4 Epub") is False
-    assert is_pdf_release("The Tale of a Little Alchemist Blessed by the Spirits Volume 4 Epub") is False
+    if not (is_pdf_release("DOWNLOAD AVATAR KORRA TURF WARS PART 1 PDF") is True): raise AssertionError("assertion failed at line 753")
+    if not (is_pdf_release("Tenkyou no Alderamin (Alderamin On The Sky) ALL VOLUMES PDF") is True): raise AssertionError("assertion failed at line 754")
+    if not (is_pdf_release("Download 86 All Volumes Pdf") is True): raise AssertionError("assertion failed at line 755")
+    if not (is_pdf_release("Download 86-Eighty Six Volume 1 Pdf") is True): raise AssertionError("assertion failed at line 756")
+    if not (is_pdf_release("Some Novel", link="https://example.com/book.pdf") is True): raise AssertionError("assertion failed at line 757")
+    if not (is_pdf_release("Her Royal Highness Seems to Be Angry Volume 4 Epub") is False): raise AssertionError("assertion failed at line 758")
+    if not (is_pdf_release("The Tale of a Little Alchemist Blessed by the Spirits Volume 4 Epub") is False): raise AssertionError("assertion failed at line 759")
     print("  ✓ is_pdf_release accurately flags PDF titles and URLs while allowing EPUBs")
 
     # 2. Ingestion rejection
@@ -768,7 +768,7 @@ def run_e2e_test():
         "link": "https://jnovels.com/86-pdf/",
         "status": "NEW"
     })
-    assert is_new is False and rel_id == -1
+    if not (is_new is False and rel_id == -1): raise AssertionError("assertion failed at line 771")
     print("  ✓ upsert_release actively blocked PDF release from database insertion")
 
     # 3. Purging legacy PDF releases
@@ -778,22 +778,22 @@ def run_e2e_test():
         conn.commit()
 
     purged_count = app_db.purge_pdf_releases()
-    assert purged_count >= 2
+    if not (purged_count >= 2): raise AssertionError("assertion failed at line 781")
     with app_db.get_connection() as conn:
         cur = conn.cursor()
         cur.execute("SELECT count(*) FROM releases WHERE lower(title) LIKE '%pdf%' OR lower(link) LIKE '%.pdf%';")
         remaining_pdfs = cur.fetchone()[0]
-        assert remaining_pdfs == 0
+        if not (remaining_pdfs == 0): raise AssertionError("assertion failed at line 786")
     print(f"  ✓ purge_pdf_releases successfully purged {purged_count} legacy PDF records")
 
     # 4. Volume 4 parsing & Discovery exclusion
     p_vol4 = extract_series_and_volume("Her Royal Highness Seems to Be Angry Volume 4 Epub")
-    assert p_vol4["volume"] == 4.0
-    assert p_vol4["series_name"] == "Her Royal Highness Seems to Be Angry"
+    if not (p_vol4["volume"] == 4.0): raise AssertionError("assertion failed at line 791")
+    if not (p_vol4["series_name"] == "Her Royal Highness Seems to Be Angry"): raise AssertionError("assertion failed at line 792")
     
     p_vol4_2 = extract_series_and_volume("The Tale of a Little Alchemist Blessed by the Spirits Volume 4 Epub")
-    assert p_vol4_2["volume"] == 4.0
-    assert p_vol4_2["series_name"] == "The Tale of a Little Alchemist Blessed by the Spirits"
+    if not (p_vol4_2["volume"] == 4.0): raise AssertionError("assertion failed at line 795")
+    if not (p_vol4_2["series_name"] == "The Tale of a Little Alchemist Blessed by the Spirits"): raise AssertionError("assertion failed at line 796")
     print("  ✓ Volume 4 correctly extracted as 4.0 (never parsed as standalone None)")
 
     # Simulate legacy row where volume was mistakenly NULL
@@ -811,18 +811,18 @@ def run_e2e_test():
         cur = conn.cursor()
         cur.execute("SELECT volume FROM releases WHERE guid = 'vol4_legacy';")
         updated_vol = cur.fetchone()["volume"]
-        assert updated_vol == 4.0
+        if not (updated_vol == 4.0): raise AssertionError("assertion failed at line 814")
     print("  ✓ deduplicate_and_clean_discovery re-evaluated title and corrected volume to 4.0")
 
     # Check that Volume 4 does not leak into discovery
     disc_items = app_db.get_discovery_releases(limit=100)
-    assert not any(d.get("guid") == "vol4_legacy" for d in disc_items)
+    if not (not any(d.get("guid") == "vol4_legacy" for d in disc_items)): raise AssertionError("assertion failed at line 819")
     print("  ✓ Discovery page strictly excludes non-Volume 1 releases")
 
     # 5. Advanced series deduplication & alias merging
-    assert should_merge_series("86", "86-Eighty Six") is True
-    assert should_merge_series("Tenkyou no Alderamin", "Tenkyou no Alderamin (Alderamin On The Sky)") is True
-    assert should_merge_series("Mushoku Tensei", "Overlord") is False
+    if not (should_merge_series("86", "86-Eighty Six") is True): raise AssertionError("assertion failed at line 823")
+    if not (should_merge_series("Tenkyou no Alderamin", "Tenkyou no Alderamin (Alderamin On The Sky)") is True): raise AssertionError("assertion failed at line 824")
+    if not (should_merge_series("Mushoku Tensei", "Overlord") is False): raise AssertionError("assertion failed at line 825")
 
     # Insert two alias discovery records
     app_db.upsert_release({
@@ -850,15 +850,15 @@ def run_e2e_test():
         cur = conn.cursor()
         cur.execute("SELECT * FROM releases WHERE status = 'NEW' AND (series_name = '86' OR series_name = '86-Eighty Six');")
         remaining_86 = cur.fetchall()
-        assert len(remaining_86) == 1
-        assert remaining_86[0]["description"] == "Rich description from AniList"
-        assert remaining_86[0]["cover_url"] == "https://example.com/86_cover.jpg"
+        if not (len(remaining_86) == 1): raise AssertionError("assertion failed at line 853")
+        if not (remaining_86[0]["description"] == "Rich description from AniList"): raise AssertionError("assertion failed at line 854")
+        if not (remaining_86[0]["cover_url"] == "https://example.com/86_cover.jpg"): raise AssertionError("assertion failed at line 855")
     print("  ✓ Series alias deduplication merged '86' and '86-Eighty Six' into a single rich discovery card")
 
     # 6. Part keyword parsing
     p_part = extract_series_and_volume("DOWNLOAD AVATAR KORRA TURF WARS PART 1")
-    assert p_part["volume"] == 1.0
-    assert p_part["series_name"] == "AVATAR KORRA TURF WARS"
+    if not (p_part["volume"] == 1.0): raise AssertionError("assertion failed at line 860")
+    if not (p_part["series_name"] == "AVATAR KORRA TURF WARS"): raise AssertionError("assertion failed at line 861")
     print("  ✓ 'Part 1' parsed cleanly without contaminating series name")
 
     print("\n" + "=" * 60)
@@ -867,12 +867,12 @@ def run_e2e_test():
     # 1. Unnumbered release on J-Novels for a series owned in Calibre (e.g. Overlord)
     # Overlord is in Calibre with Vol 1.0. J-Novels posts "Overlord Epub" without volume number.
     p_unnum_overlord = extract_series_and_volume("Overlord Epub")
-    assert p_unnum_overlord["volume"] is None
-    assert p_unnum_overlord["series_name"] == "Overlord"
+    if not (p_unnum_overlord["volume"] is None): raise AssertionError("assertion failed at line 870")
+    if not (p_unnum_overlord["series_name"] == "Overlord"): raise AssertionError("assertion failed at line 871")
     m_unnum_overlord = matcher.check_release(p_unnum_overlord, auto_request_monitored=True)
-    assert m_unnum_overlord["status"] == "IN_CALIBRE"
-    assert m_unnum_overlord["effective_volume"] == 1.0
-    assert m_unnum_overlord["matched_book_id"] is not None
+    if not (m_unnum_overlord["status"] == "IN_CALIBRE"): raise AssertionError("assertion failed at line 873")
+    if not (m_unnum_overlord["effective_volume"] == 1.0): raise AssertionError("assertion failed at line 874")
+    if not (m_unnum_overlord["matched_book_id"] is not None): raise AssertionError("assertion failed at line 875")
     print(f"  ✓ Unnumbered release '{p_unnum_overlord['clean_title']}' matched Calibre Vol 1 (Book #{m_unnum_overlord['matched_book_id']})")
 
     # 2. Monitored series where Volume 1 is NOT owned in Calibre
@@ -886,11 +886,11 @@ def run_e2e_test():
     tbate_matcher = CalibreMatcher(tbate_series, tbate_books)
 
     p_unnum_tbate = extract_series_and_volume("TBATE Epub")
-    assert p_unnum_tbate["volume"] is None
+    if not (p_unnum_tbate["volume"] is None): raise AssertionError("assertion failed at line 889")
     m_unnum_tbate = tbate_matcher.check_release(p_unnum_tbate, auto_request_monitored=True)
-    assert m_unnum_tbate["status"] == "REQUESTED"
-    assert m_unnum_tbate["effective_volume"] == 1.0
-    assert m_unnum_tbate["missing_volumes"] == [1.0]
+    if not (m_unnum_tbate["status"] == "REQUESTED"): raise AssertionError("assertion failed at line 891")
+    if not (m_unnum_tbate["effective_volume"] == 1.0): raise AssertionError("assertion failed at line 892")
+    if not (m_unnum_tbate["missing_volumes"] == [1.0]): raise AssertionError("assertion failed at line 893")
     print("  ✓ Unnumbered release for monitored series with missing Vol 1 correctly evaluated as REQUESTED")
 
     # 3. Auto-resolving pending requests when Volume 1 is later added to Calibre
@@ -902,13 +902,13 @@ def run_e2e_test():
         "volume": 1.0,
         "status": "REQUESTED"
     })
-    assert any(r["guid"] == "tbate_v1_req" for r in app_db.get_pending_requests())
+    if not (any(r["guid"] == "tbate_v1_req" for r in app_db.get_pending_requests())): raise AssertionError("assertion failed at line 905")
 
     # Now add TBATE Vol 1 to Calibre scanner mock
     tbate_books.append({"book_id": 991, "title": "TBATE Vol 1", "series_id": 99, "series_name": "TBATE", "series_index": 1.0})
     tbate_matcher_updated = CalibreMatcher(tbate_series, tbate_books)
     resolved = tbate_matcher_updated.resolve_pending_requests(app_db.get_pending_requests())
-    assert any(res["request"]["guid"] == "tbate_v1_req" for res in resolved)
+    if not (any(res["request"]["guid"] == "tbate_v1_req" for res in resolved)): raise AssertionError("assertion failed at line 911")
     print("  ✓ Pending unnumbered Vol 1 request auto-resolved once added to Calibre")
 
     # 4. Strict intra-series fuzzy guard: DanMachi Vol 19 must NOT fuzzy match DanMachi Vol 1
@@ -917,8 +917,8 @@ def run_e2e_test():
     danmachi_books_only_v1 = [{"book_id": 1, "title": "DanMachi, Vol. 1", "series_id": 1, "series_name": "DanMachi", "series_index": 1.0}]
     dm_matcher = CalibreMatcher(danmachi_series_only_v1, danmachi_books_only_v1)
     dm_res = dm_matcher.check_release(p_dm19, auto_request_monitored=True)
-    assert dm_res["status"] == "REQUESTED"
-    assert dm_res["matched_book_id"] is None
+    if not (dm_res["status"] == "REQUESTED"): raise AssertionError("assertion failed at line 920")
+    if not (dm_res["matched_book_id"] is None): raise AssertionError("assertion failed at line 921")
     print("  ✓ Strict volume guard verified: DanMachi Vol 19 does not falsely match DanMachi Vol 1")
 
     print("\n" + "=" * 60)
@@ -949,24 +949,24 @@ def run_e2e_test():
         "status": "REQUESTED"
     })
 
-    assert should_merge_series("The Neighboring Aarya-San Who Sometimes Acts Affectionate and Murmuring in Russian", "Alya Sometimes Hides Her Feelings in Russian")
-    assert get_canonical_series_name("The Neighboring Aarya-San Who Sometimes Acts Affectionate and Murmuring in Russian") == "Alya Sometimes Hides Her Feelings in Russian"
+    if not (should_merge_series("The Neighboring Aarya-San Who Sometimes Acts Affectionate and Murmuring in Russian", "Alya Sometimes Hides Her Feelings in Russian")): raise AssertionError("assertion failed at line 952")
+    if not (get_canonical_series_name("The Neighboring Aarya-San Who Sometimes Acts Affectionate and Murmuring in Russian") == "Alya Sometimes Hides Her Feelings in Russian"): raise AssertionError("assertion failed at line 953")
 
     groups = app_db.get_releases_grouped_by_series()
     alya_groups = [g for g in groups if "alya" in g["series_name"].lower() or "aarya" in g["series_name"].lower()]
-    assert len(alya_groups) == 1
-    assert alya_groups[0]["series_name"] == "Alya Sometimes Hides Her Feelings in Russian"
-    assert 9.0 in alya_groups[0]["all_volumes"]
+    if not (len(alya_groups) == 1): raise AssertionError("assertion failed at line 957")
+    if not (alya_groups[0]["series_name"] == "Alya Sometimes Hides Her Feelings in Russian"): raise AssertionError("assertion failed at line 958")
+    if not (9.0 in alya_groups[0]["all_volumes"]): raise AssertionError("assertion failed at line 959")
     print(f"  ✓ Alya-san alias & hub consolidation verified: unified under '{alya_groups[0]['series_name']}' with {len(alya_groups[0]['releases'])} releases")
 
     # 2. By the Grace of the Gods: Volume 1 without volume moniker
     gods_hub = "https://jnovels.com/by-the-grace-of-the-gods-light-novel-epub/"
     p_gods_v1 = extract_series_and_volume("By the Grace of the Gods Epub")
-    assert p_gods_v1["volume"] is None
-    assert p_gods_v1["series_name"] == "By the Grace of the Gods"
+    if not (p_gods_v1["volume"] is None): raise AssertionError("assertion failed at line 965")
+    if not (p_gods_v1["series_name"] == "By the Grace of the Gods"): raise AssertionError("assertion failed at line 966")
 
     p_gods_v18 = extract_series_and_volume("By the Grace of the Gods Volume 18 Epub")
-    assert p_gods_v18["volume"] == 18.0
+    if not (p_gods_v18["volume"] == 18.0): raise AssertionError("assertion failed at line 969")
 
     app_db.upsert_release({
         "guid": "gods_v1_guid",
@@ -989,8 +989,8 @@ def run_e2e_test():
 
     groups = app_db.get_releases_grouped_by_series()
     gods_group = next(g for g in groups if "by the grace of the gods" in g["series_name"].lower())
-    assert 1.0 in gods_group["all_volumes"], "Unnumbered release must contribute Volume 1.0 to series volume coverage"
-    assert 18.0 in gods_group["all_volumes"]
+    if not (1.0 in gods_group["all_volumes"]): raise AssertionError("Unnumbered release must contribute Volume 1.0 to series volume coverage")
+    if not (18.0 in gods_group["all_volumes"]): raise AssertionError("assertion failed at line 993")
     print(f"  ✓ By the Grace of the Gods Volume 1 unnumbered release correctly tracked in series coverage (Volumes: {gods_group['all_volumes']})")
 
     # 3. Cheat Ability: Official translations only policy
@@ -1023,21 +1023,21 @@ def run_e2e_test():
         "volume": 13.0,
         "is_official": 0
     })
-    assert eval_cheat_unofficial["status"] == "IGNORED"
+    if not (eval_cheat_unofficial["status"] == "IGNORED"): raise AssertionError("assertion failed at line 1026")
 
     # Database clean up flags vol > 8 as unofficial and ignored
     app_db.deduplicate_and_clean_discovery()
 
     groups = app_db.get_releases_grouped_by_series()
     cheat_group = next(g for g in groups if "cheat" in g["series_name"].lower())
-    assert 8.0 in cheat_group["all_volumes"], "Official volume 8 must be present"
-    assert 13.0 not in cheat_group["all_volumes"], "Unofficial volume 13 must NOT be tracked when track_official_only is enabled"
+    if not (8.0 in cheat_group["all_volumes"]): raise AssertionError("Official volume 8 must be present")
+    if not (13.0 not in cheat_group["all_volumes"]): raise AssertionError("Unofficial volume 13 must NOT be tracked when track_official_only is enabled")
     print(f"  ✓ Official Translations Only verified: Vol 8 tracked, Vol 13 excluded (Active volumes: {cheat_group['all_volumes']})")
 
     # 4. Infinite Dendrogram: Plural 'Volumes 1' pattern and hub parsing
     p_dendro_v1 = extract_series_and_volume("Infinite Dendrogram Volumes 1 Epub")
-    assert p_dendro_v1["volume"] == 1.0
-    assert p_dendro_v1["series_name"] == "Infinite Dendrogram", f"Expected 'Infinite Dendrogram', got '{p_dendro_v1['series_name']}'"
+    if not (p_dendro_v1["volume"] == 1.0): raise AssertionError("assertion failed at line 1039")
+    if not (p_dendro_v1["series_name"] == "Infinite Dendrogram"): raise AssertionError(f"Expected 'Infinite Dendrogram', got '{p_dendro_v1['series_name']}'")
     print("  ✓ Plural keyword regex verified: 'Infinite Dendrogram Volumes 1 Epub' parsed cleanly without dangling 'Volumes'")
 
     mock_dendro_hub_html = """
@@ -1056,9 +1056,9 @@ def run_e2e_test():
     """
     mock_soup = BeautifulSoup(mock_dendro_hub_html, "html.parser")
     dendro_hub_vols = JNovelsProvider.parse_hub_volumes(mock_soup, "https://jnovels.com/dendro-hub/", "Infinite Dendrogram")
-    assert len(dendro_hub_vols) == 7
+    if not (len(dendro_hub_vols) == 7): raise AssertionError("assertion failed at line 1059")
     extracted_nums = [v["volume"] for v in dendro_hub_vols]
-    assert extracted_nums == [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]
+    if not (extracted_nums == [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]): raise AssertionError("assertion failed at line 1061")
     print(f"  ✓ Hub parsing unpacked missing Volumes 1–6 and Volume 7 cleanly ({extracted_nums})")
 
     print("\n" + "=" * 60)
@@ -1067,36 +1067,36 @@ def run_e2e_test():
     # 1. Discovery sorting: A-Z and Z-A
     disc_az = app_db.get_discovery_releases(sort="title_asc")
     disc_za = app_db.get_discovery_releases(sort="title_desc")
-    assert len(disc_az) >= 2
-    assert disc_az[0]["title"].lower() <= disc_az[-1]["title"].lower()
-    assert disc_za[0]["title"].lower() >= disc_za[-1]["title"].lower()
+    if not (len(disc_az) >= 2): raise AssertionError("assertion failed at line 1070")
+    if not (disc_az[0]["title"].lower() <= disc_az[-1]["title"].lower()): raise AssertionError("assertion failed at line 1071")
+    if not (disc_za[0]["title"].lower() >= disc_za[-1]["title"].lower()): raise AssertionError("assertion failed at line 1072")
     print("  ✓ Discovery sorting verified: Alphabetical A to Z and Z to A")
 
     # 2. Discovery search
     search_q = disc_az[0]["title"][:5]
     searched_disc = app_db.get_discovery_releases(search=search_q)
-    assert len(searched_disc) >= 1
-    assert any(search_q.lower() in d["title"].lower() for d in searched_disc)
+    if not (len(searched_disc) >= 1): raise AssertionError("assertion failed at line 1078")
+    if not (any(search_q.lower() in d["title"].lower() for d in searched_disc)): raise AssertionError("assertion failed at line 1079")
     print(f"  ✓ Discovery search query verified for '{search_q}'")
 
     # 3. Grouped series sorting: name_asc and name_desc
     grp_az = app_db.get_releases_grouped_by_series(sort="name_asc")
     grp_za = app_db.get_releases_grouped_by_series(sort="name_desc")
-    assert len(grp_az) >= 2
-    assert grp_az[0]["series_name"].lower() <= grp_az[-1]["series_name"].lower()
-    assert grp_za[0]["series_name"].lower() >= grp_za[-1]["series_name"].lower()
+    if not (len(grp_az) >= 2): raise AssertionError("assertion failed at line 1085")
+    if not (grp_az[0]["series_name"].lower() <= grp_az[-1]["series_name"].lower()): raise AssertionError("assertion failed at line 1086")
+    if not (grp_za[0]["series_name"].lower() >= grp_za[-1]["series_name"].lower()): raise AssertionError("assertion failed at line 1087")
     print("  ✓ Grouped series sorting verified: Series Name A to Z and Z to A")
 
     # 4. Grouped series sorting: wanted_first
     grp_wanted = app_db.get_releases_grouped_by_series(sort="wanted_first")
     if any(g["has_wanted"] for g in grp_wanted):
-        assert grp_wanted[0]["has_wanted"] is True
+        if not (grp_wanted[0]["has_wanted"] is True): raise AssertionError("assertion failed at line 1093")
     print("  ✓ Grouped series sorting verified: Wanted First prioritized")
 
     # 5. Flat releases sorting: title_asc and date_desc
     flat_az = app_db.get_releases(sort="title_asc", limit=10)
-    assert len(flat_az) >= 2
-    assert flat_az[0]["title"].lower() <= flat_az[-1]["title"].lower()
+    if not (len(flat_az) >= 2): raise AssertionError("assertion failed at line 1098")
+    if not (flat_az[0]["title"].lower() <= flat_az[-1]["title"].lower()): raise AssertionError("assertion failed at line 1099")
     print("  ✓ Flat releases sorting verified: Title A to Z")
 
     # 6. Verify partial chunks for lazy loading exist and contain lazy attributes
@@ -1109,47 +1109,47 @@ def run_e2e_test():
         # Series chunk
         tpl_series = jinja_env.get_template("partials/series_card_chunk.html")
         html_series = tpl_series.render({"grouped_series": grp_az[:2]})
-        assert 'class="series-card' in html_series
-        assert 'loading="lazy"' in html_series
-        assert 'decoding="async"' in html_series
-        assert 'cover-placeholder' in html_series
+        if not ('class="series-card' in html_series): raise AssertionError("assertion failed at line 1112")
+        if not ('loading="lazy"' in html_series): raise AssertionError("assertion failed at line 1113")
+        if not ('decoding="async"' in html_series): raise AssertionError("assertion failed at line 1114")
+        if not ('cover-placeholder' in html_series): raise AssertionError("assertion failed at line 1115")
         print("  ✓ Series card chunk partial rendered with lazy loaded artwork and shimmer placeholder")
 
         # Flat chunk
         tpl_flat = jinja_env.get_template("partials/flat_release_row_chunk.html")
         html_flat = tpl_flat.render({"releases": flat_az[:2]})
-        assert 'class="release-row' in html_flat
-        assert 'loading="lazy"' in html_flat
+        if not ('class="release-row' in html_flat): raise AssertionError("assertion failed at line 1121")
+        if not ('loading="lazy"' in html_flat): raise AssertionError("assertion failed at line 1122")
         print("  ✓ Flat release row chunk partial rendered with lazy loaded thumbnail")
 
         # Discovery chunk
         tpl_disc = jinja_env.get_template("partials/discovery_card_chunk.html")
         html_disc = tpl_disc.render({"discovered_releases": disc_az[:2]})
-        assert 'class="discovery-card' in html_disc
-        assert 'loading="lazy"' in html_disc
-        assert 'Track Series' in html_disc
+        if not ('class="discovery-card' in html_disc): raise AssertionError("assertion failed at line 1128")
+        if not ('loading="lazy"' in html_disc): raise AssertionError("assertion failed at line 1129")
+        if not ('Track Series' in html_disc): raise AssertionError("assertion failed at line 1130")
         print("  ✓ Discovery card chunk partial rendered with lazy loaded thumbnail and action buttons")
     except ImportError:
         series_chunk_file = os.path.join(templates_dir, "partials", "series_card_chunk.html")
         with open(series_chunk_file, "r", encoding="utf-8") as f:
             content = f.read()
-            assert 'loading="lazy"' in content
-            assert 'decoding="async"' in content
-            assert 'cover-placeholder' in content
+            if not ('loading="lazy"' in content): raise AssertionError("assertion failed at line 1136")
+            if not ('decoding="async"' in content): raise AssertionError("assertion failed at line 1137")
+            if not ('cover-placeholder' in content): raise AssertionError("assertion failed at line 1138")
         print("  ✓ Series card chunk partial validated with lazy loaded artwork and shimmer placeholder")
 
         flat_chunk_file = os.path.join(templates_dir, "partials", "flat_release_row_chunk.html")
         with open(flat_chunk_file, "r", encoding="utf-8") as f:
             content = f.read()
-            assert 'loading="lazy"' in content
-            assert 'decoding="async"' in content
+            if not ('loading="lazy"' in content): raise AssertionError("assertion failed at line 1144")
+            if not ('decoding="async"' in content): raise AssertionError("assertion failed at line 1145")
         print("  ✓ Flat release row chunk partial validated with lazy loaded thumbnail")
 
         disc_chunk_file = os.path.join(templates_dir, "partials", "discovery_card_chunk.html")
         with open(disc_chunk_file, "r", encoding="utf-8") as f:
             content = f.read()
-            assert 'loading="lazy"' in content
-            assert 'Track Series' in content
+            if not ('loading="lazy"' in content): raise AssertionError("assertion failed at line 1151")
+            if not ('Track Series' in content): raise AssertionError("assertion failed at line 1152")
         print("  ✓ Discovery card chunk partial validated with lazy loaded thumbnail and action buttons")
 
     # ============================================================
@@ -1162,25 +1162,25 @@ def run_e2e_test():
     # 1. Verify TaskManager BackgroundScheduler and cover executor
     from app.scheduler import TaskManager
     tm_bench = TaskManager(app_db, os.path.dirname(calibre_db_file), data_dir=test_dir)
-    assert hasattr(tm_bench, "_cover_executor")
-    assert tm_bench._cover_executor is not None
+    if not (hasattr(tm_bench, "_cover_executor")): raise AssertionError("assertion failed at line 1165")
+    if not (tm_bench._cover_executor is not None): raise AssertionError("assertion failed at line 1166")
     print("  ✓ TaskManager configured with background ThreadPoolExecutor for non-blocking covers")
 
     # 2. Verify JNovels HTML parser syntax and indentation (no UnboundLocalError)
     from app.providers.jnovels import JNovelsProvider
     j_provider = JNovelsProvider(name="Test JNovels", url="https://jnovels.com/?s=epub")
-    assert j_provider.max_pages == 3
+    if not (j_provider.max_pages == 3): raise AssertionError("assertion failed at line 1172")
     # Check that method definition is intact and callable
-    assert callable(getattr(j_provider, "_fetch_via_html"))
+    if not (callable(getattr(j_provider, "_fetch_via_html"))): raise AssertionError("assertion failed at line 1174")
     print("  ✓ JNovelsProvider HTML pagination and DOM parsing indentation verified")
 
     # 3. Verify base.html non-blocking toast and button state transitions
     base_html_file = os.path.join(templates_dir, "base.html")
     with open(base_html_file, "r", encoding="utf-8") as f:
         base_src = f.read()
-        assert "btn-feed-check" in base_src
-        assert "Scanning feeds in background..." in base_src
-        assert "Syncing Calibre library in background..." in base_src
+        if not ("btn-feed-check" in base_src): raise AssertionError("assertion failed at line 1181")
+        if not ("Scanning feeds in background..." in base_src): raise AssertionError("assertion failed at line 1182")
+        if not ("Syncing Calibre library in background..." in base_src): raise AssertionError("assertion failed at line 1183")
     print("  ✓ UI non-blocking background scanning indicators and toasts verified")
 
     tm_bench.stop()

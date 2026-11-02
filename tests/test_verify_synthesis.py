@@ -232,7 +232,7 @@ def run_tests():
             failed += 1
 
     print(f"\nResults: {passed} passed, {failed} failed.")
-    assert failed == 0, f"{failed} tests failed!"
+    if not (failed == 0): raise AssertionError(f"{failed} tests failed!")
 
 if __name__ == "__main__":
     run_tests()

@@ -25,7 +25,7 @@ t1.test_dual_series_titles_and_scanner()
 t1.test_extreme_and_adversarial_inputs()
 t1.test_non_strippable_assertions()
 res1 = t1.recorder.summary()
-assert res1 == 0, f"{res1} omnibus tests failed!"
+if not (res1 == 0): raise AssertionError(f"{res1} omnibus tests failed!")
 
 # Run test 2: test_challenger_m2_it3_adversarial
 print("\n=== Running test_challenger_m2_it3_adversarial ===")
@@ -39,6 +39,6 @@ t3.test_unicode_dashes_and_range_connectors()
 t3.test_calibre_scanner_adversarial_integration()
 t3.test_assertion_survives_optimization()
 res3 = t3.recorder.summary()
-assert res3 == 0, f"{res3} adversarial tests failed!"
+if not (res3 == 0): raise AssertionError(f"{res3} adversarial tests failed!")
 
 print("\nALL IN-MEMORY MONKEYPATCHED REGRESSION TESTS PASSED (100% SUCCESS)!")

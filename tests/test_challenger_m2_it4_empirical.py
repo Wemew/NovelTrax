@@ -314,10 +314,10 @@ def test_combinatorial_fuzzing():
             # 3. If extracted, start_vol and end_vol must be in vols
             # 4. No negative volume indices
             # 5. Length of vols must be bounded
-            assert isinstance(vols, set), "vols is not a set"
-            assert all(isinstance(v, float) for v in vols), "non-float volume in vols"
-            assert all(v >= 0 for v in vols), "negative volume in vols"
-            assert len(vols) <= 100, "volumes exceeded safe limit"
+            if not (isinstance(vols, set)): raise AssertionError("vols is not a set")
+            if not (all(isinstance(v, float) for v in vols)): raise AssertionError("non-float volume in vols")
+            if not (all(v >= 0 for v in vols)): raise AssertionError("negative volume in vols")
+            if not (len(vols) <= 100): raise AssertionError("volumes exceeded safe limit")
 
             # Check that omnibus expanded properly
             expected_set = {float(v) for v in range(start_vol, end_vol + 1)}
