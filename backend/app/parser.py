@@ -301,6 +301,7 @@ def extract_series_and_volume(raw_title: str) -> Dict[str, Any]:
         "series_name": cleaned,
         "volume": None,
         "is_bundle": False,
+        "is_chapter": False,
         "volume_start": None,
         "volume_end": None,
         "volumes": [],
@@ -348,6 +349,7 @@ def extract_series_and_volume(raw_title: str) -> Dict[str, Any]:
                 "series_name": clean_series,
                 "volume": start_vol,
                 "is_bundle": True,
+                "is_chapter": False,
                 "volume_start": start_vol,
                 "volume_end": end_vol,
                 "volumes": vols,
@@ -379,6 +381,7 @@ def extract_series_and_volume(raw_title: str) -> Dict[str, Any]:
                 "series_name": clean_series,
                 "volume": parsed_vols[0],
                 "is_bundle": True,
+                "is_chapter": False,
                 "volume_start": parsed_vols[0],
                 "volume_end": parsed_vols[-1],
                 "volumes": parsed_vols,
@@ -411,6 +414,7 @@ def extract_series_and_volume(raw_title: str) -> Dict[str, Any]:
                 "series_name": clean_series,
                 "volume": vol,
                 "is_bundle": False,
+                "is_chapter": False,
                 "volume_start": vol,
                 "volume_end": vol,
                 "volumes": [vol],
@@ -420,10 +424,58 @@ def extract_series_and_volume(raw_title: str) -> Dict[str, Any]:
         except ValueError:
             pass
 
-    # Pattern 2: Series followed by volume number directly separated by space or hyphen:
-    # e.g., "Sword Art Online 28: Unital Ring VII", "Re:Zero 25"
+    # Pattern 1b: Series followed by a BARE numeric range, with no volume keyword.
+    # e.g. "DanMachi 1-4", "86 - 1-4", "Mob Psycho 100 - 1-3"
+    #
+    # A range cannot be a chapter number, so it is treated as a bundle and kept
+    # (and expanded). Without this, the bare number would fall through to
+    # Pattern 2 and be misread as a single chapter/volume number.
+    p1b = re.compile(
+        r"^(?P<series>.+?)\s*(?:[-–—:,]\s*)?(?P<start>\d{1,3}(?:\.\d+)?)\s*[-–—~]\s*(?P<end>\d{1,3}(?:\.\d+)?)$",
+        re.IGNORECASE
+    )
+    m1b = p1b.match(cleaned)
+    if m1b:
+        series = m1b.group("series").strip(" -–—:,|")
+        try:
+            start = float(m1b.group("start"))
+            end = float(m1b.group("end"))
+        except ValueError:
+            start = end = -1.0
+        # Sanity bounds: real volume ranges are small and ascending. Anything
+        # else (years, chapter counts, junk) falls through to the later patterns.
+        if series and 0 < start <= 300 and start <= end <= 300 and (end - start) <= 100:
+            steps = int(round(end - start))
+            vols = [start + i for i in range(steps + 1)]
+            if steps == 0:
+                vols = [start]
+            clean_series = re.sub(r'(?i)\s*\(?\b(light\s+novel|web\s+novel|novel|ln|wn)\b\)?', '', series).strip(" -–—:,|")
+            return {
+                "raw_title": raw_title,
+                "clean_title": cleaned,
+                "series_name": clean_series,
+                "volume": start,
+                "is_bundle": True,
+                "is_chapter": False,
+                "volume_start": start,
+                "volume_end": end,
+                "volumes": vols,
+                "subtitle": "",
+                "confidence": 0.85
+            }
+
+    # Pattern 2: Series followed by a BARE number, with no volume keyword.
+    # e.g. "Sword Art Online 28: Unital Ring VII", "Re:Zero 25", "Dandadan 250"
+    #
+    # A bare number is ambiguous: some feeds use it for volumes, but on chapter
+    # feeds (and for manga-style releases that leak into the literature
+    # categories) it is almost always a chapter number. Treat it as a chapter
+    # and let the ingestion pipeline drop it; an explicit "Vol/Volume/V." prefix
+    # is required for a bare number to count as a volume. The parsed volume is
+    # still reported for diagnostic/back-compat callers -- only the is_chapter
+    # flag drives the filtering decision.
     p2 = re.compile(
-        r"^(?P<series>[A-Za-z0-9\s\'\"?!,\.]+?)\s+[-–—]?\s*(?P<vol>\d+(?:\.\d+)?)"
+        r"^(?P<series>[A-Za-z0-9\s\'\"?!,\.\-]+?)\s+[-–—]?\s*(?P<vol>\d+(?:\.\d+)?)"
         r"(?:\s*[:\-–—]\s*(?P<subtitle>.*))?$",
         re.IGNORECASE
     )
@@ -443,6 +495,7 @@ def extract_series_and_volume(raw_title: str) -> Dict[str, Any]:
                     "series_name": clean_series,
                     "volume": vol,
                     "is_bundle": False,
+                    "is_chapter": True,
                     "volume_start": vol,
                     "volume_end": vol,
                     "volumes": [vol],
@@ -472,6 +525,7 @@ def extract_series_and_volume(raw_title: str) -> Dict[str, Any]:
                 "series_name": clean_series,
                 "volume": vol,
                 "is_bundle": False,
+                "is_chapter": False,
                 "volume_start": vol,
                 "volume_end": vol,
                 "volumes": [vol],
@@ -515,6 +569,68 @@ def extract_series_and_volume(raw_title: str) -> Dict[str, Any]:
     result["series_name"] = clean_series
     result["clean_title"] = re.sub(r'(?i)\s*\(?\b(light\s+novel|web\s+novel|novel|ln|wn|epub|pdf)\b\)?', '', result["clean_title"]).strip(" -–—:,|")
     return result
+
+
+# Explicit chapter markers, e.g. "Chapter 250", "Ch. 250", "Ch 250", "chap 12".
+# The trailing number requirement keeps ordinary words such as "Chronicles" safe.
+_CHAPTER_MARKER_RE = re.compile(
+    r"(?i)(?:\b(?:chapters?|chap|ch)\.?\s*[-–—:]?\s*\d{1,4}(?:\.\d+)?\b"
+    r"|\bc\d{1,4}(?:\.\d+)?\b)"
+)
+
+# Volume keyword that legitimises a bare number as a volume.
+_VOLUME_KEYWORD_RE = re.compile(
+    r"(?i)\b(?:volumes?|vols?|books?|parts?|pts?)\.?\s*\d|\bv\.?\s*\d"
+)
+
+# A title ending in a bare number, optionally wrapped in one trailing bracket,
+# preceded by whitespace or a dash/colon boundary: "... 250", "... - 250", "[250]".
+_TRAILING_BARE_NUMBER_RE = re.compile(
+    r"(?i)(?:[\s\-–—:(\[])(\d{1,4}(?:\.\d+)?)\s*[\]\)]?\s*$"
+)
+
+
+def is_chapter_release(raw_title: str) -> bool:
+    """
+    True when a feed title denotes a chapter (or a non-volume instalment) rather
+    than a book volume.
+
+    Policy: a number only counts as a volume when it carries an explicit volume
+    keyword (Vol / Volume / Vols / V. / Book / Part) or when it is part of a
+    multi-volume range ("Vols 1-3", "1-4"). A *bare* number appended to a series
+    name ("Dandadan 250", "Re:Zero 25") is treated as a chapter number, as is any
+    title with an explicit Chapter/Ch. marker and no volume keyword.
+
+    Chapters are dropped by the ingestion pipeline so they never reach Releases
+    or Discovery. The parser still reports the parsed number so that diagnostic
+    and back-compat callers keep working -- only this predicate drives filtering.
+    """
+    if not raw_title or not isinstance(raw_title, str):
+        return False
+
+    try:
+        parsed = extract_series_and_volume(raw_title)
+    except Exception:
+        return False
+
+    if parsed.get("is_chapter"):
+        return True
+    if parsed.get("is_bundle"):
+        return False
+    if parsed.get("volume") is not None:
+        return False
+    # No volume was resolved: an explicit chapter marker makes it a chapter.
+    if _CHAPTER_MARKER_RE.search(raw_title) and not _VOLUME_KEYWORD_RE.search(raw_title):
+        return True
+    # Fallback for series names the strict patterns cannot represent (hyphens,
+    # colons, apostrophes, brackets): a title that ends in a bare number with no
+    # volume keyword anywhere is a chapter. "Sword Art Online 2024 Edition Vol 1"
+    # is protected by the keyword test.
+    if _VOLUME_KEYWORD_RE.search(raw_title) is None:
+        if _TRAILING_BARE_NUMBER_RE.search(raw_title.strip()):
+            return True
+    return False
+
 
 def match_series_in_calibre(extracted_series: str, calibre_series_list: list, threshold: float = 0.80) -> Optional[dict]:
     """

@@ -175,6 +175,27 @@ class TaskManager:
         finally:
             self.is_syncing_calibre = False
 
+    @staticmethod
+    def filter_chapter_releases(releases: List[Any]) -> List[Any]:
+        """
+        Drops chapter / manga-style instalments from a provider batch.
+
+        A number only counts as a volume when the title carries an explicit volume
+        keyword (Vol/Volume/V./Book/Part) or a multi-volume range. Bare trailing
+        numbers ("Dandadan 250") and explicit chapter markers ("Ch. 179") are
+        chapters, and must never reach Releases, Discovery or the wishlist.
+        See ``app.parser.is_chapter_release`` for the classification rules.
+        """
+        from app.parser import is_chapter_release
+
+        kept: List[Any] = []
+        for item in releases:
+            title = item.get("title", "") if isinstance(item, dict) else getattr(item, "title", "")
+            if is_chapter_release(title):
+                continue
+            kept.append(item)
+        return kept
+
     def check_feeds(self) -> Dict[str, Any]:
         """
         Polls all enabled feeds, checks releases against Calibre,
@@ -213,7 +234,7 @@ class TaskManager:
 
                 try:
                     provider = create_provider(feed_type, feed_name, url, config)
-                    releases = provider.fetch_releases()
+                    releases = self.filter_chapter_releases(provider.fetch_releases())
                     total_found += len(releases)
 
                     new_requests_for_feed = 0
@@ -491,6 +512,7 @@ class TaskManager:
                     paged_url = provider._build_paged_url("https://jnovels.com/?s=epub", page_num)
                     page_provider = JNovelsProvider(url=paged_url, config={"max_pages": 1})
                     releases = await asyncio.to_thread(page_provider.fetch_releases)
+                    releases = self.filter_chapter_releases(releases)
                     if not releases:
                         logger.info(f"Historical backfill reached end of available feed pages at page {page_num}.")
                         break
@@ -639,7 +661,7 @@ class TaskManager:
         except Exception as e:
             logger.debug(f"Nyaa provider search skipped or unavailable: {e}")
 
-        all_incoming = nyaa_releases
+        all_incoming = self.filter_chapter_releases(nyaa_releases)
         for rel in all_incoming:
             if self.stop_backfill_requested:
                 break

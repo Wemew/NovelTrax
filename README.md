@@ -44,6 +44,11 @@ Runs seamlessly in **Docker**, mounts your Calibre library network share safely 
    - Ignored releases remain visible under the **Ignored** filter pill and can be restored to **`REQUESTED`** with one click.
    - Ignore/restore actions are recorded in the audit log.
 
+6b. **Chapter / Volume Disambiguation**
+   - A number is only treated as a **volume** when the title carries an explicit volume keyword (`Vol`, `Vol.`, `Volume`, `Vols`, `V.`, `Book`, `Part`) or a multi-volume range (`Vols 1-3`, `1-4`).
+   - A bare trailing number (`Dandadan 250`) or an explicit chapter marker (`Chapter 179`, `Ch. 179`, `c374`) is treated as a **chapter** and is dropped at ingestion, so chapter feeds never pollute Releases, Discovery or the wishlist.
+   - Existing chapter rows stored by earlier versions (status `NEW` or `REQUESTED`) are purged once on startup; rows matched to your Calibre library (`IN_CALIBRE`) and your own ignore/blacklist decisions are never touched.
+
 7. **qBittorrent Downloader & Selective Volume Downloading**
    - Optional in-app **qBittorrent Web API v2** client (compatible with qBittorrent, Flood, TorBox and Real-Debrid qBit emulators), configurable entirely from the **Downloads** tab.
    - Every release row and series-card release exposes a one-click **Download** action that dispatches the release's magnet or `.torrent` URL to qBittorrent with the configured category, tag and save path. Rows without a torrent/magnet URL show a disabled button with an explanatory tooltip.

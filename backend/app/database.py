@@ -280,6 +280,56 @@ class Database:
 
             conn.commit()
 
+        self._run_chapter_purge_once()
+
+    def _run_chapter_purge_once(self):
+        """One-shot cleanup of chapter rows stored before chapter filtering existed."""
+        try:
+            if self.get_setting("chapter_filter_applied", "") == "1":
+                return
+            removed = self.purge_chapter_releases()
+            self.set_setting("chapter_filter_applied", "1")
+            if removed:
+                logger.info(f"Chapter filter: removed {removed} chapter instalment(s) misclassified as volumes.")
+        except Exception as exc:
+            logger.warning(f"Chapter filter cleanup skipped: {exc}")
+
+    def purge_chapter_releases(self) -> int:
+        """
+        Deletes stored chapter instalments from the releases table.
+
+        A chapter is a release whose number is a bare trailing number with no
+        volume keyword ("Dandadan 250") or which carries an explicit
+        Chapter/Ch. marker -- see ``app.parser.is_chapter_release``.
+
+        Only unreviewed rows (NEW / REQUESTED) are removed. Rows matched to the
+        Calibre library (IN_CALIBRE) are facts about the library and are never
+        deleted, and user decisions (IGNORED / BLACKLISTED) are preserved.
+
+        Returns the number of rows removed.
+        """
+        from app.parser import is_chapter_release
+
+        victim_ids: List[int] = []
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT id, title FROM releases WHERE status IN ('NEW', 'REQUESTED') OR status IS NULL;")
+            for row in cur.fetchall():
+                if is_chapter_release(row["title"] or ""):
+                    victim_ids.append(row["id"])
+
+            if victim_ids:
+                cur.executemany("DELETE FROM releases WHERE id = ?;", [(rid,) for rid in victim_ids])
+                conn.commit()
+
+        if victim_ids:
+            self.log_activity(
+                "CHAPTER_PURGE",
+                "Removed chapter releases",
+                f"Removed {len(victim_ids)} chapter instalment(s) that had been misclassified as volumes."
+            )
+        return len(victim_ids)
+
     # --- Setting Operations ---
     def get_setting(self, key: str, default: str = "") -> str:
         with self.get_connection() as conn:
