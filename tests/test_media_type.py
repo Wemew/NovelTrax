@@ -109,8 +109,34 @@ def test_title_classification():
         "[Yen Press] Overlord, Vol. 16 [Digital] [EPUB]",
         "[J-Novel Heart] Villainess Series Vol 3",
     ]
+    # REGRESSION (independent verification, F1): genuine novels that a title-only
+    # classifier must never call manga. Weak signals like "(2015)", "(Digital)" or
+    # "Chapters 1-10" are not decisive; the ebook/LN evidence wins.
+    false_positive_regressions = [
+        "Naruto Hiden Series (2015) 1-6 [COMPLETE] (EPUB+PDF)",
+        "(shiina) I Shaved Then I Brought a High School Girl Home Volume 3 Chapters 1-10 (EPUB + PDF) [Fully Booked TLS]",
+        "Cultivation Chat Group [Ch. 0001-3165][WebNovel].epub",
+        "Soul Land 5: The Rebirth of Tang San Novel EPUB Chapters 0-50 (WuxiaWorld)",
+        "Sugaru Miaki's Light Novel Collection (2013-2018) (vgperson)",
+        "The Irregular at Magic High School / Mahouka Koukou no Rettousei - v01-v19 (Digital) (Light Novel) (Mixed)",
+        "Mahouka Koukou no Rettousei - v17 (Digital) (Light Novel) (-KS-)",
+    ]
+    novels.extend(false_positive_regressions)
+
     for title in novels:
         check(classify_title(title) == NOVEL, f"novel title not detected: {title!r} -> {classify_title(title)!r}")
+
+    # Weak manga-ish signals on their own must stay ambiguous (torrent decides),
+    # never manga -- that is the data-loss guard.
+    weak_signals_only = [
+        "Some Series Vol 4 (2015)",
+        "Some Series Vol 4 (Digital)",
+        "Some Series Vol 4 Chapters 1-10",
+        "Some Series Vol 4 (2021-2024)",
+    ]
+    for title in weak_signals_only:
+        check(classify_title(title) != MANGA,
+              f"weak signal wrongly forced manga (data-loss risk): {title!r} -> {classify_title(title)!r}")
 
     # Both signals at once -> ambiguous, let the torrent decide (no guessing).
     mixed = [
@@ -354,26 +380,31 @@ def test_db_exclusion():
 # 6. One-shot reclassification of pre-existing rows
 # --------------------------------------------------------------------------
 def test_startup_reclassify():
-    section("6. Startup: existing manga removed, audiobooks re-typed, novels kept")
+    section("6. Startup: NON-DESTRUCTIVE re-typing (nothing is ever deleted)")
     from app.database import Database
 
     tmp = tempfile.mkdtemp(prefix="noveltrax_media_migrate_")
     db = Database(os.path.join(tmp, "app.db"))
     db.init_db()
 
+    # F2 regression: the migration must never delete rows, and must not touch
+    # rows already typed or rows whose title only carries weak manga signals.
     with db.get_connection() as conn:
         cur = conn.cursor()
         rows = [
             ("m-1", "Weekly Viz Manga Chapter Updates - Week 44 (Digital)", "NEW", "unknown"),
-            ("m-2", "Digital Comp (Digital-Compilation) (Oak)", "NEW", "unknown"),
+            ("m-2", "Digital Comp (Digital-Compilation) (Oak)", "REQUESTED", "unknown"),
+            ("m-3", "Some Series vol 2 (Digital-Compilation)", "IGNORED", "unknown"),
             ("a-1", "Some Novel v01-02 [Audiobook] [Tantor Media]", "NEW", "unknown"),
             ("n-1", "Normal Novel Vol 1", "NEW", "unknown"),
             ("c-1", "Weekly Viz Manga Chapter Updates - Week 44 (Digital)", "IN_CALIBRE", "unknown"),
+            ("p-1", "A Real Novel Vol 4", "NEW", "novel"),
+            ("weak-1", "Weak Signals Only Vol 4 (2015)", "NEW", "unknown"),
         ]
         for guid, title, status, media in rows:
             cur.execute(
                 "INSERT INTO releases (guid, title, series_name, volume, status, link, media_type) VALUES (?, ?, ?, ?, ?, ?, ?);",
-                (guid, title, status and title[:20], 1.0, status, f"https://example.test/{guid}", media)
+                (guid, title, title[:20], 1.0, status, f"https://example.test/{guid}", media)
             )
         conn.commit()
 
@@ -385,12 +416,59 @@ def test_startup_reclassify():
         cur.execute("SELECT guid, media_type FROM releases;")
         state = {row["guid"]: row["media_type"] for row in cur.fetchall()}
 
-    check("m-1" not in state, "manga-tagged row was not removed")
-    check("m-2" not in state, "compilation row was not removed")
+    check(len(state) == len(rows), f"reclassification deleted rows: {len(rows)} seeded, {len(state)} remain")
+    for guid in ("m-1", "m-2", "m-3"):
+        check(state.get(guid) == "manga", f"manga row {guid} not typed 'manga': {state.get(guid)!r}")
     check(state.get("a-1") == "audiobook", f"audiobook row not re-typed: {state.get('a-1')}")
-    check("n-1" in state, "normal novel was wrongly removed")
-    check("c-1" in state, "IN_CALIBRE row must never be deleted by reclassification")
+    check(state.get("n-1") == "unknown", f"ambiguous novel row should stay unknown: {state.get('n-1')!r}")
+    check(state.get("c-1") == "manga", "in-Calibre manga row should be typed, not deleted")
+    check(state.get("p-1") == "novel", "already-typed novel row must not be re-typed")
+    check(state.get("weak-1") == "unknown", f"weak-signal row must stay unknown: {state.get('weak-1')!r}")
+
+    # Manga-typed rows are excluded from the tracking views.
+    grouped = db.get_releases_grouped_by_series(limit=200)
+    grouped_titles = {r["title"] for g in grouped for r in g.get("releases", [])}
+    check("Weekly Viz Manga Chapter Updates - Week 44 (Digital)" not in grouped_titles,
+          "manga-typed release leaked into Releases")
+    check("Normal Novel Vol 1" in grouped_titles, "unknown-typed novel should still be shown")
+
     check(db.get_setting("media_filter_applied") == "1", "reclassify marker not set")
+
+    # Guard robustness (F2 footgun): any non-empty marker other than "0" means done.
+    with db.get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO releases (guid, title, series_name, volume, status, link, media_type) VALUES (?, ?, ?, ?, ?, ?, ?);",
+            ("late-m", "Later Manga Compilation (Digital-Compilation)", "Later", 1.0, "NEW", "https://example.test/late", "unknown")
+        )
+        cur.execute("UPDATE app_settings SET value = 'true' WHERE key = 'media_filter_applied';")
+        conn.commit()
+    db.init_db()
+    with db.get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT media_type FROM releases WHERE guid = 'late-m';")
+        late_type = cur.fetchone()["media_type"]
+    check(late_type == "unknown", f"marker 'true' must stop re-running the pass, got {late_type!r}")
+
+    # filter_non_novels=false disables the pass entirely.
+    tmp2 = tempfile.mkdtemp(prefix="noveltrax_media_disabled_")
+    db2 = Database(os.path.join(tmp2, "app.db"))
+    db2.init_db()
+    db2.set_setting("filter_non_novels", "false")
+    db2.set_setting("media_filter_applied", "")
+    with db2.get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO releases (guid, title, series_name, volume, status, link, media_type) VALUES (?, ?, ?, ?, ?, ?, ?);",
+            ("x-1", "Disabled Test (Digital-Compilation)", "Disabled", 1.0, "NEW", "https://example.test/x", "unknown")
+        )
+        conn.commit()
+    db2.init_db()
+    with db2.get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT media_type FROM releases WHERE guid = 'x-1';")
+        disabled_type = cur.fetchone()["media_type"]
+    check(disabled_type == "unknown", f"filter_non_novels=false must skip reclassification, got {disabled_type!r}")
 
 
 def main():

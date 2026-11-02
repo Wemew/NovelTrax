@@ -1273,7 +1273,9 @@ async def api_fetch_synopsis(release_id: int):
                 "calibre_matched_book_id": matched_id,
                 "is_official": 1 if is_off else 0,
                 "cover_url": details.get("cover_url"),
-                "description": details.get("synopsis")
+                "description": details.get("synopsis"),
+                # Expanded from a J-Novels light-novel hub page: novel by provenance.
+                "media_type": "novel"
             })
 
     return JSONResponse({

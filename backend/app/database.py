@@ -408,42 +408,59 @@ class Database:
 
     def _run_media_reclassify_once(self):
         """
-        One-shot pass over releases stored before media typing existed.
+        One-shot pass that re-types releases stored before media typing existed.
 
-        Audiobook-tagged rows are re-typed; manga-tagged rows are removed (they
-        are not light novels and were ingested by mistake). Rows already known
-        to be in the Calibre library are left untouched.
+        NON-DESTRUCTIVE: rows are only re-labelled, never deleted.
+
+        * audiobook-tagged rows become ``media_type='audiobook'`` (hidden from the
+          tracking views, shown in the Audiobooks section)
+        * manga-tagged rows become ``media_type='manga'`` (hidden from the tracking
+          views; a later maintenance purge can remove them explicitly)
+
+        Only rows still typed ``unknown`` are touched, so any judgement already
+        made (including in-Calibre matches) is preserved. The pass honours the
+        ``filter_non_novels`` setting and runs once -- any non-empty marker value
+        other than ``"0"`` counts as already applied.
         """
         try:
-            if self.get_setting("media_filter_applied", "") == "1":
+            marker = (self.get_setting("media_filter_applied", "") or "").strip()
+            if marker not in ("", "0"):
+                return
+            if (self.get_setting("filter_non_novels", "true") or "").strip().lower() == "false":
                 return
 
             from app.media_type import classify_title, AUDIOBOOK, MANGA
 
             typed_audio = 0
-            removed_manga = 0
+            typed_manga = 0
             with self.get_connection() as conn:
                 cur = conn.cursor()
-                cur.execute("SELECT id, title, status FROM releases;")
+                cur.execute("SELECT id, title, status, media_type FROM releases;")
                 rows = cur.fetchall()
                 for row in rows:
-                    kind = classify_title(row["title"] or "")
+                    current = (row["media_type"] or "unknown").strip().lower()
+                    if current != "unknown":
+                        continue
+                    title = (row["title"] or "").strip()
+                    if not title:
+                        continue
+                    kind = classify_title(title)
                     if kind == AUDIOBOOK:
                         cur.execute("UPDATE releases SET media_type = 'audiobook' WHERE id = ?;", (row["id"],))
                         typed_audio += 1
-                    elif kind == MANGA and (row["status"] or "") != "IN_CALIBRE":
-                        cur.execute("DELETE FROM releases WHERE id = ?;", (row["id"],))
-                        removed_manga += 1
+                    elif kind == MANGA:
+                        cur.execute("UPDATE releases SET media_type = 'manga' WHERE id = ?;", (row["id"],))
+                        typed_manga += 1
                 conn.commit()
 
             self.set_setting("media_filter_applied", "1")
-            if typed_audio or removed_manga:
+            if typed_audio or typed_manga:
                 self.log_activity(
                     "MEDIA_RECLASSIFY",
                     "Reclassified stored releases by media type",
-                    f"Tagged {typed_audio} audiobook(s), removed {removed_manga} manga release(s)."
+                    f"Tagged {typed_audio} audiobook(s) and {typed_manga} manga release(s); no rows were deleted."
                 )
-                logger.info(f"Media reclassify: {typed_audio} audiobook(s) tagged, {removed_manga} manga removed.")
+                logger.info(f"Media reclassify: {typed_audio} audiobook(s), {typed_manga} manga tagged (nothing deleted).")
         except Exception as exc:
             logger.warning(f"Media reclassify skipped: {exc}")
 
@@ -638,6 +655,10 @@ class Database:
                             cover_url = COALESCE(?, cover_url),
                             series_link = COALESCE(?, series_link),
                             title = ?,
+                            media_type = CASE
+                                WHEN COALESCE(?, 'unknown') != 'unknown' THEN ?
+                                ELSE media_type
+                            END,
                             updated_at = CURRENT_TIMESTAMP
                         WHERE id = ?;
                     """, (
@@ -645,6 +666,8 @@ class Database:
                         release_data.get("cover_url"),
                         release_data.get("series_link"),
                         use_title,
+                        release_data.get("media_type") or "unknown",
+                        release_data.get("media_type") or "unknown",
                         rel_id
                     ))
                     conn.commit()
@@ -972,7 +995,7 @@ class Database:
                 where_clauses.append("r.status = ? AND (r.ignored = 0 OR r.ignored IS NULL)")
                 params.append(status)
             else:
-                where_clauses.append("r.status NOT IN ('BLACKLISTED', 'IGNORED') AND (r.ignored = 0 OR r.ignored IS NULL) AND COALESCE(r.media_type, 'unknown') != 'audiobook'")
+                where_clauses.append("r.status NOT IN ('BLACKLISTED', 'IGNORED') AND (r.ignored = 0 OR r.ignored IS NULL) AND COALESCE(r.media_type, 'unknown') NOT IN ('audiobook', 'manga')")
 
             if search and search.strip():
                 clean_s = f"%{search.strip().lower()}%"
@@ -980,7 +1003,7 @@ class Database:
                 params.extend([clean_s, clean_s])
 
             # Audiobooks live in their own section and never enter the tracking views.
-            where_clauses.append("COALESCE(r.media_type, 'unknown') != 'audiobook'")
+            where_clauses.append("COALESCE(r.media_type, 'unknown') NOT IN ('audiobook', 'manga')")
             where_sql = f"WHERE {' AND '.join(where_clauses)}"
             sort_sql = "ORDER BY COALESCE(r.pub_date, r.updated_at) DESC, r.id DESC"
             if sort == "date_asc":
@@ -1027,7 +1050,7 @@ class Database:
                 where_clauses.append("r.status = ? AND (r.ignored = 0 OR r.ignored IS NULL)")
                 params.append(status)
             else:
-                where_clauses.append("r.status NOT IN ('BLACKLISTED', 'IGNORED') AND (r.ignored = 0 OR r.ignored IS NULL) AND COALESCE(r.media_type, 'unknown') != 'audiobook'")
+                where_clauses.append("r.status NOT IN ('BLACKLISTED', 'IGNORED') AND (r.ignored = 0 OR r.ignored IS NULL) AND COALESCE(r.media_type, 'unknown') NOT IN ('audiobook', 'manga')")
 
             if search and search.strip():
                 clean_s = f"%{search.strip().lower()}%"
@@ -1083,9 +1106,9 @@ class Database:
                 params.append(status)
             else:
                 if not include_ignored:
-                    where_clauses.append("status NOT IN ('BLACKLISTED', 'IGNORED') AND (ignored = 0 OR ignored IS NULL) AND COALESCE(media_type, 'unknown') != 'audiobook'")
+                    where_clauses.append("status NOT IN ('BLACKLISTED', 'IGNORED') AND (ignored = 0 OR ignored IS NULL) AND COALESCE(media_type, 'unknown') NOT IN ('audiobook', 'manga')")
                 else:
-                    where_clauses.append("status != 'BLACKLISTED' AND COALESCE(media_type, 'unknown') != 'audiobook'")
+                    where_clauses.append("status != 'BLACKLISTED' AND COALESCE(media_type, 'unknown') NOT IN ('audiobook', 'manga')")
 
             if search and search.strip():
                 clean_s = f"%{search.strip().lower()}%"
@@ -1093,7 +1116,7 @@ class Database:
                 params.extend([clean_s, clean_s])
 
             # Audiobooks live in their own section and never enter the tracking views.
-            where_clauses.append("COALESCE(media_type, 'unknown') != 'audiobook'")
+            where_clauses.append("COALESCE(media_type, 'unknown') NOT IN ('audiobook', 'manga')")
             where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
 
             # Sort mapping
@@ -1159,9 +1182,9 @@ class Database:
                 params.append(status)
             else:
                 if not include_ignored:
-                    where_clauses.append("status NOT IN ('BLACKLISTED', 'IGNORED') AND (ignored = 0 OR ignored IS NULL) AND COALESCE(media_type, 'unknown') != 'audiobook'")
+                    where_clauses.append("status NOT IN ('BLACKLISTED', 'IGNORED') AND (ignored = 0 OR ignored IS NULL) AND COALESCE(media_type, 'unknown') NOT IN ('audiobook', 'manga')")
                 else:
-                    where_clauses.append("status != 'BLACKLISTED' AND COALESCE(media_type, 'unknown') != 'audiobook'")
+                    where_clauses.append("status != 'BLACKLISTED' AND COALESCE(media_type, 'unknown') NOT IN ('audiobook', 'manga')")
 
             if search and search.strip():
                 clean_s = f"%{search.strip().lower()}%"
@@ -1169,7 +1192,7 @@ class Database:
                 params.extend([clean_s, clean_s])
 
             # Audiobooks live in their own section and never enter the tracking views.
-            where_clauses.append("COALESCE(media_type, 'unknown') != 'audiobook'")
+            where_clauses.append("COALESCE(media_type, 'unknown') NOT IN ('audiobook', 'manga')")
             where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
             cur.execute(f"SELECT count(*) FROM releases {where_sql};", tuple(params))
             row = cur.fetchone()
@@ -1201,20 +1224,20 @@ class Database:
             if status == "IGNORED":
                 cur.execute("""
                     SELECT * FROM releases 
-                    WHERE (status = 'IGNORED' OR ignored = 1) AND COALESCE(media_type, 'unknown') != 'audiobook'
+                    WHERE (status = 'IGNORED' OR ignored = 1) AND COALESCE(media_type, 'unknown') NOT IN ('audiobook', 'manga')
                     ORDER BY updated_at DESC, id DESC;
                 """)
             elif status:
                 cur.execute("""
                     SELECT * FROM releases 
-                    WHERE status = ? AND (ignored = 0 OR ignored IS NULL) AND COALESCE(media_type, 'unknown') != 'audiobook'
+                    WHERE status = ? AND (ignored = 0 OR ignored IS NULL) AND COALESCE(media_type, 'unknown') NOT IN ('audiobook', 'manga')
                     ORDER BY updated_at DESC, id DESC;
                 """, (status,))
             else:
                 if not include_ignored:
                     cur.execute("""
                         SELECT * FROM releases 
-                        WHERE status NOT IN ('BLACKLISTED', 'IGNORED') AND (ignored = 0 OR ignored IS NULL) AND COALESCE(media_type, 'unknown') != 'audiobook'
+                        WHERE status NOT IN ('BLACKLISTED', 'IGNORED') AND (ignored = 0 OR ignored IS NULL) AND COALESCE(media_type, 'unknown') NOT IN ('audiobook', 'manga')
                         ORDER BY 
                             CASE status WHEN 'REQUESTED' THEN 1 WHEN 'NEW' THEN 2 WHEN 'IN_CALIBRE' THEN 3 ELSE 4 END,
                             updated_at DESC, id DESC;
@@ -1222,7 +1245,7 @@ class Database:
                 else:
                     cur.execute("""
                         SELECT * FROM releases 
-                        WHERE status != 'BLACKLISTED' AND COALESCE(media_type, 'unknown') != 'audiobook'
+                        WHERE status != 'BLACKLISTED' AND COALESCE(media_type, 'unknown') NOT IN ('audiobook', 'manga')
                         ORDER BY 
                             CASE status WHEN 'REQUESTED' THEN 1 WHEN 'NEW' THEN 2 WHEN 'IN_CALIBRE' THEN 3 ELSE 4 END,
                             updated_at DESC, id DESC;
@@ -1600,10 +1623,10 @@ class Database:
             cur.execute("SELECT count(*) FROM series_tracking WHERE is_monitored = 1;")
             monitored_series = cur.fetchone()[0]
 
-            cur.execute("SELECT count(*) FROM releases WHERE status = 'REQUESTED' AND COALESCE(media_type, 'unknown') != 'audiobook';")
+            cur.execute("SELECT count(*) FROM releases WHERE status = 'REQUESTED' AND COALESCE(media_type, 'unknown') NOT IN ('audiobook', 'manga');")
             pending_requests = cur.fetchone()[0]
 
-            cur.execute("SELECT count(*) FROM releases WHERE status = 'IN_CALIBRE' AND COALESCE(media_type, 'unknown') != 'audiobook';")
+            cur.execute("SELECT count(*) FROM releases WHERE status = 'IN_CALIBRE' AND COALESCE(media_type, 'unknown') NOT IN ('audiobook', 'manga');")
             acquired_books = cur.fetchone()[0]
 
             cur.execute("SELECT count(*) FROM feeds WHERE enabled = 1;")
@@ -1747,7 +1770,7 @@ class Database:
                     FROM releases r
                     WHERE (r.volume IS NULL OR r.volume = 1.0)
                       AND r.status NOT IN ('IN_CALIBRE', 'BLACKLISTED', 'IGNORED', 'REQUESTED')
-                  AND COALESCE(r.media_type, 'unknown') != 'audiobook'
+                  AND COALESCE(r.media_type, 'unknown') NOT IN ('audiobook', 'manga')
                       AND COALESCE(lower(r.title), '') NOT LIKE '%pdf%'
                       AND COALESCE(lower(r.link), '') NOT LIKE '%.pdf%'
                       AND COALESCE(lower(r.guid), '') NOT LIKE '%pdf%'
@@ -1800,7 +1823,7 @@ class Database:
                     FROM releases r
                     WHERE (r.volume IS NULL OR r.volume = 1.0)
                       AND r.status NOT IN ('IN_CALIBRE', 'BLACKLISTED', 'IGNORED', 'REQUESTED')
-                  AND COALESCE(r.media_type, 'unknown') != 'audiobook'
+                  AND COALESCE(r.media_type, 'unknown') NOT IN ('audiobook', 'manga')
                       AND COALESCE(lower(r.title), '') NOT LIKE '%pdf%'
                       AND COALESCE(lower(r.link), '') NOT LIKE '%.pdf%'
                       AND COALESCE(lower(r.guid), '') NOT LIKE '%pdf%'
@@ -2039,7 +2062,7 @@ class Database:
                 DELETE FROM releases
                 WHERE (volume IS NULL OR volume = 1.0)
                   AND status NOT IN ('IN_CALIBRE', 'BLACKLISTED', 'IGNORED', 'REQUESTED')
-                  AND COALESCE(media_type, 'unknown') != 'audiobook'
+                  AND COALESCE(media_type, 'unknown') NOT IN ('audiobook', 'manga')
                   AND COALESCE(lower(title), '') NOT LIKE '%pdf%'
                   AND COALESCE(lower(link), '') NOT LIKE '%.pdf%'
                   AND COALESCE(lower(guid), '') NOT LIKE '%pdf%'

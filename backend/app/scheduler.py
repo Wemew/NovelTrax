@@ -419,7 +419,10 @@ class TaskManager:
                         "link": item.link,
                         "series_link": item.series_link,
                         "source_feed_name": "J-Novels Master Index",
-                        "status": "NEW"
+                        "status": "NEW",
+                        # The master index is a light-novel catalogue, so these
+                        # series rows are novels by provenance.
+                        "media_type": "novel"
                     }
                     is_new, _ = self.db.upsert_release(rel_dict)
                     if is_new:

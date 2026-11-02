@@ -57,21 +57,55 @@ _MANGA_TITLE_RE = re.compile(
     r"(?i)"
     r"\bas\s+v\d"                                         # "001-009 as v01-02"
     r"|\(\s*digital(?:\s*[+-]\s*digital)?[\s-]*compilation\s*\)"
-    r"|\(\s*digital\s*\)"                                 # "(Digital)" scanlation tag
-    r"|\(\s*\d{4}(?:\s*-\s*\d{4})?\s*\)"                  # "(2025-2026)" year range
     r"|\[\s*jpeg[\s-]*xl\s*\]"                            # image-only format tags
     r"|\[\s*png\s*\]"
-    r"|\((?:[^)]*\b(?:anon|anonymous|oak(?:-jxl)?|1r0n|rillant|ushi|lucaz|shizu|nao|"
-    r"aquila|digitalmangafan|k-team|danke-empire|xra-empire|sticky\s+oak)\b[^)]*)\)"
-    r"|\bchapters?\s+\d+"                                  # "Chapter 222"
-    r"|\bch\.\s*\d+"
     r"|\bchapter\s+updates?\b"
     r"|\b(?:weekly|monthly)\s+(?:viz|shonen|jump|manga|k\s?manga|alpha)\b"
     r"|\bmanga\b"
 )
 
+# Scanlation group names seen inside parenthesised manga metadata blocks. These
+# appear in light-novel tags too, so they are only meaningful in combination with
+# a year or "(Digital)" block (see ``_looks_like_scanlation_metadata``).
+_SCANLATION_GROUP_RE = re.compile(
+    r"(?i)\b(?:1r0n|anon|anonymous|oak(?:-jxl)?|rillant|ushi|lucaz|danke-empire|"
+    r"xra-empire|digitalmangafan|k-team|sticky\s+oak|aquila|shizu|nao)\b"
+)
+
+_PAREN_BLOCK_RE = re.compile(r"\(([^)]*)\)")
+_YEAR_BLOCK_RE = re.compile(r"^\s*\d{4}\s*(?:-\s*\d{4})?\s*$")
+
+
+def _looks_like_scanlation_metadata(title: str) -> bool:
+    """
+    Detects the manga convention: several parenthesised metadata blocks after the
+    volume token, e.g. ``(2025-2026) (Digital) (1r0n, Anon)``.
+
+    A year or "(Digital)" block on its own is NOT enough -- genuine light novels
+    also carry ``(2015)`` or ``(Digital) (Light Novel)`` -- so a group name or a
+    third metadata block is required as corroboration.
+    """
+    blocks = _PAREN_BLOCK_RE.findall(title)
+    if not blocks:
+        return False
+
+    years = sum(1 for block in blocks if _YEAR_BLOCK_RE.match(block))
+    digital = sum(1 for block in blocks if "digital" in block.lower())
+    groups = sum(1 for block in blocks if _SCANLATION_GROUP_RE.search(block))
+    metadata = years + digital + groups
+
+    if digital and (years or groups):
+        return True
+    if years and groups:
+        return True
+    if metadata >= 3:
+        return True
+    return False
+
+
 # Bracketed publisher / ebook-format tags: the light-novel release convention
 # ("… v01-04 [Seven Seas] [Stick]", "… v01-17 [J-Novel Club] [CleanBookGuy]").
+# The ebook markers and "light novel" wording count too, in any position.
 _LIGHT_NOVEL_TITLE_RE = re.compile(
     r"(?i)"
     r"\[\s*(?:j-novel\s*club|j-novel\s*heart|yen\s*press|seven\s*seas|seven\s*seas\s+siren|"
@@ -79,6 +113,8 @@ _LIGHT_NOVEL_TITLE_RE = re.compile(
     r"tentai\s+books|vertical|sol\s+press|jnc|yen\s*on|orbit|drawn\s+&?\s*quarterly)"
     r"[^\]]*\]"
     r"|\[\s*(?:epub|azw3|mobi|kepub)\s*\]"
+    r"|\b(?:light\s*novel|lightnovel|web\s*novel|webnovel)\b"
+    r"|\b(?:epub|azw3|kepub)\b"
 )
 
 # Filename extensions inside the torrent metainfo.
@@ -112,7 +148,11 @@ def classify_title(title: str) -> Optional[str]:
     if _AUDIOBOOK_TITLE_RE.search(title):
         return AUDIOBOOK
 
-    looks_manga = bool(_MANGA_TITLE_RE.search(title))
+    # Conservative by design: only STRONG manga evidence decides on the title.
+    # Weak signals (a lone "(2015)" year or "(Digital)" block, "Chapters 1-10")
+    # also occur in genuine light-novel rips, so those fall through to torrent
+    # verification instead of risking silent loss of a real novel.
+    looks_manga = bool(_MANGA_TITLE_RE.search(title)) or _looks_like_scanlation_metadata(title)
     looks_novel = bool(_LIGHT_NOVEL_TITLE_RE.search(title))
 
     if looks_manga and looks_novel:
@@ -217,13 +257,12 @@ def classify_torrent(data: bytes) -> Tuple[str, str]:
 
     if audio and not novel:
         return AUDIOBOOK, detail
-    if novel and not comic:
+    if novel:
+        # Any ebooks present means this is a book release. Mixed epub+cbz
+        # bundles (ebook plus bonus scans) are still tracked as novels.
         return NOVEL, detail
-    if comic or (images and not novel and not audio):
+    if comic or images:
         return MANGA, detail
-    if novel and comic:
-        # Mixed bundle: trust the ebooks, they are what Calibre tracks.
-        return NOVEL, detail
     return UNKNOWN, detail
 
 
