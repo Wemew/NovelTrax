@@ -10,6 +10,7 @@ except ImportError:
 from bs4 import BeautifulSoup
 from app.providers.base import BaseFeedProvider, ReleaseItem
 from app.parser import extract_series_and_volume, is_pdf_release
+from app.security import safe_client_get
 
 logger = logging.getLogger("noveltrax.providers.jnovels")
 
@@ -286,8 +287,10 @@ class JNovelsProvider(BaseFeedProvider):
 
         if httpx is not None:
             try:
-                with httpx.Client(headers=DEFAULT_HEADERS, timeout=15.0, follow_redirects=True) as client:
-                    resp = client.get(url)
+                # Redirects are followed manually by safe_client_get so every hop is
+                # validated against the SSRF guard before it is requested.
+                with httpx.Client(headers=DEFAULT_HEADERS, timeout=15.0, follow_redirects=False) as client:
+                    resp = safe_client_get(client, url)
                     if resp.status_code == 200:
                         soup = BeautifulSoup(resp.text, "html.parser")
             except Exception as e:
@@ -321,8 +324,8 @@ class JNovelsProvider(BaseFeedProvider):
             if orig_link and orig_link != url:
                 try:
                     if httpx is not None:
-                        with httpx.Client(headers=DEFAULT_HEADERS, timeout=15.0, follow_redirects=True) as client:
-                            resp_orig = client.get(orig_link)
+                        with httpx.Client(headers=DEFAULT_HEADERS, timeout=15.0, follow_redirects=False) as client:
+                            resp_orig = safe_client_get(client, orig_link)
                             if resp_orig.status_code == 200:
                                 soup_orig = BeautifulSoup(resp_orig.text, "html.parser")
                     else:
@@ -404,8 +407,8 @@ class JNovelsProvider(BaseFeedProvider):
 
         if httpx is not None:
             try:
-                with httpx.Client(headers=DEFAULT_HEADERS, timeout=20.0, follow_redirects=True) as client:
-                    resp = client.get(index_url)
+                with httpx.Client(headers=DEFAULT_HEADERS, timeout=20.0, follow_redirects=False) as client:
+                    resp = safe_client_get(client, index_url)
                     if resp.status_code == 200:
                         soup = BeautifulSoup(resp.text, "html.parser")
             except Exception as e:
@@ -467,8 +470,8 @@ class JNovelsProvider(BaseFeedProvider):
             html_text = None
             if httpx is not None:
                 try:
-                    with httpx.Client(headers=DEFAULT_HEADERS, timeout=15.0, follow_redirects=True) as client:
-                        resp = client.get(current_url)
+                    with httpx.Client(headers=DEFAULT_HEADERS, timeout=15.0, follow_redirects=False) as client:
+                        resp = safe_client_get(client, current_url)
                         if resp.status_code == 404:
                             logger.info(f"Reached end of pagination at page {page_num} (HTTP 404).")
                             break

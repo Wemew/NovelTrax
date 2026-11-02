@@ -192,18 +192,22 @@ class CalibreScanner:
         """Check if metadata.db exists and is readable."""
         return os.path.isfile(self.db_path) and os.access(self.db_path, os.R_OK)
 
-    def _get_connection(self) -> sqlite3.Connection:
+    def _get_connection(self, immutable: bool = True) -> sqlite3.Connection:
         """
         Open a read-only, non-locking connection to metadata.db.
-        'immutable=1' instructs SQLite that this connection will never modify the file
-        and completely bypasses file-locking protocols on local and network shares.
+
+        With immutable=True, 'immutable=1' instructs SQLite that this connection will
+        never see the file change and completely bypasses file-locking protocols. That is
+        ideal for a static snapshot but unsound while Calibre is actively writing, so the
+        read helpers retry once with plain 'mode=ro' (no immutable) when the immutable
+        snapshot is detected as inconsistent.
         """
         if not self.is_available():
             raise FileNotFoundError(f"Calibre metadata.db not found or not readable at: {self.db_path}")
 
         # Normalize path for SQLite URI (forward slashes)
         abs_path = os.path.abspath(self.db_path).replace("\\", "/")
-        uri = f"file:{abs_path}?mode=ro&immutable=1"
+        uri = f"file:{abs_path}?mode=ro&immutable=1" if immutable else f"file:{abs_path}?mode=ro"
 
         try:
             conn = sqlite3.connect(uri, uri=True, timeout=5.0)
@@ -220,37 +224,65 @@ class CalibreScanner:
             conn.row_factory = sqlite3.Row
             return conn
 
+    def _run_read(
+        self,
+        query: str,
+        params: Tuple[Any, ...] = (),
+        label: str = "Calibre read",
+    ) -> List[sqlite3.Row]:
+        """
+        Executes a read query, retrying once with a plain read-only connection when the
+        immutable snapshot is inconsistent (e.g. "database disk image is malformed" while
+        Calibre commits to metadata.db). The zero-lock immutable fast path stays the norm;
+        the retry only runs on a detected inconsistent snapshot.
+        """
+        last_error: Optional[Exception] = None
+        for immutable in (True, False):
+            conn = None
+            try:
+                conn = self._get_connection(immutable=immutable)
+                cur = conn.cursor()
+                cur.execute(query, params)
+                return cur.fetchall()
+            except sqlite3.DatabaseError as e:
+                last_error = e
+                if immutable:
+                    logger.warning(
+                        f"{label}: immutable read hit an inconsistent snapshot ({e}); "
+                        "retrying once with a plain read-only connection."
+                    )
+                    continue
+                raise
+            finally:
+                if conn:
+                    conn.close()
+        if last_error is not None:
+            raise last_error
+        return []
+
     def get_library_summary(self) -> Dict[str, Any]:
         """Returns total books, total series, and total authors in Calibre."""
         if not self.is_available():
             return {"available": False, "total_books": 0, "total_series": 0, "total_authors": 0}
 
-        conn = None
         try:
-            conn = self._get_connection()
-            cur = conn.cursor()
-            cur.execute("SELECT count(*) FROM books;")
-            total_books = cur.fetchone()[0]
-
-            cur.execute("SELECT count(*) FROM series;")
-            total_series = cur.fetchone()[0]
-
-            cur.execute("SELECT count(*) FROM authors;")
-            total_authors = cur.fetchone()[0]
+            row = self._run_read(
+                "SELECT (SELECT count(*) FROM books) AS total_books, "
+                "(SELECT count(*) FROM series) AS total_series, "
+                "(SELECT count(*) FROM authors) AS total_authors;",
+                label="library summary",
+            )[0]
 
             return {
                 "available": True,
                 "db_path": self.db_path,
-                "total_books": total_books,
-                "total_series": total_series,
-                "total_authors": total_authors
+                "total_books": row["total_books"],
+                "total_series": row["total_series"],
+                "total_authors": row["total_authors"]
             }
         except Exception as e:
             logger.error(f"Error reading library summary: {e}")
             return {"available": False, "error": str(e), "total_books": 0, "total_series": 0, "total_authors": 0}
-        finally:
-            if conn:
-                conn.close()
 
     def get_all_series(self) -> List[Dict[str, Any]]:
         """
@@ -276,12 +308,8 @@ class CalibreScanner:
             ORDER BY s.name COLLATE NOCASE ASC;
         """
 
-        conn = None
         try:
-            conn = self._get_connection()
-            cur = conn.cursor()
-            cur.execute(query)
-            rows = cur.fetchall()
+            rows = self._run_read(query, label="all series")
 
             results = []
             for row in rows:
@@ -296,9 +324,6 @@ class CalibreScanner:
         except Exception as e:
             logger.error(f"Error fetching series from Calibre: {e}")
             return []
-        finally:
-            if conn:
-                conn.close()
 
     def get_all_books(self) -> List[Dict[str, Any]]:
         """
@@ -325,12 +350,8 @@ class CalibreScanner:
             ORDER BY b.id DESC;
         """
 
-        conn = None
         try:
-            conn = self._get_connection()
-            cur = conn.cursor()
-            cur.execute(query)
-            rows = cur.fetchall()
+            rows = self._run_read(query, label="all books")
 
             results = []
             for row in rows:
@@ -347,9 +368,6 @@ class CalibreScanner:
         except Exception as e:
             logger.error(f"Error fetching books from Calibre: {e}")
             return []
-        finally:
-            if conn:
-                conn.close()
 
     def get_series_volumes_map(self) -> Dict[str, Set[float]]:
         """
@@ -367,14 +385,11 @@ class CalibreScanner:
             LEFT JOIN books_series_link bsl ON b.id = bsl.book
             LEFT JOIN series s ON bsl.series = s.id;
         """
-        conn = None
         try:
-            conn = self._get_connection()
-            cur = conn.cursor()
-            cur.execute(query)
+            rows = self._run_read(query, label="series volumes map")
             res: Dict[str, Set[float]] = {}
             from app.parser import normalize_text
-            for row in cur.fetchall():
+            for row in rows:
                 s_id = row["series_id"]
                 s_name = row["ser_name"] or ""
                 b_title = row["title"] or ""
@@ -404,9 +419,6 @@ class CalibreScanner:
         except Exception as e:
             logger.error(f"Error reading series volumes map: {e}")
             return {}
-        finally:
-            if conn:
-                conn.close()
 
     def get_all_volumes_per_series(self) -> Dict[str, Set[float]]:
         """Alias for get_series_volumes_map."""

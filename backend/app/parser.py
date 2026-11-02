@@ -196,12 +196,36 @@ def should_merge_series(name_a: str, name_b: str) -> bool:
 
     return False
 
+# Genuine HTML tag syntax: an opening/closing tag whose name starts with a letter
+# (e.g. <script>, </b>, <img src=x>). Deliberately does NOT match bracketed or
+# parenthesized publisher tags such as "[J-Novel Club]" or "(Light Novel)".
+_HTML_TAG_RE = re.compile(r"</?[A-Za-z][^<>]*>")
+
+def strip_html_markup(text: str) -> str:
+    """
+    Removes residual HTML markup from scraped titles/series names while preserving
+    legitimate bracketed text. Script/style elements are dropped with their contents
+    since they can never be part of a title; remaining tag syntax is replaced by space.
+    """
+    if not text or not isinstance(text, str) or "<" not in text:
+        return text
+    cleaned = re.sub(
+        r"(?is)<\s*(?:script|style)\b[^>]*>.*?<\s*/\s*(?:script|style)\s*>",
+        " ",
+        text,
+    )
+    cleaned = _HTML_TAG_RE.sub(" ", cleaned)
+    return cleaned
+
 def clean_feed_title(raw_title: str) -> str:
     """Strip web novel / download tags like [EPUB], (PDF), Free Download, etc. while preserving volume markers."""
     if not raw_title:
         return ""
     
     cleaned = raw_title.strip()
+
+    # Strip residual HTML markup (e.g. <script>…</script>, <b>…</b>) from scraped titles.
+    cleaned = strip_html_markup(cleaned)
 
     # Strip leading download / site prefixes
     cleaned = re.sub(r'^(?:\s*download|\s*free\s+download|\s*read|\s*get)\s*[:\-–—]?\s*', '', cleaned, flags=re.IGNORECASE)
@@ -252,7 +276,24 @@ def extract_series_and_volume(raw_title: str) -> Dict[str, Any]:
     from raw release titles commonly found on J-Novels, NovelUpdates, RSS feeds, etc.
     """
     cleaned = clean_feed_title(raw_title)
-    
+
+    # Pattern 0: Parenthetical volume range preceded by an omnibus/edition number,
+    # e.g. "DanMachi Omnibus 1 (Vols 1-3)". Normalize it to "DanMachi Omnibus Vols 1-3"
+    # so the bundle-range matcher expands the range while the edition number is kept
+    # out of the extracted series name.
+    m_paren_bundle = re.match(
+        r"^(?P<series>.+?)\s+\d+\s*\(\s*"
+        r"(?P<range>(?:volumes?|vols?|books?|book)\.?\s*\d+(?:\.\d+)?\s*[-–—~to]+\s*"
+        r"(?:(?:volumes?|vols?|books?|book)\.?\s*)?\d+(?:\.\d+)?)"
+        r"\s*\)(?P<rest>.*)$",
+        raw_title.strip() if isinstance(raw_title, str) else "",
+        re.IGNORECASE,
+    )
+    if m_paren_bundle:
+        cleaned = clean_feed_title(
+            f"{m_paren_bundle.group('series')} {m_paren_bundle.group('range')} {m_paren_bundle.group('rest')}"
+        )
+
     # Result defaults
     result = {
         "raw_title": raw_title,
@@ -271,12 +312,13 @@ def extract_series_and_volume(raw_title: str) -> Dict[str, Any]:
         return result
 
     # Pattern 0a: Multi-volume bundle range:
-    # e.g., "Overlord Vol 1-14", "Classroom of the Elite Volume 1-11", "v01-v07", "Vol 1 to 5", "Vol. 01~10"
+    # e.g., "Overlord Vol 1-14", "Classroom of the Elite Volume 1-11", "v01-v07", "Vol 1 to 5", "Vol. 01~10",
+    # "DanMachi Vols 01-18" (plural forms Vol/Vols/Volumes)
     bundle_pattern = re.compile(
         r"^(?P<series>.+?)\s*(?:[-–—:,]\s*)?"
-        r"(?:\b(?:volumes|volume|vol|books|book)\b\.?|\bv\.?)\s*(?P<start>\d+(?:\.\d+)?)"
+        r"(?:\b(?:volumes?|vols?|books?|book)\b\.?|\bv\.?)\s*(?P<start>\d+(?:\.\d+)?)"
         r"\s*[-–—~to]+\s*"
-        r"(?:(?:volumes|volume|vol|books|book)\b\.?|\bv\.?)?\s*(?P<end>\d+(?:\.\d+)?)"
+        r"(?:(?:volumes?|vols?|books?|book)\b\.?|\bv\.?)?\s*(?P<end>\d+(?:\.\d+)?)"
         r"(?:\s*[:\-–—]\s*(?P<subtitle>.*))?$",
         re.IGNORECASE
     )
@@ -316,10 +358,10 @@ def extract_series_and_volume(raw_title: str) -> Dict[str, Any]:
             pass
 
     # Pattern 0b: Comma or plus separated bundle
-    # e.g., "Monogatari Series Vol 1, 2, 3", "Series Vol 1 + 2 + 3"
+    # e.g., "Monogatari Series Vol 1, 2, 3", "Series Vol 1 + 2 + 3", "DanMachi Vols 1, 2, 3"
     list_bundle_pattern = re.compile(
         r"^(?P<series>.+?)\s*(?:[-–—:,]\s*)?"
-        r"(?:\b(?:volumes|volume|vol|books?)\b\.?|\bv\.?)\s*(?P<vols_str>\d+(?:\s*(?:,\s*(?:and\b|[+&])|[,+&]|\band\b)\s*(?:(?:volumes|volume|vol|books?)\b\.?|\bv\.?)?\s*\d+)+)"
+        r"(?:\b(?:volumes?|vols?|books?)\b\.?|\bv\.?)\s*(?P<vols_str>\d+(?:\s*(?:,\s*(?:and\b|[+&])|[,+&]|\band\b)\s*(?:(?:volumes?|vols?|books?)\b\.?|\bv\.?)?\s*\d+)+)"
         r"(?:\s*[:\-–—]\s*(?P<subtitle>.*))?$",
         re.IGNORECASE
     )

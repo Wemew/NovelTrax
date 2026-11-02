@@ -1,4 +1,5 @@
 import os
+import re
 import socket
 import ipaddress
 import logging
@@ -123,12 +124,33 @@ def is_safe_public_url(url: str) -> bool:
     if not url or not isinstance(url, str):
         return False
 
+    # Reject raw NUL bytes and other C0/DEL control characters outright. These are
+    # never valid in a public HTTP(S) URL and can truncate/mutate URLs at lower layers.
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in url):
+        logger.warning(f"SSRF blocked: URL contains NUL or control characters: {url!r}")
+        return False
+
     url_clean = url.strip()
+
+    # Percent-encoded NUL/C0/DEL control characters are an obfuscation technique used to
+    # smuggle control bytes past upstream parsers (e.g. "http://127.0.0.1%00@google.com/").
+    if re.search(r"%(?:0[0-9a-f]|1[0-9a-f]|7f)", url_clean, re.IGNORECASE):
+        logger.warning(f"SSRF blocked: URL contains percent-encoded control characters: {url_clean!r}")
+        return False
+
     try:
         parsed = urlparse(url_clean)
         # Scheme must be http or https strictly
         if parsed.scheme.lower() not in ("http", "https"):
             logger.warning(f"SSRF blocked: Disallowed protocol '{parsed.scheme}' in URL {url_clean}")
+            return False
+
+        # Parser-confusion guard: an '@' after the authority (in path/query/fragment) lets
+        # naive SSRF filters treat the trailing token as the host (e.g.
+        # "http://google.com#@127.0.0.1/"). Only userinfo '@' inside the netloc is valid.
+        netloc = parsed.netloc or ""
+        if url_clean.count("@") > netloc.count("@"):
+            logger.warning(f"SSRF blocked: Ambiguous '@' outside URL authority: {url_clean}")
             return False
 
         hostname = parsed.hostname
@@ -291,6 +313,80 @@ class SSRFSafeRedirectHandler(urllib.request.HTTPRedirectHandler):
         if not is_safe_public_url(newurl):
             raise ValueError(f"SSRF blocked: Redirect hop targets unsafe destination: {newurl}")
         return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+def _is_redirect_response(resp: Any) -> bool:
+    """Best-effort redirect detection that works with httpx responses and test stubs."""
+    if getattr(resp, "is_redirect", False) is True:
+        return True
+    status = getattr(resp, "status_code", None)
+    return isinstance(status, int) and 300 <= status < 400
+
+
+def _get_redirect_location(resp: Any) -> Optional[str]:
+    """Best-effort Location header lookup for httpx responses and plain-dict stubs."""
+    headers = getattr(resp, "headers", None)
+    if not headers:
+        return None
+    try:
+        location = headers.get("location") or headers.get("Location")
+    except Exception:
+        return None
+    return location if isinstance(location, str) and location.strip() else None
+
+
+def safe_client_request(client: Any, method: str, url: str, *, max_redirects: int = 5, **kwargs: Any) -> Any:
+    """
+    Performs an HTTP request through an httpx-like client while validating every
+    redirect hop.
+
+    Automatic redirect following MUST be disabled on the client (callers construct
+    their clients with ``follow_redirects=False``); this helper then follows redirects
+    manually, resolving each Location with urljoin and validating it with
+    ``is_safe_public_url`` before requesting it. This closes SSRF-via-redirect holes
+    where a public host 302s to a loopback/private/cloud-metadata destination.
+
+    Raises ValueError when the initial URL or any hop targets an unsafe destination, or
+    when more than ``max_redirects`` redirect hops are encountered.
+    """
+    if not is_safe_public_url(url):
+        raise ValueError(f"SSRF blocked: Target URL is not a safe public destination: {url}")
+
+    kwargs.pop("follow_redirects", None)
+    request_method = getattr(client, method.lower())
+    current_url = url
+
+    for hop in range(max_redirects + 1):
+        try:
+            resp = request_method(current_url, follow_redirects=False, **kwargs)
+        except TypeError:
+            # Test stubs / minimal clients may not accept the follow_redirects kwarg.
+            resp = request_method(current_url, **kwargs)
+
+        if not _is_redirect_response(resp):
+            return resp
+
+        location = _get_redirect_location(resp)
+        if not location:
+            return resp
+
+        if hop >= max_redirects:
+            raise ValueError(
+                f"SSRF blocked: Maximum redirects ({max_redirects}) exceeded while fetching {url}"
+            )
+
+        next_url = urljoin(current_url, location)
+        if not is_safe_public_url(next_url):
+            raise ValueError(f"SSRF blocked: Redirect hop targets unsafe destination: {next_url}")
+        logger.info(f"Following validated redirect hop {hop + 1}/{max_redirects}: {current_url} -> {next_url}")
+        current_url = next_url
+
+    raise ValueError(f"SSRF blocked: Maximum redirects ({max_redirects}) exceeded while fetching {url}")
+
+
+def safe_client_get(client: Any, url: str, *, max_redirects: int = 5, **kwargs: Any) -> Any:
+    """GET counterpart of safe_client_request (validated per-hop redirect following)."""
+    return safe_client_request(client, "get", url, max_redirects=max_redirects, **kwargs)
+
 
 def safe_http_get(
     url: str,

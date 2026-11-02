@@ -287,6 +287,33 @@
             }
         }
 
+        // Shared 1-Click: send a release to the configured qBittorrent downloader
+        async function downloadRelease(releaseId, btn = null) {
+            if (!releaseId) return;
+            const icon = btn ? btn.querySelector('i') : null;
+            if (btn) btn.disabled = true;
+            if (icon) icon.classList.add('animate-spin');
+            try {
+                const res = await fetch(`/api/releases/${releaseId}/download`, { method: 'POST' });
+                let data = {};
+                try {
+                    data = await res.json();
+                } catch (parseErr) {
+                    data = {};
+                }
+                if (res.ok && data.status === 'success') {
+                    showToast(data.message || 'Sent to downloader successfully', 'success');
+                } else {
+                    showToast(data.message || data.detail || `Download failed (HTTP ${res.status})`, 'error');
+                }
+            } catch (err) {
+                showToast('Error: ' + err, 'error');
+            } finally {
+                if (icon) icon.classList.remove('animate-spin');
+                if (btn) btn.disabled = false;
+            }
+        }
+
         async function toggleSeries(seriesId) {
             try {
                 const res = await fetch(`/api/series/${seriesId}/toggle`, { method: 'POST' });

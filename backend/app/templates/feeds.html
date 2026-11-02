@@ -145,6 +145,7 @@
                     <label class="block text-xs font-semibold text-slate-300 mb-1">Feed Preset / Type</label>
                     <select id="new-feed-type" onchange="onFeedTypeChange()" class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-brand-500">
                         <option value="jnovels">J-Novels Scraper (https://jnovels.com/?s=epub)</option>
+                        <option value="nyaa">Nyaa — Light Novels (category 3_1, English)</option>
                         <option value="rss">Standard RSS / Atom Feed</option>
                         <option value="novelupdates">NovelUpdates Release Page / List</option>
                         <option value="html_scraper">Custom HTML Website Scraper</option>
@@ -293,6 +294,9 @@
         }
     }
 
+    // Default URL for the Nyaa preset: provider's category 3_1 (Literature, English) RSS feed.
+    const NYAA_DEFAULT_URL = 'https://nyaa.si/?page=rss&c=3_1';
+
     function onFeedTypeChange() {
         const type = document.getElementById('new-feed-type').value;
         const box = document.getElementById('custom-selectors-box');
@@ -300,6 +304,15 @@
             box.classList.remove('hidden');
         } else {
             box.classList.add('hidden');
+        }
+        const urlInput = document.getElementById('new-feed-url');
+        if (urlInput) {
+            if (type === 'nyaa') {
+                urlInput.placeholder = NYAA_DEFAULT_URL;
+                if (!urlInput.value.trim()) urlInput.value = NYAA_DEFAULT_URL;
+            } else if (urlInput.value.trim() === NYAA_DEFAULT_URL) {
+                urlInput.value = '';
+            }
         }
     }
 

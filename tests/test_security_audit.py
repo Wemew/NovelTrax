@@ -28,6 +28,7 @@ from app.security import (
     is_safe_public_url,
     safe_http_get,
     safe_fetch_text,
+    safe_client_get,
     sanitize_calibre_path,
     DISALLOWED_NETWORKS
 )
@@ -374,6 +375,163 @@ def test_jnovels_master_index_indentation_fix():
     print("  ✓ Network error resilience: fetch_master_index() gracefully returned empty list on failure")
 
 
+class _StubRedirectResponse:
+    """Minimal httpx-like response used by the redirect-SSRF regression tests."""
+
+    def __init__(self, status_code: int = 200, text: str = "", headers=None):
+        self.status_code = status_code
+        self.text = text
+        self.headers = headers or {}
+        self.is_redirect = 300 <= status_code < 400
+
+
+class _StubRedirectClient:
+    """Minimal httpx-like client: maps requested URL -> canned response, records URLs."""
+
+    def __init__(self, pages):
+        self.pages = pages
+        self.requested = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+    def get(self, url, **kwargs):
+        self.requested.append(url)
+        return self.pages.get(url, _StubRedirectResponse(status_code=404))
+
+
+class _StubHttpxModule:
+    """Stand-in for the httpx module exposing a Client() factory returning our stub."""
+
+    def __init__(self, pages):
+        self.pages = pages
+        self.clients = []
+
+    def Client(self, *args, **kwargs):
+        client = _StubRedirectClient(self.pages)
+        self.clients.append(client)
+        return client
+
+
+def test_safe_client_get_follows_validated_public_redirects():
+    """Public -> public redirect hops are followed and the final response is returned."""
+    print("\n--- Testing validated public redirect following (safe_client_get) ---")
+    pages = {
+        "http://93.184.216.34/start": _StubRedirectResponse(302, headers={"location": "/next"}),
+        "http://93.184.216.34/next": _StubRedirectResponse(
+            302, headers={"Location": "http://8.8.8.8/final"}
+        ),
+        "http://8.8.8.8/final": _StubRedirectResponse(200, text="<html>public chain</html>"),
+    }
+    client = _StubRedirectClient(pages)
+    resp = safe_client_get(client, "http://93.184.216.34/start")
+    check(resp.status_code == 200, f"Expected final HTTP 200, got {resp.status_code}")
+    check("public chain" in resp.text, "Final response body was not returned after public redirects")
+    check(
+        client.requested
+        == ["http://93.184.216.34/start", "http://93.184.216.34/next", "http://8.8.8.8/final"],
+        f"Unexpected redirect request sequence: {client.requested}",
+    )
+    print(f"  ✓ public->public redirect chain parsed via {len(client.requested)} validated hops")
+
+
+def test_safe_client_get_blocks_unsafe_redirect_hops():
+    """A public URL redirecting to metadata/loopback must be refused before requesting the hop."""
+    print("\n--- Testing SSRF-via-redirect blocking (safe_client_get) ---")
+    cases = [
+        ("http://169.254.169.254/latest/meta-data/", "cloud metadata"),
+        ("http://127.0.0.1:8080/admin", "loopback"),
+        ("http://192.168.1.1/hook", "RFC1918 private"),
+    ]
+    for target, label in cases:
+        pages = {
+            "http://93.184.216.34/start": _StubRedirectResponse(302, headers={"location": target}),
+        }
+        client = _StubRedirectClient(pages)
+        caught = False
+        try:
+            safe_client_get(client, "http://93.184.216.34/start")
+        except ValueError as e:
+            caught = True
+            check(
+                "ssrf" in str(e).lower() or "unsafe" in str(e).lower(),
+                f"Expected an SSRF/unsafe destination error for {label}, got: {e}",
+            )
+        check(caught, f"Redirect to {label} destination ({target}) was NOT refused")
+        check(target not in client.requested, f"Unsafe {label} hop ({target}) was requested!")
+        print(f"  ✓ refused redirect hop to {label} without requesting it")
+
+    # Hop cap: more than 5 consecutive public redirects must abort cleanly.
+    pages = {}
+    for idx in range(8):
+        pages[f"http://93.184.216.34/hop{idx}"] = _StubRedirectResponse(
+            302, headers={"location": f"http://93.184.216.34/hop{idx + 1}"}
+        )
+    pages["http://93.184.216.34/hop8"] = _StubRedirectResponse(200, text="too far")
+    client = _StubRedirectClient(pages)
+    caught_cap = False
+    try:
+        safe_client_get(client, "http://93.184.216.34/hop0", max_redirects=5)
+    except ValueError as e:
+        caught_cap = True
+        check("redirect" in str(e).lower(), f"Hop-cap error should mention redirects, got: {e}")
+    check(caught_cap, "Redirect hop cap (>5) was not enforced")
+    check(len(client.requested) <= 6, f"Hop cap requested too many URLs: {len(client.requested)}")
+    print("  ✓ redirect hop cap enforced (max_redirects=5) without requesting destination")
+
+
+def test_jnovels_provider_redirect_ssrf_hardening():
+    """J-Novels master index validates redirect hops before fetching them."""
+    print("\n--- Testing J-Novels master-index redirect SSRF hardening ---")
+    index_html = """
+    <html><body><div class="entry-content">
+        <p><a href="https://jnovels.com/danmachi-light-novel-epub/">DanMachi Light Novel Epub</a></p>
+        <p><a href="https://jnovels.com/overlord-light-novel-epub/">Overlord Volume 1 Epub</a></p>
+    </div></body></html>
+    """
+    # 1. Public -> public redirect chain still parses the master index.
+    pages = {
+        "http://93.184.216.34/index-start": _StubRedirectResponse(
+            302, headers={"location": "http://8.8.8.8/index-final"}
+        ),
+        "http://8.8.8.8/index-final": _StubRedirectResponse(200, text=index_html),
+    }
+    stub = _StubHttpxModule(pages)
+    with patch.object(jnovels_mod, "httpx", stub):
+        safe_results = JNovelsProvider.fetch_master_index("http://93.184.216.34/index-start")
+    safe_names = [r.series_name for r in safe_results]
+    check(len(safe_results) == 2, f"Public redirect chain dropped results: {safe_names}")
+    check("DanMachi" in safe_names and "Overlord" in safe_names, f"Unexpected parsed series: {safe_names}")
+    check(
+        "http://8.8.8.8/index-final" in stub.clients[-1].requested,
+        "Public redirect target was not followed by the provider",
+    )
+    print(f"  ✓ public redirect chain still parsed {safe_names}")
+
+    # 2. Public -> cloud metadata / loopback redirect is refused, never requested.
+    for unsafe_target, label in (
+        ("http://169.254.169.254/latest/meta-data/", "cloud metadata"),
+        ("http://127.0.0.1:8080/admin", "loopback"),
+    ):
+        pages = {
+            "http://93.184.216.34/index-start": _StubRedirectResponse(
+                302, headers={"location": unsafe_target}
+            ),
+        }
+        stub = _StubHttpxModule(pages)
+        with patch.object(jnovels_mod, "httpx", stub):
+            blocked_results = JNovelsProvider.fetch_master_index("http://93.184.216.34/index-start")
+        check(blocked_results == [], f"Provider returned results for unsafe {label} redirect: {blocked_results}")
+        check(
+            unsafe_target not in stub.clients[-1].requested,
+            f"Provider requested unsafe {label} redirect target {unsafe_target}",
+        )
+        print(f"  ✓ J-Novels provider refused {label} redirect hop")
+
+
 def run_all_security_tests():
     print("============================================================")
     print("RUNNING NOVELTRAX SECURITY AUDIT & HARDENING TEST SUITE (M1)")
@@ -386,6 +544,9 @@ def run_all_security_tests():
     test_dom_xss_sanitization()
     test_dependency_minimization()
     test_jnovels_master_index_indentation_fix()
+    test_safe_client_get_follows_validated_public_redirects()
+    test_safe_client_get_blocks_unsafe_redirect_hops()
+    test_jnovels_provider_redirect_ssrf_hardening()
     print("\n============================================================")
     print("ALL MILESTONE 1 SECURITY AUDIT & HARDENING TESTS PASSED (100%)!")
     print("============================================================")

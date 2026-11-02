@@ -895,20 +895,24 @@ def run_e2e_test():
 
     # 3. Auto-resolving pending requests when Volume 1 is later added to Calibre
     # Insert pending request with volume=1.0 (or None)
-    app_db.upsert_release({
+    is_new_pending, tbate_pending_id = app_db.upsert_release({
         "guid": "tbate_v1_req",
         "title": "TBATE Epub",
         "series_name": "TBATE",
         "volume": 1.0,
         "status": "REQUESTED"
     })
+    if not (is_new_pending is True): raise AssertionError("pending TBATE Vol 1 request was not inserted as a new release")
     if not (any(r["guid"] == "tbate_v1_req" for r in app_db.get_pending_requests())): raise AssertionError("assertion failed at line 905")
 
     # Now add TBATE Vol 1 to Calibre scanner mock
     tbate_books.append({"book_id": 991, "title": "TBATE Vol 1", "series_id": 99, "series_name": "TBATE", "series_index": 1.0})
     tbate_matcher_updated = CalibreMatcher(tbate_series, tbate_books)
     resolved = tbate_matcher_updated.resolve_pending_requests(app_db.get_pending_requests())
-    if not (any(res["request"]["guid"] == "tbate_v1_req" for res in resolved)): raise AssertionError("assertion failed at line 911")
+    # resolve_pending_requests() returns FLAT dicts (release_id/title/series_name/volume/
+    # matched_book_id/reason) — there is no nested "request" key. Match the resolved row
+    # back to the pending release by its real contract field, release_id.
+    if not (any(res["release_id"] == tbate_pending_id for res in resolved)): raise AssertionError(f"pending Vol 1 request (release_id={tbate_pending_id}) was not auto-resolved once the book appeared in Calibre; resolved={resolved!r}")
     print("  ✓ Pending unnumbered Vol 1 request auto-resolved once added to Calibre")
 
     # 4. Strict intra-series fuzzy guard: DanMachi Vol 19 must NOT fuzzy match DanMachi Vol 1

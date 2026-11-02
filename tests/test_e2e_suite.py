@@ -631,12 +631,35 @@ def test_t1_f08_valid_generic_payload_structure():
     if not (ns.generic_webhook is not None): raise AssertionError("assertion failed at line 631")
 runner.run_test("T1_F08_4: Generic service initialized with valid public webhook URL", test_t1_f08_valid_generic_payload_structure)
 
+def _test_webhook_without_network(discord_url, generic_url):
+    """Run NotificationService.test_webhook with the HTTP layer trapped.
+
+    Any attempted webhook POST is recorded and refused, so a blank-URL code path
+    can be proven to open no socket. Returns (result, attempted_calls).
+    """
+    import app.notifier.webhook as webhook_module
+    attempted_calls = []
+    original_post_json = webhook_module._post_json
+
+    def _network_trap(*args, **kwargs):
+        attempted_calls.append((args, kwargs))
+        raise AssertionError("test_webhook attempted a network call for blank webhook URLs")
+
+    webhook_module._post_json = _network_trap
+    try:
+        result = NotificationService().test_webhook(discord_url, generic_url)
+    finally:
+        webhook_module._post_json = original_post_json
+    return result, attempted_calls
+
+
 def test_t1_f08_test_webhook_empty_returns_clean():
-    ns = NotificationService()
-    res = ns.test_webhook(None, None)
-    if not (res["success"] is True): raise AssertionError("assertion failed at line 637")
-    if not (len(res["results"]) == 0): raise AssertionError("assertion failed at line 638")
-runner.run_test("T1_F08_5: test_webhook on empty URLs returns clean success without network call", test_t1_f08_test_webhook_empty_returns_clean)
+    res, attempted_calls = _test_webhook_without_network(None, None)
+    if not (res["success"] is False): raise AssertionError(f"empty-URL test_webhook should report success=False, got {res['success']!r}")
+    if not (res["status"] == "error"): raise AssertionError(f"empty-URL test_webhook should report status='error', got {res['status']!r}")
+    if not (res["results"] == {}): raise AssertionError(f"empty-URL test_webhook should test no endpoint, got results={res['results']!r}")
+    if not (attempted_calls == []): raise AssertionError(f"empty-URL test_webhook attempted {len(attempted_calls)} network call(s), expected 0")
+runner.run_test("T1_F08_5: test_webhook on empty URLs returns no-op error without network call", test_t1_f08_test_webhook_empty_returns_clean)
 
 
 runner.banner("Tier 1: Feature 9 - DOM-Based XSS Prevention")
@@ -1528,14 +1551,28 @@ runner.run_test("T2_F02_3: Unnumbered novel title preserves series name with Non
 def test_t2_f02_duplicate_incoming_release():
     td, cdb, adb, db = make_temp_env()
     try:
-        db.upsert_release({"guid": "dup-1", "title": "Overlord Vol 1", "series_name": "Overlord", "volume": 1.0, "status": "NEW"})
-        db.upsert_release({"guid": "dup-1", "title": "Overlord Vol 1 (Updated)", "series_name": "Overlord", "volume": 1.0, "status": "REQUESTED"})
+        is_new, rel_id = db.upsert_release({"guid": "dup-1", "title": "Overlord Vol 1", "series_name": "Overlord", "volume": 1.0, "status": "NEW"})
+        if not (is_new is True): raise AssertionError("initial insert should report is_new=True")
+        # Simulate the Calibre sync having already classified this release as IN_CALIBRE.
+        db.update_release_status(rel_id, "IN_CALIBRE")
+        with db.get_connection() as conn:
+            seeded = conn.cursor().execute("SELECT status FROM releases WHERE guid = 'dup-1';").fetchone()
+        if not (seeded[0] == "IN_CALIBRE"): raise AssertionError(f"test setup failed: expected seeded status IN_CALIBRE, got {seeded[0]!r}")
+        # Re-upsert the same GUID with a different incoming status. Documented behaviour of
+        # Database.upsert_release: any existing lifecycle status (here IN_CALIBRE) is preserved
+        # on duplicate GUID, and the row is updated in place instead of hitting a duplicate key.
+        try:
+            is_new_again, rel_id_again = db.upsert_release({"guid": "dup-1", "title": "Overlord Vol 1 (Updated)", "series_name": "Overlord", "volume": 1.0, "status": "REQUESTED"})
+        except sqlite3.IntegrityError as exc:
+            raise AssertionError(f"duplicate GUID upsert raised IntegrityError (duplicate key error): {exc}")
+        if not (is_new_again is False): raise AssertionError("duplicate GUID upsert should report is_new=False")
+        if not (rel_id_again == rel_id): raise AssertionError("duplicate GUID upsert should reuse the existing row id")
         with db.get_connection() as conn:
             count = conn.cursor().execute("SELECT count(*) FROM releases WHERE guid = 'dup-1';").fetchone()[0]
-            if not (count == 1): raise AssertionError("assertion failed at line 1535")
+            if not (count == 1): raise AssertionError(f"duplicate GUID created {count} rows for the same GUID (expected exactly 1)")
             rel = conn.cursor().execute("SELECT title, status FROM releases WHERE guid = 'dup-1';").fetchone()
-            if not (rel[0] == "Overlord Vol 1 (Updated)"): raise AssertionError("assertion failed at line 1537")
-            if not (rel[1] == "REQUESTED"): raise AssertionError("assertion failed at line 1538")
+            if not (rel[0] == "Overlord Vol 1 (Updated)"): raise AssertionError(f"in-place update did not apply the new title, got {rel[0]!r}")
+            if not (rel[1] == "IN_CALIBRE"): raise AssertionError(f"existing IN_CALIBRE status was not preserved on duplicate GUID upsert, got {rel[1]!r}")
     finally:
         cleanup_temp_env(td)
 runner.run_test("T2_F02_4: Duplicate GUID updates existing record without duplicate key error", test_t2_f02_duplicate_incoming_release)
@@ -1682,9 +1719,63 @@ def test_t2_f05_official_vs_fan_translation_tag():
 runner.run_test("T2_F05_4: Identifies official vs fan translation tags in title", test_t2_f05_official_vs_fan_translation_tag)
 
 def test_t2_f05_master_index_filters_navigation_links():
-    bad_links = ["/category/light-novels", "/tag/isekai", "/author/admin", "/contact"]
-    for link in bad_links:
-        if not (any(b in link for b in ("/category/", "/tag/", "/author/", "/contact/"))): raise AssertionError("assertion failed at line 1687")
+    # Exercise the real production filter in JNovelsProvider.fetch_master_index by feeding
+    # it a synthetic master-index page (no network access). A bare "/contact" without a
+    # trailing slash must be rejected just like "/contact/", while a real series link must
+    # survive the filter.
+    nav_links = [
+        "https://jnovels.com/category/light-novels",
+        "https://jnovels.com/tag/isekai",
+        "https://jnovels.com/author/admin",
+        "https://jnovels.com/contact",
+        "https://jnovels.com/faq",
+    ]
+    series_link = "https://jnovels.com/danmachi/"
+    # fetch_master_index routes its HTTP GET through the SSRF guard, which resolves
+    # hostnames via DNS. Use a public IP literal for the index URL itself so the test is
+    # deterministic and needs no network/DNS; the anchor filtering below is what matters.
+    index_url = "https://93.184.216.34/light-novel-epub-jp/"
+    anchors = "".join(f'<a href="{link}">navigation</a>' for link in nav_links)
+    anchors += f'<a href="{series_link}">DanMachi</a>'
+    page_html = f'<div class="entry-content">{anchors}</div>'
+
+    class _StubResponse:
+        status_code = 200
+        is_redirect = False
+
+        def __init__(self, text):
+            self.text = text
+
+    class _StubClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc_info):
+            return False
+
+        def get(self, url, **kwargs):
+            return _StubResponse(page_html)
+
+    class _StubHttpx:
+        Client = _StubClient
+
+    import app.providers.jnovels as jnovels_module
+    original_httpx = jnovels_module.httpx
+    jnovels_module.httpx = _StubHttpx
+    try:
+        items = JNovelsProvider.fetch_master_index(index_url)
+    finally:
+        jnovels_module.httpx = original_httpx
+
+    found_links = [item.link for item in items]
+    for link in nav_links:
+        if not (link not in found_links):
+            raise AssertionError(f"master index accepted navigation link {link!r} (parsed links: {found_links!r})")
+    if not (series_link in found_links):
+        raise AssertionError(f"master index dropped the real series link {series_link!r} (parsed links: {found_links!r})")
 runner.run_test("T2_F05_5: Master index navigation paths correctly rejected", test_t2_f05_master_index_filters_navigation_links)
 
 def test_t2_f06_ipv4_mapped_ipv6_blocked():
@@ -1756,9 +1847,11 @@ def test_t2_f08_webhook_url_with_credentials_sanitized():
 runner.run_test("T2_F08_2: Embedded basic auth parsed and isolated in URL inspection", test_t2_f08_webhook_url_with_credentials_sanitized)
 
 def test_t2_f08_empty_webhook_urls():
-    ns = NotificationService()
-    res = ns.test_webhook("", "")
-    if not (res["success"] is True): raise AssertionError("assertion failed at line 1761")
+    res, attempted_calls = _test_webhook_without_network("", "")
+    if not (res["success"] is False): raise AssertionError(f"blank-URL test_webhook should report success=False, got {res['success']!r}")
+    if not (res["status"] == "error"): raise AssertionError(f"blank-URL test_webhook should report status='error', got {res['status']!r}")
+    if not (res["results"] == {}): raise AssertionError(f"blank-URL test_webhook should test no endpoint, got results={res['results']!r}")
+    if not (attempted_calls == []): raise AssertionError(f"blank-URL test_webhook attempted {len(attempted_calls)} network call(s), expected 0")
 runner.run_test("T2_F08_3: Blank webhook URLs do not trigger network connections", test_t2_f08_empty_webhook_urls)
 
 def test_t2_f08_webhook_dispatch_skips_when_url_empty():
@@ -2611,13 +2704,20 @@ def test_t4_scenario_2_adversarial_security_and_feed_injection():
     if not (is_safe_public_url(item_link) is False): raise AssertionError("assertion failed at line 2611")
 
     # 5. Path Traversal Exploration Attempt
+    # Contract (T1_F11_5, T5_SEC_22): benign '..' segments are normalised away rather than
+    # rejected — sanitize_calibre_path is a canonicaliser, not a blanket dot-dot blocker.
+    # What it MUST block is a traversal that targets a probed executable/sensitive file.
     traversal_path = "C:/calibre/../../../../Windows/System32/config/SAM"
-    caught_traversal = False
+    traversal_result = sanitize_calibre_path(traversal_path)
+    if not (traversal_result == os.path.normpath(traversal_path)): raise AssertionError(f"path traversal target not canonicalised: expected {os.path.normpath(traversal_path)!r}, got {traversal_result!r}")
+    if not (".." not in traversal_result): raise AssertionError(f"path traversal '..' segments not eliminated: {traversal_result!r}")
+    blocked_target = "C:/calibre/../../../../Windows/System32/cmd.exe"
+    caught_blocked = False
     try:
-        sanitize_calibre_path(traversal_path)
+        sanitize_calibre_path(blocked_target)
     except ValueError:
-        caught_traversal = True
-    if not (caught_traversal is True or ".." in os.path.normpath(traversal_path)): raise AssertionError("assertion failed at line 2620")
+        caught_blocked = True
+    if not (caught_blocked is True): raise AssertionError(f"traversal targeting a blocked executable was accepted: {blocked_target!r}")
 runner.run_test("T4_Scenario_2: Adversarial Security & Injection Defense Workflow", test_t4_scenario_2_adversarial_security_and_feed_injection)
 
 

@@ -115,9 +115,13 @@ class NotificationService:
         g_url = apprise_url if apprise_url is not None else self.generic_webhook
 
         if not d_url and not g_url:
+            # Nothing was dispatched, so the honest success flag is False; keep the
+            # diagnostic status/message keys the settings UI already relies on.
             return {
+                "success": False,
                 "status": "error",
-                "message": "No webhook URL provided. Please enter a Discord Webhook URL or Generic Webhook URL."
+                "message": "No webhook URL provided. Please enter a Discord Webhook URL or Generic Webhook URL.",
+                "results": {},
             }
 
         results = {}
@@ -201,6 +205,7 @@ class NotificationService:
 
         messages = [r["message"] for r in results.values()]
         return {
+            "success": all_succeeded,
             "status": "success" if all_succeeded else "error",
             "message": " | ".join(messages),
             "results": results

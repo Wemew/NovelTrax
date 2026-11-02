@@ -338,9 +338,27 @@ def run_backfill_concurrency_and_network_tests(t: TestResultTracker):
         lock_results = []
         barrier = threading.Barrier(10)
 
+        # Deterministic handshake instead of a fixed sleep: the worker parks inside
+        # the mocked provider dispatch until this test releases it. Relying on
+        # time.sleep() here is a race -- the worker performs three DB writes before
+        # it reaches backfill_series(), so a short sleep could lapse while the
+        # ``with patch.object(...)`` block was already unwinding, letting the worker
+        # fall through to the real (network) backfill and leaving the lock held.
+        entered_evt = threading.Event()
+        release_evt = threading.Event()
+
         def mock_backfill_slow(series_name, max_pages=3):
-            time.sleep(0.3)
+            entered_evt.set()
+            release_evt.wait(timeout=10)
             return {"status": "success", "message": "done", "series_name": series_name, "releases_found": 1, "requested": 1}
+
+        def wait_until(predicate, timeout=10.0, interval=0.01):
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                if predicate():
+                    return True
+                time.sleep(interval)
+            return predicate()
 
         with patch.object(tm, "backfill_series", side_effect=mock_backfill_slow):
             def trigger_backfill(idx):
@@ -354,23 +372,29 @@ def run_backfill_concurrency_and_network_tests(t: TestResultTracker):
             for th in threads:
                 th.join()
 
-        started_count = sum(1 for r in lock_results if r.get("status") == "started")
-        in_progress_count = sum(1 for r in lock_results if r.get("status") == "in_progress")
+            started_count = sum(1 for r in lock_results if r.get("status") == "started")
+            in_progress_count = sum(1 for r in lock_results if r.get("status") == "in_progress")
 
-        t.check(started_count == 1, f"Exactly 1 thread acquired backfill lock (got {started_count})", started_count)
-        t.check(in_progress_count == 9, f"Exactly 9 threads rejected with 'in_progress' (got {in_progress_count})", in_progress_count)
+            t.check(started_count == 1, f"Exactly 1 thread acquired backfill lock (got {started_count})", started_count)
+            t.check(in_progress_count == 9, f"Exactly 9 threads rejected with 'in_progress' (got {in_progress_count})", in_progress_count)
 
-        # Wait until background worker finishes and lock clears
-        time.sleep(0.5)
-        t.check(not tm.is_backfilling, "is_backfilling flag reset to False after worker completes")
-        t.check(db.get_setting("backfill_status") == "idle", "backfill_status in DB returned to 'idle'", db.get_setting("backfill_status"))
+            # The lock must still be held while the worker is genuinely running.
+            t.check(entered_evt.wait(timeout=10), "Backfill worker reached provider dispatch (mock never called)")
+            t.check(tm.is_backfilling, "Lock held while the worker is still running")
 
-        # Subsequent backfill immediately succeeds after lock release
-        with patch.object(tm, "backfill_series", return_value={"status": "success", "message": "Subsequent complete"}):
+            # Release the worker, then wait for the lock to clear (bounded poll).
+            release_evt.set()
+            t.check(wait_until(lambda: not tm.is_backfilling), "is_backfilling flag reset to False after worker completes")
+            t.check(wait_until(lambda: db.get_setting("backfill_status") == "idle"), "backfill_status in DB returned to 'idle'", db.get_setting("backfill_status"))
+
+            # Subsequent backfill immediately succeeds after lock release
+            entered_evt.clear()
+            release_evt.clear()
             subsequent_res = tm.run_series_backfill_async("DanMachi", max_pages=1)
             t.check(subsequent_res.get("status") == "started", "Subsequent backfill succeeds after prior worker released lock", subsequent_res)
-            time.sleep(0.2)
-            t.check(not tm.is_backfilling, "Lock released cleanly after subsequent backfill")
+            t.check(entered_evt.wait(timeout=10), "Subsequent backfill worker reached provider dispatch")
+            release_evt.set()
+            t.check(wait_until(lambda: not tm.is_backfilling), "Lock released cleanly after subsequent backfill")
 
         # 2.2 Network Resilience: Timeouts, ConnectionError, OSError, Panic
         import socket

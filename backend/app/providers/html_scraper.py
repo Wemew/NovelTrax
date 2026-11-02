@@ -9,6 +9,7 @@ except ImportError:
 from bs4 import BeautifulSoup
 from app.providers.base import BaseFeedProvider, ReleaseItem
 from app.parser import extract_series_and_volume, is_pdf_release
+from app.security import safe_client_get
 
 logger = logging.getLogger("noveltrax.providers.html_scraper")
 
@@ -44,10 +45,10 @@ class HtmlScraperProvider(BaseFeedProvider):
         current_url = self.url
         page_num = 1
 
-        with httpx.Client(headers=headers, timeout=15.0, follow_redirects=True) as client:
+        with httpx.Client(headers=headers, timeout=15.0, follow_redirects=False) as client:
             while current_url and page_num <= self.max_pages:
                 try:
-                    resp = client.get(current_url)
+                    resp = safe_client_get(client, current_url)
                     resp.raise_for_status()
                     html_text = resp.text
                 except Exception as e:

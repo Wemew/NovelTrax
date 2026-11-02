@@ -4,7 +4,7 @@ import sqlite3
 import json
 import logging
 from datetime import datetime
-from typing import List, Dict, Any, Optional, Tuple, Set
+from typing import List, Dict, Any, Optional, Tuple, Set, Union
 
 logger = logging.getLogger("noveltrax.database")
 
@@ -435,11 +435,23 @@ class Database:
         with self.get_connection() as conn:
             cur = conn.cursor()
 
+            # Blacklist guard: never let a release for a blacklisted series become
+            # requested/discoverable. The lookup reuses this connection (no nested
+            # connection, no extra lock) instead of calling is_series_blacklisted().
+            blacklisted = False
+            series_name_check = (release_data.get("series_name") or "").strip()
+            if series_name_check:
+                cur.execute(
+                    "SELECT 1 FROM series_blacklist WHERE lower(trim(name)) = lower(trim(?)) LIMIT 1;",
+                    (series_name_check,),
+                )
+                blacklisted = cur.fetchone() is not None
+
             # Deduplication for discovery (status == 'NEW') releases
             # Only merge if incoming release is a discovery candidate (volume is None or volume == 1.0)
             incoming_vol = release_data.get("volume")
             is_discovery_cand = (incoming_vol is None or incoming_vol == 1.0)
-            if release_data.get("status") == "NEW" and release_data.get("series_name") and is_discovery_cand:
+            if release_data.get("status") == "NEW" and release_data.get("series_name") and is_discovery_cand and not blacklisted:
                 cur.execute("""
                     SELECT id, description, cover_url, series_link, title, volume FROM releases 
                     WHERE status = 'NEW' 
@@ -505,13 +517,18 @@ class Database:
             is_ignored = (status_in == "IGNORED") or bool(release_data.get("ignored"))
             ignored_val = 1 if is_ignored else 0
             status_val = "IGNORED" if is_ignored else status_in
+            # A blacklisted series may never be stored as pending/discoverable.
+            if blacklisted and status_val in ("NEW", "REQUESTED"):
+                status_val = "BLACKLISTED"
 
             cur.execute("SELECT id, status FROM releases WHERE guid = ?;", (guid,))
             existing = cur.fetchone()
 
             if existing:
                 rel_id = existing["id"]
-                # If already exists and is IN_CALIBRE or IGNORED, keep that status
+                # Re-ingest updates the payload only: whatever lifecycle status the
+                # row already carries (IN_CALIBRE, IGNORED, REQUESTED, ...) is kept
+                # so that a later feed scan cannot resurrect or downgrade it.
                 cur.execute("""
                     UPDATE releases SET
                         title = ?,
@@ -1462,10 +1479,24 @@ class Database:
             conn.commit()
             return True
 
-    def remove_from_blacklist(self, blacklist_id: int):
+    def remove_from_blacklist(self, blacklist_id: Union[int, str]):
+        """
+        Removes a series from the blacklist.
+
+        Accepts either the blacklist row id (int or digit-only string) or a
+        series-name string, which is matched case-insensitively.
+        """
         with self.get_connection() as conn:
             cur = conn.cursor()
-            cur.execute("DELETE FROM series_blacklist WHERE id = ?;", (blacklist_id,))
+            if isinstance(blacklist_id, int) or (
+                isinstance(blacklist_id, str) and blacklist_id.strip().isdigit()
+            ):
+                cur.execute("DELETE FROM series_blacklist WHERE id = ?;", (int(blacklist_id),))
+            else:
+                cur.execute(
+                    "DELETE FROM series_blacklist WHERE lower(name) = lower(?);",
+                    (str(blacklist_id or "").strip(),),
+                )
             conn.commit()
 
     def get_blacklisted_series(self) -> List[Dict[str, Any]]:
@@ -1492,7 +1523,9 @@ class Database:
     ) -> List[Dict[str, Any]]:
         """
         Returns releases that are Volume 1 or unnumbered (standalone),
-        which are NOT currently in Calibre, NOT in series_tracking, and NOT blacklisted.
+        which are NOT currently in Calibre, NOT in series_tracking, NOT blacklisted,
+        and are still unreviewed (status='NEW'). Pending wishlist requests (status
+        'REQUESTED') are intentionally not Discovery items.
         Deduplicates by series name so each series appears at most once.
         Strictly excludes PDF releases.
         """
@@ -1536,7 +1569,7 @@ class Database:
                            ) as rn
                     FROM releases r
                     WHERE (r.volume IS NULL OR r.volume = 1.0)
-                      AND r.status NOT IN ('IN_CALIBRE', 'BLACKLISTED', 'IGNORED')
+                      AND r.status NOT IN ('IN_CALIBRE', 'BLACKLISTED', 'IGNORED', 'REQUESTED')
                       AND COALESCE(lower(r.title), '') NOT LIKE '%pdf%'
                       AND COALESCE(lower(r.link), '') NOT LIKE '%.pdf%'
                       AND COALESCE(lower(r.guid), '') NOT LIKE '%pdf%'
@@ -1564,7 +1597,8 @@ class Database:
     def count_discovery_releases(self, search: Optional[str] = None) -> int:
         """
         Returns total count of unique discovered series (Volume 1 or unnumbered standalones)
-        not in Calibre, tracking, or blacklist.
+        not in Calibre, tracking, or blacklist, which are still unreviewed (status='NEW').
+        Pending wishlist requests (status='REQUESTED') are not Discovery items.
         Strictly excludes PDF releases.
         """
         with self.get_connection() as conn:
@@ -1587,7 +1621,7 @@ class Database:
                            ) as rn
                     FROM releases r
                     WHERE (r.volume IS NULL OR r.volume = 1.0)
-                      AND r.status NOT IN ('IN_CALIBRE', 'BLACKLISTED', 'IGNORED')
+                      AND r.status NOT IN ('IN_CALIBRE', 'BLACKLISTED', 'IGNORED', 'REQUESTED')
                       AND COALESCE(lower(r.title), '') NOT LIKE '%pdf%'
                       AND COALESCE(lower(r.link), '') NOT LIKE '%.pdf%'
                       AND COALESCE(lower(r.guid), '') NOT LIKE '%pdf%'
@@ -1812,10 +1846,26 @@ class Database:
             return rel_count
 
     def clear_discovered_series(self) -> int:
-        """Clears unreviewed new series from the Discovery page (status='NEW')."""
+        """
+        Clears unreviewed series from the Discovery page.
+
+        Deletes exactly the rows that get_discovery_releases() would show: volume 1 or
+        unnumbered unreviewed releases (status='NEW') that are not PDFs, belong to a
+        non-blacklisted series and are not part of a monitored tracked series. Pending
+        wishlist requests (status='REQUESTED') are never touched.
+        """
         with self.get_connection() as conn:
             cur = conn.cursor()
-            cur.execute("DELETE FROM releases WHERE status = 'NEW';")
+            cur.execute("""
+                DELETE FROM releases
+                WHERE (volume IS NULL OR volume = 1.0)
+                  AND status NOT IN ('IN_CALIBRE', 'BLACKLISTED', 'IGNORED', 'REQUESTED')
+                  AND COALESCE(lower(title), '') NOT LIKE '%pdf%'
+                  AND COALESCE(lower(link), '') NOT LIKE '%.pdf%'
+                  AND COALESCE(lower(guid), '') NOT LIKE '%pdf%'
+                  AND (series_name IS NULL OR lower(trim(series_name)) NOT IN (SELECT lower(trim(name)) FROM series_blacklist))
+                  AND (series_name IS NULL OR lower(trim(series_name)) NOT IN (SELECT lower(trim(name)) FROM series_tracking WHERE is_monitored = 1));
+            """)
             count = cur.rowcount
             conn.commit()
             self.log_activity("DEBUG_CLEAR", "Cleared discovered series", f"Removed {count} unreviewed discovery releases.")

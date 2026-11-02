@@ -8,6 +8,7 @@ except ImportError:
 from bs4 import BeautifulSoup
 from app.providers.base import BaseFeedProvider, ReleaseItem
 from app.parser import extract_series_and_volume
+from app.security import safe_client_get
 
 logger = logging.getLogger("noveltrax.providers.novelupdates")
 
@@ -30,8 +31,8 @@ class NovelUpdatesProvider(BaseFeedProvider):
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             "Referer": "https://www.novelupdates.com/"
         }
-        with httpx.Client(headers=headers, timeout=15.0, follow_redirects=True) as client:
-            resp = client.get(self.url)
+        with httpx.Client(headers=headers, timeout=15.0, follow_redirects=False) as client:
+            resp = safe_client_get(client, self.url)
             resp.raise_for_status()
             html_text = resp.text
 

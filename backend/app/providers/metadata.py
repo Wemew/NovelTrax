@@ -14,6 +14,8 @@ try:
 except ImportError:
     httpx = None
 
+from app.security import safe_client_get, safe_client_request
+
 logger = logging.getLogger("noveltrax.providers.metadata")
 
 DEFAULT_HEADERS = {
@@ -136,8 +138,9 @@ class NovelMetadataProvider:
         _KITSU_LIMITER.wait_if_needed()
         try:
             if httpx is not None:
-                with httpx.Client(headers={**DEFAULT_HEADERS, "Accept": "application/vnd.api+json"}, timeout=10.0, follow_redirects=True) as client:
-                    resp = client.get(url)
+                with httpx.Client(headers={**DEFAULT_HEADERS, "Accept": "application/vnd.api+json"}, timeout=10.0, follow_redirects=False) as client:
+                    # Redirects are followed manually so every hop is SSRF-validated.
+                    resp = safe_client_get(client, url, max_redirects=5)
                     _KITSU_LIMITER.handle_response_headers(resp.headers)
                     if resp.status_code == 429:
                         _KITSU_LIMITER.handle_rate_limit_error(resp.headers)
@@ -213,8 +216,9 @@ class NovelMetadataProvider:
         _ANILIST_LIMITER.wait_if_needed()
         try:
             if httpx is not None:
-                with httpx.Client(headers={**DEFAULT_HEADERS, "Content-Type": "application/json"}, timeout=10.0) as client:
-                    resp = client.post(url, json=req_payload)
+                # POST through the shared helper so redirect hops are SSRF-validated too.
+                with httpx.Client(headers={**DEFAULT_HEADERS, "Content-Type": "application/json"}, timeout=10.0, follow_redirects=False) as client:
+                    resp = safe_client_request(client, "post", url, json=req_payload)
                     _ANILIST_LIMITER.handle_response_headers(resp.headers)
                     if resp.status_code == 429:
                         _ANILIST_LIMITER.handle_rate_limit_error(resp.headers)
