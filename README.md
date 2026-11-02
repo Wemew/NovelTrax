@@ -263,6 +263,21 @@ The automated suites run under the Calibre bundled Python interpreter, which pro
 
 Additional targeted suites exist in `tests/` for security, downloader, Nyaa, omnibus/timezone, Tier 5 adversarial coverage, and UI wiring (including a stdlib-only static guard that balances Jinja blocks and checks template wiring, since the Calibre interpreter has no Jinja2); `TEST_READY.md` describes the end-to-end suite layout and commands.
 
+### Whole-suite runner (assert-preserving)
+
+Calibre's interpreter runs with `sys.flags.optimize == 2`, which compiles bare `assert` statements away — a suite can print `ALL TESTS PASSED` while checking nothing. `tests/run_tests.py` exists so that can never be relied on:
+
+```powershell
+# Every suite, recompiled at optimize=0 so assertions are live
+& "C:\Program Files\Calibre2\calibre-debug.exe" -e tests\run_tests.py
+
+# Substring filters / verbose output (options go after calibre-debug's own --)
+& "C:\Program Files\Calibre2\calibre-debug.exe" -e tests\run_tests.py -- chapter media
+& "C:\Program Files\Calibre2\calibre-debug.exe" -e tests\run_tests.py -- --verbose
+```
+
+It prints the interpreter's optimisation level on every run, recompiles each suite with `optimize=0`, counts both compiled and actually-executed assertions, isolates suites from each other, reports failing `file:line`/statement with a full traceback, and exits non-zero on failure. The project's own suites contain no bare asserts (enforced by `tests/test_assert_hygiene.py`); the runner is what proves that, and would catch the next bare assert that slips in.
+
 ---
 
 ## ⚙️ Configuration & Environment Variables
