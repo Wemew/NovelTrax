@@ -227,8 +227,10 @@ def clean_feed_title(raw_title: str) -> str:
     # Strip residual HTML markup (e.g. <script>…</script>, <b>…</b>) from scraped titles.
     cleaned = strip_html_markup(cleaned)
 
-    # Strip leading download / site prefixes
-    cleaned = re.sub(r'^(?:\s*download|\s*free\s+download|\s*read|\s*get)\s*[:\-–—]?\s*', '', cleaned, flags=re.IGNORECASE)
+    # Strip leading download / site prefixes. "read"/"get" only when followed by a
+    # separator, so real titles such as "Reading Our Way to a Happy New World" and
+    # "Getting the Boot" keep their first word.
+    cleaned = re.sub(r'^(?:\s*(?:free\s+)?download\b\s*[:\-–—]?\s*|\s*(?:read|get)\s*[:\-–—]\s*)', '', cleaned, flags=re.IGNORECASE)
 
     # Strip file extensions if present
     cleaned = re.sub(r"\.(?:epub|pdf|mobi|azw3|zip|rar)$", "", cleaned, flags=re.IGNORECASE)
@@ -402,7 +404,7 @@ def extract_series_and_volume(raw_title: str) -> Dict[str, Any]:
     if m1:
         series = m1.group("series").strip(" -–—:,|")
         series = re.sub(r"(?i)\b(?:volumes?|vols?\.?|books?|parts?|pts?\.?)\b$", "", series).strip(" -–—:,|")
-        series = re.sub(r'^(?:\s*download|\s*free\s+download|\s*read|\s*get)\s*[:\-–—]?\s*', '', series, flags=re.IGNORECASE).strip(" -–—:,|")
+        series = re.sub(r'^(?:\s*(?:free\s+)?download\b\s*[:\-–—]?\s*|\s*(?:read|get)\s*[:\-–—]\s*)', '', series, flags=re.IGNORECASE).strip(" -–—:,|")
         vol_str = m1.group("vol")
         subtitle = (m1.group("subtitle") or "").strip(" -–—:,|")
         try:
@@ -482,7 +484,7 @@ def extract_series_and_volume(raw_title: str) -> Dict[str, Any]:
     m2 = p2.match(cleaned)
     if m2:
         series = m2.group("series").strip(" -–—:,|")
-        series = re.sub(r'^(?:\s*download|\s*free\s+download|\s*read|\s*get)\s*[:\-–—]?\s*', '', series, flags=re.IGNORECASE).strip(" -–—:,|")
+        series = re.sub(r'^(?:\s*(?:free\s+)?download\b\s*[:\-–—]?\s*|\s*(?:read|get)\s*[:\-–—]\s*)', '', series, flags=re.IGNORECASE).strip(" -–—:,|")
         vol_str = m2.group("vol")
         subtitle = (m2.group("subtitle") or "").strip(" -–—:,|")
         try:
@@ -514,7 +516,7 @@ def extract_series_and_volume(raw_title: str) -> Dict[str, Any]:
     m3 = p3.match(cleaned)
     if m3:
         series = m3.group("series").strip(" -–—:,|")
-        series = re.sub(r'^(?:\s*download|\s*free\s+download|\s*read|\s*get)\s*[:\-–—]?\s*', '', series, flags=re.IGNORECASE).strip(" -–—:,|")
+        series = re.sub(r'^(?:\s*(?:free\s+)?download\b\s*[:\-–—]?\s*|\s*(?:read|get)\s*[:\-–—]\s*)', '', series, flags=re.IGNORECASE).strip(" -–—:,|")
         vol_str = m3.group("vol")
         try:
             vol = float(vol_str)
