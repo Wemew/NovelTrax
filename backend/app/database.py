@@ -4,7 +4,7 @@ import sqlite3
 import json
 import logging
 from datetime import datetime
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Tuple, Set
 
 logger = logging.getLogger("noveltrax.database")
 
@@ -37,6 +37,7 @@ class Database:
                     latest_index REAL DEFAULT 0.0,
                     is_monitored INTEGER DEFAULT 1,
                     website_url TEXT DEFAULT '',
+                    owned_volumes_json TEXT DEFAULT '[]',
                     last_sync TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
             """)
@@ -105,6 +106,29 @@ class Database:
             except sqlite3.OperationalError:
                 pass
 
+            try:
+                cur.execute("ALTER TABLE series_tracking ADD COLUMN owned_volumes_json TEXT DEFAULT '[]';")
+            except sqlite3.OperationalError:
+                pass
+
+            # Releases table downloader and prioritized group migrations
+            for col_def in [
+                ("download_url", "TEXT"),
+                ("download_status", "TEXT DEFAULT 'IDLE'"),
+                ("torrent_hash", "TEXT"),
+                ("release_group", "TEXT DEFAULT ''"),
+                ("ignored", "INTEGER DEFAULT 0"),
+            ]:
+                try:
+                    cur.execute(f"ALTER TABLE releases ADD COLUMN {col_def[0]} {col_def[1]};")
+                except sqlite3.OperationalError:
+                    pass
+
+            # Performance indexes on releases table
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_releases_release_group ON releases(release_group);")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_releases_ignored ON releases(ignored);")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_releases_status ON releases(status);")
+
             # Series blacklist table
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS series_blacklist (
@@ -168,6 +192,21 @@ class Database:
                 for k, v in defaults.items():
                     cur.execute("INSERT INTO app_settings (key, value) VALUES (?, ?);", (k, v))
 
+            # Downloader settings defaults migration
+            downloader_defaults = [
+                ("qbit_enabled", "true"),
+                ("qbit_host", os.getenv("QBIT_HOST", "localhost")),
+                ("qbit_port", os.getenv("QBIT_PORT", "8080")),
+                ("qbit_username", os.getenv("QBIT_USERNAME", "admin")),
+                ("qbit_password", os.getenv("QBIT_PASSWORD", "")),
+                ("qbit_use_ssl", os.getenv("QBIT_USE_SSL", "false")),
+                ("qbit_category", os.getenv("QBIT_CATEGORY", "novels")),
+                ("qbit_savepath", os.getenv("DOWNLOAD_DIR", "/downloads")),
+                ("qbit_url", os.getenv("QBIT_URL", "http://localhost:8080")),
+            ]
+            for k, v in downloader_defaults:
+                cur.execute("INSERT OR IGNORE INTO app_settings (key, value) VALUES (?, ?);", (k, v))
+
             # Seed default J-Novels feed if feeds table is empty
             cur.execute("SELECT count(*) FROM feeds;")
             if cur.fetchone()[0] == 0:
@@ -183,6 +222,61 @@ class Database:
                         "max_pages": 3
                     })
                 ))
+
+            # Seed default Nyaa feed if not present
+            cur.execute("SELECT count(*) FROM feeds WHERE feed_type = 'nyaa' OR url LIKE '%nyaa.si%';")
+            if cur.fetchone()[0] == 0:
+                cur.execute("""
+                    INSERT INTO feeds (name, feed_type, url, config_json, enabled, auto_request, check_interval_minutes)
+                    VALUES (?, ?, ?, ?, 1, 1, 60);
+                """, (
+                    "Nyaa Light Novels (3_1)",
+                    "nyaa",
+                    "https://nyaa.si/?page=rss&c=3_1",
+                    json.dumps({
+                        "category": "3_1",
+                        "max_pages": 2,
+                        "delay_seconds": 1.5,
+                        "description": "Monitors Nyaa (Category 3_1: Literature - English-translated) for light novel releases."
+                    })
+                ))
+
+            # Repair legacy mangled titles from prior clean_novel_title defect
+            cur.execute("UPDATE releases SET title = REPLACE(title, 'J- Club]', '[J-Novel Club]') WHERE title LIKE 'J- Club]%';")
+
+            # Clean up corrupted titles from Iteration 3 overbroad prepend (unbalanced leading bracket)
+            cur.execute("""
+                UPDATE releases SET title = substr(title, 2)
+                WHERE title LIKE '[%'
+                  AND (length(title) - length(replace(title, '[', ''))) > (length(title) - length(replace(title, ']', '')));
+            """)
+
+            # Reset contaminated release_group values containing '['
+            cur.execute("UPDATE releases SET release_group = '' WHERE release_group LIKE '%[%';")
+
+            # Safe repair of missing opening bracket (only when no opening bracket precedes closing bracket)
+            cur.execute("""
+                UPDATE releases SET title = '[' || title
+                WHERE instr(title, ']') > 0
+                  AND (instr(title, '[') = 0 OR instr(title, '[') > instr(title, ']'));
+            """)
+
+            cur.execute("UPDATE releases SET release_group = 'J-Novel Club' WHERE (release_group IS NULL OR release_group = '') AND title LIKE '%J-Novel Club%';")
+
+            # Backfill release_group for existing releases where currently empty
+            try:
+                from app.parser import extract_release_group
+                cur.execute("SELECT id, title FROM releases WHERE release_group IS NULL OR release_group = '';")
+                for r_row in cur.fetchall():
+                    rg = extract_release_group(r_row["title"])
+                    if rg:
+                        cur.execute("UPDATE releases SET release_group = ? WHERE id = ?;", (rg, r_row["id"]))
+            except Exception:
+                pass
+
+            # Synchronize ignored flag invariants across all existing releases
+            cur.execute("UPDATE releases SET ignored = 1 WHERE status = 'IGNORED' AND (ignored = 0 OR ignored IS NULL);")
+            cur.execute("UPDATE releases SET ignored = 0 WHERE status != 'IGNORED' AND ignored = 1;")
 
             conn.commit()
 
@@ -207,14 +301,15 @@ class Database:
             return {row["key"]: row["value"] for row in cur.fetchall()}
 
     # --- Series Tracking Operations ---
-    def sync_calibre_series(self, calibre_series_list: List[Dict[str, Any]]) -> int:
+    def sync_calibre_series(self, calibre_series_list: List[Dict[str, Any]], volumes_map: Optional[Dict[str, Set[float]]] = None) -> int:
         """
         Updates series_tracking from Calibre series list.
-        Inserts new series, updates book_count and latest_index for existing series.
+        Inserts new series, updates book_count, latest_index, and owned_volumes_json.
         Preserves user's is_monitored status!
         """
         updated_count = 0
         from urllib.parse import quote_plus
+        from app.parser import normalize_text
         with self.get_connection() as conn:
             cur = conn.cursor()
             for s in calibre_series_list:
@@ -225,17 +320,35 @@ class Database:
                 authors = s.get("authors", "")
                 default_web_url = f"https://jnovels.com/?s={quote_plus(name)}"
 
+                owned_vols_set: Set[float] = set()
+                if volumes_map:
+                    for k in (str(ser_id), ser_id, name, name.lower(), normalize_text(name)):
+                        if k in volumes_map:
+                            owned_vols_set.update(volumes_map[k])
+                    parts = [p.strip() for p in re.split(r"\s*[|/–—]\s*|\s+-\s+|//|;", name) if p.strip()]
+                    if len(parts) > 1:
+                        for p in parts:
+                            for pk in (p, p.lower(), normalize_text(p)):
+                                if pk in volumes_map:
+                                    owned_vols_set.update(volumes_map[pk])
+                elif latest and float(latest) > 0:
+                    owned_vols_set.add(float(latest))
+
+                owned_json = json.dumps(sorted(list(owned_vols_set)))
+
                 cur.execute("""
-                    INSERT INTO series_tracking (calibre_series_id, name, authors, book_count, latest_index, is_monitored, website_url, last_sync)
-                    VALUES (?, ?, ?, ?, ?, 1, ?, CURRENT_TIMESTAMP)
+                    INSERT INTO series_tracking (
+                        calibre_series_id, name, authors, book_count, latest_index, is_monitored, website_url, owned_volumes_json, last_sync
+                    ) VALUES (?, ?, ?, ?, ?, 1, ?, ?, CURRENT_TIMESTAMP)
                     ON CONFLICT(name) DO UPDATE SET
                         calibre_series_id = excluded.calibre_series_id,
-                        authors = excluded.authors,
+                        authors = CASE WHEN excluded.authors != '' THEN excluded.authors ELSE series_tracking.authors END,
                         book_count = excluded.book_count,
                         latest_index = excluded.latest_index,
                         website_url = CASE WHEN series_tracking.website_url = '' OR series_tracking.website_url IS NULL THEN excluded.website_url ELSE series_tracking.website_url END,
+                        owned_volumes_json = CASE WHEN excluded.owned_volumes_json != '[]' THEN excluded.owned_volumes_json ELSE series_tracking.owned_volumes_json END,
                         last_sync = CURRENT_TIMESTAMP;
-                """, (ser_id, name, authors, count, latest, default_web_url))
+                """, (ser_id, name, authors, count, latest, default_web_url, owned_json))
                 updated_count += 1
             conn.commit()
         return updated_count
@@ -316,8 +429,7 @@ class Database:
         from app.providers.metadata import NovelMetadataProvider
         if release_data.get("series_name"):
             release_data["series_name"] = NovelMetadataProvider.clean_novel_title(release_data["series_name"])
-        if release_data.get("title"):
-            release_data["title"] = NovelMetadataProvider.clean_novel_title(release_data["title"])
+        # Retain release_data["title"] strictly intact — do not mutate with clean_novel_title
 
         guid = release_data["guid"]
         with self.get_connection() as conn:
@@ -361,8 +473,38 @@ class Database:
 
             is_bundle_val = 1 if release_data.get("is_bundle") else 0
             is_official_val = 1 if release_data.get("is_official", 1) else 0
-            vols_val = json.dumps(release_data.get("volumes") or ([release_data["volume"]] if release_data.get("volume") is not None else []))
-            missing_val = json.dumps(release_data.get("missing_volumes") or [])
+
+            vols_list = release_data.get("volumes")
+            if vols_list is None and release_data.get("volumes_json"):
+                try:
+                    vols_list = json.loads(release_data["volumes_json"])
+                except Exception:
+                    pass
+            vols_val = json.dumps(vols_list or ([release_data["volume"]] if release_data.get("volume") is not None else []))
+
+            missing_list = release_data.get("missing_volumes")
+            if missing_list is None and release_data.get("missing_vols_json"):
+                try:
+                    missing_list = json.loads(release_data["missing_vols_json"])
+                except Exception:
+                    pass
+            missing_val = json.dumps(missing_list or [])
+
+            # Extract release_group if omitted
+            rel_group_val = release_data.get("release_group")
+            if not rel_group_val and release_data.get("title"):
+                try:
+                    from app.parser import extract_release_group
+                    rel_group_val = extract_release_group(release_data["title"])
+                except Exception:
+                    rel_group_val = ""
+            rel_group_val = (rel_group_val or "").strip()
+
+            dl_url_val = release_data.get("download_url") or release_data.get("link") or ""
+            status_in = (release_data.get("status") or "REQUESTED").strip().upper()
+            is_ignored = (status_in == "IGNORED") or bool(release_data.get("ignored"))
+            ignored_val = 1 if is_ignored else 0
+            status_val = "IGNORED" if is_ignored else status_in
 
             cur.execute("SELECT id, status FROM releases WHERE guid = ?;", (guid,))
             existing = cur.fetchone()
@@ -385,6 +527,8 @@ class Database:
                         volumes_json = ?,
                         missing_vols_json = ?,
                         is_official = ?,
+                        download_url = COALESCE(?, download_url),
+                        release_group = COALESCE(NULLIF(?, ''), release_group),
                         updated_at = CURRENT_TIMESTAMP
                     WHERE id = ?;
                 """, (
@@ -401,6 +545,8 @@ class Database:
                     vols_val,
                     missing_val,
                     is_official_val,
+                    dl_url_val,
+                    rel_group_val,
                     rel_id
                 ))
                 conn.commit()
@@ -411,8 +557,9 @@ class Database:
                         guid, title, series_name, volume, link, pub_date,
                         cover_url, description, author, source_feed_id,
                         source_feed_name, series_link, status, calibre_matched_book_id,
-                        is_bundle, volumes_json, missing_vols_json, is_official
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                        is_bundle, volumes_json, missing_vols_json, is_official,
+                        download_url, release_group, ignored
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                 """, (
                     guid,
                     release_data["title"],
@@ -426,12 +573,15 @@ class Database:
                     release_data.get("source_feed_id"),
                     release_data.get("source_feed_name"),
                     release_data.get("series_link"),
-                    release_data.get("status", "REQUESTED"),
+                    status_val,
                     release_data.get("calibre_matched_book_id"),
                     is_bundle_val,
                     vols_val,
                     missing_val,
-                    is_official_val
+                    is_official_val,
+                    dl_url_val,
+                    rel_group_val,
+                    ignored_val
                 ))
                 rel_id = cur.lastrowid
 
@@ -451,14 +601,168 @@ class Database:
     def update_release_status(self, release_id: int, status: str, matched_book_id: Optional[int] = None):
         with self.get_connection() as conn:
             cur = conn.cursor()
+            clean_status = (status or "").strip().upper()
+            ignored_val = 1 if clean_status == 'IGNORED' else 0
             cur.execute("""
                 UPDATE releases 
-                SET status = ?, calibre_matched_book_id = COALESCE(?, calibre_matched_book_id), updated_at = CURRENT_TIMESTAMP
+                SET status = ?, ignored = ?, calibre_matched_book_id = COALESCE(?, calibre_matched_book_id), updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?;
-            """, (status, matched_book_id, release_id))
+            """, (clean_status, ignored_val, matched_book_id, release_id))
             conn.commit()
 
-    def get_releases(
+    def ignore_release(self, release_id: int) -> bool:
+        """Marks a release as IGNORED (sets status='IGNORED' and ignored=1)."""
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                UPDATE releases 
+                SET status = 'IGNORED', ignored = 1, updated_at = CURRENT_TIMESTAMP 
+                WHERE id = ?;
+            """, (release_id,))
+            conn.commit()
+            return cur.rowcount > 0
+
+    def unignore_release(self, release_id: int) -> bool:
+        """Restores an IGNORED release to REQUESTED (sets status='REQUESTED' and ignored=0)."""
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                UPDATE releases 
+                SET status = 'REQUESTED', ignored = 0, updated_at = CURRENT_TIMESTAMP 
+                WHERE id = ?;
+            """, (release_id,))
+            conn.commit()
+            return cur.rowcount > 0
+
+    # --- Prioritized Release Groups Operations ---
+
+    def ensure_prioritized_groups_table(self):
+        """Ensures the prioritized_groups table exists with full schema and default seeding."""
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS prioritized_groups (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT UNIQUE COLLATE NOCASE NOT NULL,
+                    is_vip INTEGER DEFAULT 1,
+                    notes TEXT DEFAULT '',
+                    priority INTEGER DEFAULT 1,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            cur.execute("PRAGMA table_info(prioritized_groups);")
+            cols = {r["name"] for r in cur.fetchall()}
+            if "is_vip" not in cols:
+                try:
+                    cur.execute("ALTER TABLE prioritized_groups ADD COLUMN is_vip INTEGER DEFAULT 1;")
+                except sqlite3.OperationalError:
+                    pass
+            if "notes" not in cols:
+                try:
+                    cur.execute("ALTER TABLE prioritized_groups ADD COLUMN notes TEXT DEFAULT '';")
+                except sqlite3.OperationalError:
+                    pass
+            if "priority" not in cols:
+                try:
+                    cur.execute("ALTER TABLE prioritized_groups ADD COLUMN priority INTEGER DEFAULT 1;")
+                except sqlite3.OperationalError:
+                    pass
+
+            # Check if existing table lacks COLLATE NOCASE on name column
+            cur.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='prioritized_groups';")
+            tbl_row = cur.fetchone()
+            if tbl_row and "collate nocase" not in tbl_row[0].lower():
+                # Deduplicate any existing duplicate rows (preserve row with highest priority or lowest id)
+                cur.execute("""
+                    DELETE FROM prioritized_groups 
+                    WHERE id NOT IN (
+                        SELECT min(id) FROM prioritized_groups GROUP BY lower(name)
+                    );
+                """)
+                # Rebuild table with COLLATE NOCASE
+                cur.execute("""
+                    CREATE TABLE prioritized_groups_new (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        name TEXT UNIQUE COLLATE NOCASE NOT NULL,
+                        is_vip INTEGER DEFAULT 1,
+                        notes TEXT DEFAULT '',
+                        priority INTEGER DEFAULT 1,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    );
+                """)
+                cur.execute("""
+                    INSERT INTO prioritized_groups_new (id, name, is_vip, notes, priority, created_at)
+                    SELECT id, name, is_vip, notes, priority, created_at FROM prioritized_groups;
+                """)
+                cur.execute("DROP TABLE prioritized_groups;")
+                cur.execute("ALTER TABLE prioritized_groups_new RENAME TO prioritized_groups;")
+
+            cur.execute("DROP INDEX IF EXISTS idx_prioritized_groups_name;")
+            cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_prioritized_groups_name ON prioritized_groups(name COLLATE NOCASE);")
+
+            cur.execute("SELECT count(*) FROM prioritized_groups;")
+            if cur.fetchone()[0] == 0:
+                default_groups = [
+                    ("Yen Press", "Official English light novel publisher (Yen On)", 1),
+                    ("J-Novel Club", "Digital-first light novel publisher & translations", 1),
+                    ("Seven Seas", "Official digital light novels (Airship)", 1),
+                    ("Stick", "High quality digital light novel releases", 1),
+                    ("One Peace Books", "Official light novel releases", 1)
+                ]
+                for grp, note, prio in default_groups:
+                    cur.execute("INSERT OR IGNORE INTO prioritized_groups (name, notes, priority) VALUES (?, ?, ?);", (grp, note, prio))
+            conn.commit()
+
+    def get_prioritized_groups(self) -> List[Dict[str, Any]]:
+        """Returns all prioritized release groups with live release count."""
+        self.ensure_prioritized_groups_table()
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT pg.*, 
+                       (SELECT count(*) FROM releases r WHERE lower(trim(COALESCE(r.release_group, ''))) = lower(trim(pg.name))) as release_count
+                FROM prioritized_groups pg
+                ORDER BY pg.priority DESC, pg.name COLLATE NOCASE ASC;
+            """)
+            return [dict(r) for r in cur.fetchall()]
+
+    def add_prioritized_group(self, name: str, notes: str = "", priority: int = 1) -> bool:
+        """Adds or updates a prioritized release group."""
+        clean = name.strip()
+        if not clean:
+            return False
+        self.ensure_prioritized_groups_table()
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                INSERT INTO prioritized_groups (name, notes, priority, created_at)
+                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(name) DO UPDATE SET notes = excluded.notes, priority = excluded.priority;
+            """, (clean, notes, priority))
+            conn.commit()
+            return True
+
+    def remove_prioritized_group(self, group_id: int) -> bool:
+        """Removes a prioritized group by ID."""
+        self.ensure_prioritized_groups_table()
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("DELETE FROM prioritized_groups WHERE id = ?;", (group_id,))
+            deleted = cur.rowcount > 0
+            conn.commit()
+            return deleted
+
+    def is_group_prioritized(self, group_name: str) -> bool:
+        """Returns True if the group name matches an active prioritized group."""
+        if not group_name:
+            return False
+        self.ensure_prioritized_groups_table()
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT id FROM prioritized_groups WHERE lower(trim(name)) = lower(?);", (group_name.strip(),))
+            return cur.fetchone() is not None
+
+    def get_prioritized_releases(
         self,
         status: Optional[str] = None,
         limit: int = 100,
@@ -466,13 +770,133 @@ class Database:
         search: Optional[str] = None,
         sort: str = "date_desc"
     ) -> List[Dict[str, Any]]:
+        """Returns releases published by prioritized groups."""
+        self.ensure_prioritized_groups_table()
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            where_clauses = [
+                "lower(trim(COALESCE(r.release_group, ''))) IN (SELECT lower(trim(name)) FROM prioritized_groups)"
+            ]
+            params: List[Any] = []
+            if status == "IGNORED":
+                where_clauses.append("(r.status = 'IGNORED' OR r.ignored = 1)")
+            elif status:
+                where_clauses.append("r.status = ? AND (r.ignored = 0 OR r.ignored IS NULL)")
+                params.append(status)
+            else:
+                where_clauses.append("r.status NOT IN ('BLACKLISTED', 'IGNORED') AND (r.ignored = 0 OR r.ignored IS NULL)")
+
+            if search and search.strip():
+                clean_s = f"%{search.strip().lower()}%"
+                where_clauses.append("(lower(r.title) LIKE ? OR lower(COALESCE(r.series_name, '')) LIKE ?)")
+                params.extend([clean_s, clean_s])
+
+            where_sql = f"WHERE {' AND '.join(where_clauses)}"
+            sort_sql = "ORDER BY COALESCE(r.pub_date, r.updated_at) DESC, r.id DESC"
+            if sort == "date_asc":
+                sort_sql = "ORDER BY COALESCE(r.pub_date, r.updated_at) ASC, r.id ASC"
+            elif sort in ("title_asc", "name_asc"):
+                sort_sql = "ORDER BY r.title COLLATE NOCASE ASC, r.id ASC"
+            elif sort in ("title_desc", "name_desc"):
+                sort_sql = "ORDER BY r.title COLLATE NOCASE DESC, r.id DESC"
+            elif sort == "status":
+                sort_sql = "ORDER BY CASE r.status WHEN 'REQUESTED' THEN 1 WHEN 'NEW' THEN 2 WHEN 'IN_CALIBRE' THEN 3 ELSE 4 END, r.updated_at DESC, r.id DESC"
+
+            cur.execute(f"""
+                SELECT r.* FROM releases r
+                {where_sql}
+                {sort_sql}
+                LIMIT ? OFFSET ?;
+            """, (*params, limit, offset))
+            items = [dict(row) for row in cur.fetchall()]
+            for item in items:
+                item["is_prioritized"] = True
+                item["ignored"] = bool(item.get("ignored", 0) or item.get("status") == "IGNORED")
+                try:
+                    item["volumes"] = json.loads(item.get("volumes_json") or "[]")
+                except Exception:
+                    item["volumes"] = [item["volume"]] if item.get("volume") is not None else []
+                try:
+                    item["missing_volumes"] = json.loads(item.get("missing_vols_json") or "[]")
+                except Exception:
+                    item["missing_volumes"] = []
+            return items
+
+    def count_prioritized_releases(self, status: Optional[str] = None, search: Optional[str] = None) -> int:
+        """Returns total count of releases matching prioritized groups."""
+        self.ensure_prioritized_groups_table()
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            where_clauses = [
+                "lower(trim(COALESCE(r.release_group, ''))) IN (SELECT lower(trim(name)) FROM prioritized_groups)"
+            ]
+            params: List[Any] = []
+            if status == "IGNORED":
+                where_clauses.append("(r.status = 'IGNORED' OR r.ignored = 1)")
+            elif status:
+                where_clauses.append("r.status = ? AND (r.ignored = 0 OR r.ignored IS NULL)")
+                params.append(status)
+            else:
+                where_clauses.append("r.status NOT IN ('BLACKLISTED', 'IGNORED') AND (r.ignored = 0 OR r.ignored IS NULL)")
+
+            if search and search.strip():
+                clean_s = f"%{search.strip().lower()}%"
+                where_clauses.append("(lower(r.title) LIKE ? OR lower(COALESCE(r.series_name, '')) LIKE ?)")
+                params.extend([clean_s, clean_s])
+
+            cur.execute(f"SELECT count(*) FROM releases r WHERE {' AND '.join(where_clauses)};", tuple(params))
+            row = cur.fetchone()
+            return row[0] if row else 0
+
+    def update_download_status(self, release_id: int, status: str, torrent_hash: Optional[str] = None):
+        clean_hash = str(torrent_hash).strip() if (isinstance(torrent_hash, str) and torrent_hash.strip()) else None
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            if clean_hash:
+                cur.execute("""
+                    UPDATE releases 
+                    SET download_status = ?, torrent_hash = ?, updated_at = CURRENT_TIMESTAMP 
+                    WHERE id = ?;
+                """, (status, clean_hash, release_id))
+            else:
+                cur.execute("""
+                    UPDATE releases 
+                    SET download_status = ?, updated_at = CURRENT_TIMESTAMP 
+                    WHERE id = ?;
+                """, (status, release_id))
+            conn.commit()
+
+    def get_release_by_id(self, release_id: int) -> Optional[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT * FROM releases WHERE id = ?;", (release_id,))
+            row = cur.fetchone()
+            return dict(row) if row else None
+
+    def get_releases(
+        self,
+        status: Optional[str] = None,
+        limit: int = 100,
+        offset: int = 0,
+        search: Optional[str] = None,
+        sort: str = "date_desc",
+        include_ignored: bool = False
+    ) -> List[Dict[str, Any]]:
         with self.get_connection() as conn:
             cur = conn.cursor()
             where_clauses = []
             params = []
-            if status:
-                where_clauses.append("status = ?")
+            if status == "IGNORED":
+                where_clauses.append("(status = 'IGNORED' OR ignored = 1)")
+            elif status:
+                where_clauses.append("status = ? AND (ignored = 0 OR ignored IS NULL)")
                 params.append(status)
+            else:
+                if not include_ignored:
+                    where_clauses.append("status NOT IN ('BLACKLISTED', 'IGNORED') AND (ignored = 0 OR ignored IS NULL)")
+                else:
+                    where_clauses.append("status != 'BLACKLISTED'")
+
             if search and search.strip():
                 clean_s = f"%{search.strip().lower()}%"
                 where_clauses.append("(lower(title) LIKE ? OR lower(COALESCE(series_name, '')) LIKE ?)")
@@ -504,7 +928,17 @@ class Database:
                 LIMIT ? OFFSET ?;
             """, (*params, limit, offset))
             items = [dict(row) for row in cur.fetchall()]
+
+            try:
+                cur.execute("SELECT lower(trim(name)) FROM prioritized_groups;")
+                p_groups = {row[0] for row in cur.fetchall()}
+            except sqlite3.OperationalError:
+                p_groups = set()
+
             for item in items:
+                rg = (item.get("release_group") or "").strip().lower()
+                item["is_prioritized"] = bool(rg and rg in p_groups)
+                item["ignored"] = bool(item.get("ignored", 0) or item.get("status") == "IGNORED")
                 try:
                     item["volumes"] = json.loads(item.get("volumes_json") or "[]")
                 except Exception:
@@ -515,15 +949,28 @@ class Database:
                     item["missing_volumes"] = []
             return items
 
-    def count_releases(self, status: Optional[str] = None, search: Optional[str] = None) -> int:
+    def count_releases(
+        self,
+        status: Optional[str] = None,
+        search: Optional[str] = None,
+        include_ignored: bool = False
+    ) -> int:
         """Returns total count of releases, optionally filtered by status and search query."""
         with self.get_connection() as conn:
             cur = conn.cursor()
             where_clauses = []
             params = []
-            if status:
-                where_clauses.append("status = ?")
+            if status == "IGNORED":
+                where_clauses.append("(status = 'IGNORED' OR ignored = 1)")
+            elif status:
+                where_clauses.append("status = ? AND (ignored = 0 OR ignored IS NULL)")
                 params.append(status)
+            else:
+                if not include_ignored:
+                    where_clauses.append("status NOT IN ('BLACKLISTED', 'IGNORED') AND (ignored = 0 OR ignored IS NULL)")
+                else:
+                    where_clauses.append("status != 'BLACKLISTED'")
+
             if search and search.strip():
                 clean_s = f"%{search.strip().lower()}%"
                 where_clauses.append("(lower(title) LIKE ? OR lower(COALESCE(series_name, '')) LIKE ?)")
@@ -540,7 +987,9 @@ class Database:
         limit: Optional[int] = None,
         offset: int = 0,
         search: Optional[str] = None,
-        sort: str = "date_desc"
+        sort: str = "wanted_first",
+        prioritized_only: bool = False,
+        include_ignored: bool = False
     ) -> List[Dict[str, Any]]:
         """
         Groups releases under canonical series, aggregating all bundle volumes,
@@ -555,22 +1004,51 @@ class Database:
         with self.get_connection() as conn:
             cur = conn.cursor()
 
-            if status:
+            if status == "IGNORED":
                 cur.execute("""
                     SELECT * FROM releases 
-                    WHERE status = ? 
+                    WHERE status = 'IGNORED' OR ignored = 1
+                    ORDER BY updated_at DESC, id DESC;
+                """)
+            elif status:
+                cur.execute("""
+                    SELECT * FROM releases 
+                    WHERE status = ? AND (ignored = 0 OR ignored IS NULL)
                     ORDER BY updated_at DESC, id DESC;
                 """, (status,))
             else:
-                cur.execute("""
-                    SELECT * FROM releases 
-                    ORDER BY 
-                        CASE status WHEN 'REQUESTED' THEN 1 WHEN 'NEW' THEN 2 WHEN 'IN_CALIBRE' THEN 3 ELSE 4 END,
-                        updated_at DESC, id DESC;
-                """)
+                if not include_ignored:
+                    cur.execute("""
+                        SELECT * FROM releases 
+                        WHERE status NOT IN ('BLACKLISTED', 'IGNORED') AND (ignored = 0 OR ignored IS NULL)
+                        ORDER BY 
+                            CASE status WHEN 'REQUESTED' THEN 1 WHEN 'NEW' THEN 2 WHEN 'IN_CALIBRE' THEN 3 ELSE 4 END,
+                            updated_at DESC, id DESC;
+                    """)
+                else:
+                    cur.execute("""
+                        SELECT * FROM releases 
+                        WHERE status != 'BLACKLISTED'
+                        ORDER BY 
+                            CASE status WHEN 'REQUESTED' THEN 1 WHEN 'NEW' THEN 2 WHEN 'IN_CALIBRE' THEN 3 ELSE 4 END,
+                            updated_at DESC, id DESC;
+                    """)
+
+            if prioritized_only:
+                self.ensure_prioritized_groups_table()
 
             raw_releases = [dict(r) for r in cur.fetchall()]
+
+            try:
+                cur.execute("SELECT lower(trim(name)) FROM prioritized_groups;")
+                p_groups = {row[0] for row in cur.fetchall()}
+            except sqlite3.OperationalError:
+                p_groups = set()
+
             for r in raw_releases:
+                rg = (r.get("release_group") or "").strip().lower()
+                r["is_prioritized"] = bool(rg and rg in p_groups)
+                r["ignored"] = bool(r.get("ignored", 0) or r.get("status") == "IGNORED")
                 try:
                     r["volumes"] = json.loads(r.get("volumes_json") or "[]")
                 except Exception:
@@ -662,7 +1140,8 @@ class Database:
                         "missing_volumes_set": set(),
                         "has_wanted": False,
                         "has_discovery": False,
-                        "has_in_calibre": False
+                        "has_in_calibre": False,
+                        "has_prioritized": False
                     }
 
                 group = groups_dict[matched_key]
@@ -671,6 +1150,8 @@ class Database:
 
                 group["releases"].append(rel)
                 group["releases_count"] += 1
+                if rel.get("is_prioritized"):
+                    group["has_prioritized"] = True
 
                 if not group["cover_url"] and rel.get("cover_url"):
                     group["cover_url"] = rel["cover_url"]
@@ -738,6 +1219,10 @@ class Database:
                 g["releases_count"] = len(g["releases"])
                 result_groups.append(g)
 
+            # Filter prioritized only if requested
+            if prioritized_only:
+                result_groups = [g for g in result_groups if g.get("has_prioritized")]
+
             # Instant keyword search filter across series name, synopsis, and release titles
             if search and search.strip():
                 clean_s = search.strip().lower()
@@ -749,7 +1234,15 @@ class Database:
                 ]
 
             # Sort groups by requested sorting criteria
-            if sort == "date_desc":
+            if sort in ("wanted_first", "default") or not sort:
+                result_groups.sort(key=lambda item: (
+                    not (item["has_wanted"] and item.get("has_prioritized")),
+                    not item["has_wanted"],
+                    not item.get("has_prioritized"),
+                    -len(item.get("missing_volumes", [])),
+                    item["series_name"].lower()
+                ))
+            elif sort == "date_desc":
                 result_groups.sort(key=lambda item: item["series_name"].lower())
                 result_groups.sort(key=lambda item: item["latest_date"], reverse=True)
             elif sort == "date_asc":
@@ -759,20 +1252,25 @@ class Database:
                 result_groups.sort(key=lambda item: item["series_name"].lower())
             elif sort in ("title_desc", "name_desc"):
                 result_groups.sort(key=lambda item: item["series_name"].lower(), reverse=True)
-            elif sort == "wanted_first":
-                result_groups.sort(key=lambda item: (not item["has_wanted"], -len(item.get("missing_volumes", [])), item["series_name"].lower()))
             elif sort == "releases_desc":
                 result_groups.sort(key=lambda item: (-item["releases_count"], item["series_name"].lower()))
             else:
-                # Default / legacy sort: wanted first, then discovery, then tracked, then name
+                # Legacy 7-tier priority sort (for sort="priority" or sort="legacy")
                 def sort_key(item):
-                    prio = 4
-                    if item["has_wanted"]:
+                    if item["has_wanted"] and item.get("has_prioritized"):
                         prio = 1
-                    elif item["has_discovery"]:
+                    elif item["has_wanted"]:
                         prio = 2
-                    elif item["in_calibre"]:
+                    elif item.get("has_prioritized"):
                         prio = 3
+                    elif item["is_monitored"]:
+                        prio = 4
+                    elif item["has_discovery"]:
+                        prio = 5
+                    elif item["in_calibre"]:
+                        prio = 6
+                    else:
+                        prio = 7
                     return (prio, item["series_name"].lower())
                 result_groups.sort(key=sort_key)
 
@@ -783,10 +1281,17 @@ class Database:
     def count_releases_grouped_by_series(
         self,
         status: Optional[str] = None,
-        search: Optional[str] = None
+        search: Optional[str] = None,
+        prioritized_only: bool = False,
+        include_ignored: bool = False
     ) -> int:
         """Returns the total number of series groups matching status and search filters."""
-        groups = self.get_releases_grouped_by_series(status=status, search=search)
+        groups = self.get_releases_grouped_by_series(
+            status=status,
+            search=search,
+            prioritized_only=prioritized_only,
+            include_ignored=include_ignored
+        )
         return len(groups)
 
     def get_release_status_counts(self) -> Dict[str, int]:
@@ -1314,4 +1819,99 @@ class Database:
             count = cur.rowcount
             conn.commit()
             self.log_activity("DEBUG_CLEAR", "Cleared discovered series", f"Removed {count} unreviewed discovery releases.")
+            return count
+
+    # --- Novel Metadata Cache Operations ---
+    def ensure_metadata_cache_table(self):
+        """Ensures the novel_metadata_cache table exists with required schema."""
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS novel_metadata_cache (
+                    query_key TEXT PRIMARY KEY,
+                    title TEXT,
+                    synopsis TEXT,
+                    cover_url TEXT,
+                    source TEXT,
+                    cached_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_novel_metadata_cache_key ON novel_metadata_cache(query_key);")
+            conn.commit()
+
+    def get_cached_novel_metadata(self, query_key: str) -> Optional[Dict[str, Any]]:
+        """Retrieves cached novel metadata by query key (case-insensitive)."""
+        if not query_key:
+            return None
+        self.ensure_metadata_cache_table()
+        clean_k = query_key.strip().lower()
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("PRAGMA table_info(novel_metadata_cache);")
+            cols = {r["name"] for r in cur.fetchall()}
+            key_col = "query_key" if "query_key" in cols else "key"
+            cur.execute(f"SELECT * FROM novel_metadata_cache WHERE lower({key_col}) = ?;", (clean_k,))
+            row = cur.fetchone()
+            if row:
+                d = dict(row)
+                if "query_key" not in d and "key" in d:
+                    d["query_key"] = d["key"]
+                return d
+            return None
+
+    def cache_novel_metadata(self, query_key: str, data: Dict[str, Any]):
+        """Caches novel metadata (title, synopsis, cover_url, source)."""
+        if not query_key or not data:
+            return
+        self.ensure_metadata_cache_table()
+        clean_k = query_key.strip().lower()
+        title = data.get("title") or query_key
+        synopsis = data.get("synopsis") or ""
+        cover_url = data.get("cover_url") or ""
+        source = data.get("source") or "unknown"
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("PRAGMA table_info(novel_metadata_cache);")
+            cols = {r["name"] for r in cur.fetchall()}
+            key_col = "query_key" if "query_key" in cols else "key"
+            if "synopsis" in cols and "cover_url" in cols:
+                cur.execute(f"""
+                    INSERT INTO novel_metadata_cache ({key_col}, title, synopsis, cover_url, source, cached_at)
+                    VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    ON CONFLICT({key_col}) DO UPDATE SET
+                        title = excluded.title,
+                        synopsis = excluded.synopsis,
+                        cover_url = CASE WHEN excluded.cover_url != '' THEN excluded.cover_url ELSE novel_metadata_cache.cover_url END,
+                        source = excluded.source,
+                        cached_at = CURRENT_TIMESTAMP;
+                """, (clean_k, title, synopsis, cover_url, source))
+            else:
+                cur.execute(f"INSERT OR REPLACE INTO novel_metadata_cache ({key_col}, data) VALUES (?, ?);", (clean_k, json.dumps(data)))
+            conn.commit()
+
+    def get_all_novel_metadata_cache(self) -> Dict[str, Dict[str, Any]]:
+        """Returns all cached novel metadata mapped by lowercased query_key."""
+        self.ensure_metadata_cache_table()
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("PRAGMA table_info(novel_metadata_cache);")
+            cols = {r["name"] for r in cur.fetchall()}
+            key_col = "query_key" if "query_key" in cols else "key"
+            cur.execute("SELECT * FROM novel_metadata_cache;")
+            res = {}
+            for r in cur.fetchall():
+                d = dict(r)
+                k = d.get(key_col, "")
+                if k:
+                    res[k.lower()] = d
+            return res
+
+    def clear_novel_metadata_cache(self) -> int:
+        """Purges all entries from novel_metadata_cache."""
+        self.ensure_metadata_cache_table()
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("DELETE FROM novel_metadata_cache;")
+            count = cur.rowcount
+            conn.commit()
             return count

@@ -17,7 +17,13 @@ class ReleaseItem:
         author: Optional[str] = None,
         series_link: Optional[str] = None,
         source_feed_name: Optional[str] = None,
-        raw_data: Optional[Dict[str, Any]] = None
+        raw_data: Optional[Dict[str, Any]] = None,
+        download_url: Optional[str] = None,
+        release_group: Optional[str] = None,
+        is_bundle: bool = False,
+        volumes: Optional[List[float]] = None,
+        volume_start: Optional[float] = None,
+        volume_end: Optional[float] = None
     ):
         self.title = title.strip()
         self.link = link.strip()
@@ -30,6 +36,12 @@ class ReleaseItem:
         self.series_link = series_link
         self.source_feed_name = source_feed_name or ""
         self.raw_data = raw_data or {}
+        self.download_url = download_url
+        self.release_group = release_group
+        self.is_bundle = is_bundle
+        self.volumes = volumes or ([volume] if volume is not None else [])
+        self.volume_start = volume_start
+        self.volume_end = volume_end
         
         # Calculate consistent GUID if not provided
         if not guid:
@@ -51,6 +63,12 @@ class ReleaseItem:
             "author": self.author,
             "series_link": self.series_link,
             "source_feed_name": self.source_feed_name,
+            "download_url": self.download_url,
+            "release_group": self.release_group,
+            "is_bundle": self.is_bundle,
+            "volumes": self.volumes,
+            "volume_start": self.volume_start,
+            "volume_end": self.volume_end,
         }
 
 class BaseFeedProvider(ABC):
@@ -63,3 +81,6 @@ class BaseFeedProvider(ABC):
     def fetch_releases(self) -> List[ReleaseItem]:
         """Fetch and return list of ReleaseItem instances from the source feed."""
         pass
+
+# Alias for compatibility with BaseProvider references
+BaseProvider = BaseFeedProvider

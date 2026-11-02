@@ -375,6 +375,22 @@
         document.getElementById('test-results-modal').classList.add('hidden');
     }
 
+    function escapeHtml(str) {
+        if (str === null || str === undefined) return '';
+        const div = document.createElement('div');
+        div.textContent = String(str);
+        return div.innerHTML;
+    }
+
+    function sanitizeLink(url) {
+        if (!url) return '#';
+        try {
+            const p = new URL(url, window.location.origin);
+            if (p.protocol === 'http:' || p.protocol === 'https:') return p.href;
+        } catch (e) {}
+        return '#';
+    }
+
     async function testFeedLive(feedType, url) {
         const modal = document.getElementById('test-results-modal');
         const content = document.getElementById('test-results-content');
@@ -382,7 +398,7 @@
         content.innerHTML = `
             <div class="text-center py-8 text-slate-400 flex flex-col items-center gap-2">
                 <i data-lucide="loader-2" class="w-6 h-6 animate-spin text-brand-400"></i>
-                <span>Testing extraction on ${url}...</span>
+                <span>Testing extraction on ${escapeHtml(url)}...</span>
             </div>
         `;
         lucide.createIcons();
@@ -395,19 +411,23 @@
             });
             const data = await res.json();
 
-            if (data.status === 'success' && data.items.length > 0) {
-                let html = `<p class="text-xs text-emerald-400 font-semibold mb-2">Successfully extracted ${data.items.length} items!</p><div class="divide-y divide-slate-800">`;
+            if (data.status === 'success' && data.items && data.items.length > 0) {
+                let html = `<p class="text-xs text-emerald-400 font-semibold mb-2">Successfully extracted ${escapeHtml(data.items.length)} items!</p><div class="divide-y divide-slate-800">`;
                 data.items.slice(0, 10).forEach(item => {
+                    const safeTitle = escapeHtml(item.title);
+                    const safeVol = item.volume !== null && item.volume !== undefined ? 'Vol ' + escapeHtml(item.volume) : 'No Vol';
+                    const safeSeries = escapeHtml(item.series_name || 'N/A');
+                    const safeLink = escapeHtml(sanitizeLink(item.link));
                     html += `
                         <div class="py-2.5 text-xs">
                             <div class="flex items-center justify-between">
-                                <span class="font-bold text-white">${item.title}</span>
-                                <span class="text-amber-400 font-semibold font-mono">${item.volume !== null ? 'Vol ' + item.volume : 'No Vol'}</span>
+                                <span class="font-bold text-white">${safeTitle}</span>
+                                <span class="text-amber-400 font-semibold font-mono">${safeVol}</span>
                             </div>
                             <div class="flex items-center gap-2 text-[11px] text-slate-400 mt-0.5">
-                                <span>Series: <strong class="text-slate-300">${item.series_name || 'N/A'}</strong></span>
+                                <span>Series: <strong class="text-slate-300">${safeSeries}</strong></span>
                                 &bull;
-                                <a href="${item.link}" target="_blank" class="text-brand-400 hover:underline">Link</a>
+                                <a href="${safeLink}" target="_blank" rel="noopener noreferrer" class="text-brand-400 hover:underline">Link</a>
                             </div>
                         </div>
                     `;
@@ -415,15 +435,16 @@
                 html += `</div>`;
                 content.innerHTML = html;
             } else {
+                const safeMsg = escapeHtml(data.message || 'No items matched the selector or feed.');
                 content.innerHTML = `
                     <div class="p-4 bg-rose-500/10 border border-rose-500/20 rounded-xl text-rose-300 text-xs">
                         <p class="font-bold">Extraction failed or returned 0 items.</p>
-                        <p class="mt-1 font-mono text-[11px]">${data.message || 'No items matched the selector or feed.'}</p>
+                        <p class="mt-1 font-mono text-[11px]">${safeMsg}</p>
                     </div>
                 `;
             }
         } catch (err) {
-            content.innerHTML = `<div class="p-4 text-xs text-rose-400">Error connecting to test API: ${err}</div>`;
+            content.innerHTML = `<div class="p-4 text-xs text-rose-400">Error connecting to test API: ${escapeHtml(String(err))}</div>`;
         }
     }
 </script>

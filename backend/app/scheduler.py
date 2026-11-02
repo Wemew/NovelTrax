@@ -1,6 +1,7 @@
 import os
 import json
 import logging
+import threading
 import concurrent.futures
 from typing import Optional, List, Dict, Any
 
@@ -550,3 +551,133 @@ class TaskManager:
             self.db.log_activity("ERROR", "Backfill error", str(e))
         finally:
             self.is_backfilling = False
+
+    def run_series_backfill_async(self, series_name: str, max_pages: int = 3) -> Dict[str, Any]:
+        """
+        Launches targeted series backfill in a background daemon thread:
+        Searches active providers (including NyaaNovelProvider) for older/missing volumes,
+        matches against Calibre library, and upserts results.
+        """
+        if self.is_backfilling:
+            return {"status": "in_progress", "message": "Another backfill is already running"}
+
+        self.is_backfilling = True
+        self.stop_backfill_requested = False
+
+        def _worker():
+            self.db.set_setting("backfill_status", "running")
+            self.db.set_setting("backfill_progress", f"Backfilling '{series_name}' across providers (up to {max_pages} pages)...")
+            self.db.set_setting("backfill_last_page", "1")
+            try:
+                res = self.backfill_series(series_name, max_pages=max_pages)
+                self.db.set_setting("backfill_status", "idle")
+                self.db.set_setting("backfill_progress", res.get("message", f"Backfill for '{series_name}' complete."))
+                self.db.set_setting("backfill_last_page", str(max_pages))
+            except Exception as e:
+                logger.error(f"Error in async series backfill for '{series_name}': {e}", exc_info=True)
+                self.db.set_setting("backfill_status", "error")
+                self.db.set_setting("backfill_progress", f"Backfill failed: {e}")
+            finally:
+                self.is_backfilling = False
+
+        t = threading.Thread(target=_worker, daemon=True)
+        t.start()
+        return {"status": "started", "message": f"Historical backfill for '{series_name}' started in background."}
+
+    def backfill_series(self, series_name: str, max_pages: int = 3) -> Dict[str, Any]:
+        """
+        Synchronous worker executing targeted series search across providers.
+        """
+        from app.calibre.scanner import CalibreScanner
+        from app.calibre.matcher import CalibreMatcher
+        from app.parser import is_pdf_release, extract_release_group
+
+        calibre_dir = self.db.get_setting("calibre_path", self.calibre_path)
+        scanner = CalibreScanner(calibre_dir)
+        if scanner.is_available():
+            calibre_series = scanner.get_all_series()
+            calibre_books = scanner.get_all_books()
+        else:
+            calibre_series = []
+            calibre_books = []
+            for s in self.db.get_all_series():
+                ser_id = s.get("calibre_series_id") or s.get("id")
+                ser_name = s.get("name") or s.get("series_name", "")
+                latest_idx = float(s.get("latest_index", 0.0) or 0.0)
+                calibre_series.append({
+                    "series_id": ser_id,
+                    "series_name": ser_name,
+                    "book_count": s.get("book_count", 0),
+                    "latest_index": latest_idx
+                })
+                if latest_idx > 0.0:
+                    curr_v = 1.0
+                    while curr_v <= latest_idx:
+                        calibre_books.append({
+                            "book_id": int(ser_id * 1000 + curr_v),
+                            "title": f"{ser_name} Vol {curr_v:.0f}",
+                            "series_id": ser_id,
+                            "series_name": ser_name,
+                            "series_index": curr_v
+                        })
+                        curr_v += 1.0
+        matcher = CalibreMatcher(calibre_series, calibre_books)
+
+        total_found = 0
+        total_requested = 0
+
+        # Search Nyaa provider
+        nyaa_releases = []
+        try:
+            from app.providers.nyaa import NyaaNovelProvider
+            nyaa = NyaaNovelProvider(config={"delay_seconds": 1.0})
+            nyaa_releases = nyaa.search_series(
+                series_name,
+                max_pages=max_pages,
+                stop_check=lambda: self.stop_backfill_requested
+            )
+        except Exception as e:
+            logger.debug(f"Nyaa provider search skipped or unavailable: {e}")
+
+        all_incoming = nyaa_releases
+        for rel in all_incoming:
+            if self.stop_backfill_requested:
+                break
+            if is_pdf_release(rel.title, rel.link, rel.guid):
+                continue
+
+            total_found += 1
+            m_eval = matcher.check_release(rel.to_dict(), auto_request_monitored=True)
+            st = m_eval["status"]
+            matched_id = m_eval.get("matched_book_id")
+
+            rel_dict = rel.to_dict()
+            rg = extract_release_group(rel.title)
+            rel_dict.update({
+                "status": st,
+                "calibre_matched_book_id": matched_id,
+                "release_group": rg or ""
+            })
+
+            is_new, rel_id = self.db.upsert_release(rel_dict)
+            if st == "REQUESTED":
+                total_requested += 1
+                if is_new and rel_id > 0:
+                    try:
+                        rel_data = self.db.get_release_by_id(rel_id)
+                        if rel_data:
+                            self.get_notifier().notify_new_request(rel_data)
+                    except Exception:
+                        pass
+
+        self.db.set_setting("backfill_last_page", str(max_pages))
+        summary = f"Backfilled '{series_name}': found {total_found} releases ({total_requested} wanted/missing)."
+        self.db.log_activity("SERIES_BACKFILLED", summary)
+        return {
+            "status": "success",
+            "message": summary,
+            "series_name": series_name,
+            "releases_found": total_found,
+            "requested": total_requested
+        }
+

@@ -33,21 +33,36 @@ def is_pdf_release(raw_title: Optional[str] = None, link: Optional[str] = None, 
     Determines if a release is a PDF release based on title, URL, or guid.
     NovelTrax tracks digital novels/EPUBs and strictly ignores PDF releases.
     """
-    text_to_check = f"{raw_title or ''} {link or ''} {guid or ''}".lower()
-    if not text_to_check.strip():
-        return False
-    # Check if ends with .pdf or has .pdf in extension
-    if re.search(r'\.pdf(?:\?|#|$)', text_to_check):
+    # 1. Check title indicators
+    if raw_title:
+        # Check for PDF tag in parens or brackets: (PDF), [PDF], (PDF+EPUB), etc.
+        if re.search(r'[\(\[]\s*pdf\s*[\)\]]', raw_title, re.IGNORECASE):
+            return True
+        # Check for standalone word "pdf"
+        if re.search(r'\bpdf\b', raw_title, re.IGNORECASE):
+            return True
+        # Check for explicit .pdf extension in title
+        if re.search(r'\.pdf(?:\s|$)', raw_title, re.IGNORECASE):
+            return True
+
+    # 2. Check URL / GUID fields individually
+    for target in (link, guid):
+        if not target:
+            continue
+        target_clean = target.strip()
+        # Direct .pdf before query params, hash fragment, delimiter or at end of URL
+        if re.search(r'\.pdf(?:\?|#|&|/|$)', target_clean, re.IGNORECASE):
+            return True
+        target_lower = target_clean.lower()
+        if '/pdf/' in target_lower or 'format=pdf' in target_lower or 'ext=pdf' in target_lower or 'filetype=pdf' in target_lower:
+            return True
+
+    # 3. Defense-in-depth: check combined normalized text with whitespace delimiter
+    parts = [p.lower() for p in (raw_title, link, guid) if p]
+    text_to_check = ' '.join(parts)
+    if text_to_check and re.search(r'\.pdf(?:\?|#|&|/|\s|$)', text_to_check):
         return True
-    # Check if contains /pdf/ or format=pdf in url
-    if link and ('/pdf/' in link.lower() or 'format=pdf' in link.lower()):
-        return True
-    # Check for PDF tag in parens or brackets: (PDF), [PDF], (PDF+EPUB), etc.
-    if raw_title and re.search(r'[\(\[]\s*pdf\s*[\)\]]', raw_title, re.I):
-        return True
-    # Check for standalone word "pdf"
-    if raw_title and re.search(r'\bpdf\b', raw_title, re.I):
-        return True
+
     return False
 
 SERIES_ALIASES = [
@@ -304,7 +319,7 @@ def extract_series_and_volume(raw_title: str) -> Dict[str, Any]:
     # e.g., "Monogatari Series Vol 1, 2, 3", "Series Vol 1 + 2 + 3"
     list_bundle_pattern = re.compile(
         r"^(?P<series>.+?)\s*(?:[-–—:,]\s*)?"
-        r"(?:\b(?:volumes|volume|vol|books?)\b\.?|\bv\.?)\s*(?P<vols_str>\d+(?:\s*[,+&]\s*(?:(?:volumes|volume|vol|books?)\b\.?|\bv\.?)?\s*\d+)+)"
+        r"(?:\b(?:volumes|volume|vol|books?)\b\.?|\bv\.?)\s*(?P<vols_str>\d+(?:\s*(?:,\s*(?:and\b|[+&])|[,+&]|\band\b)\s*(?:(?:volumes|volume|vol|books?)\b\.?|\bv\.?)?\s*\d+)+)"
         r"(?:\s*[:\-–—]\s*(?P<subtitle>.*))?$",
         re.IGNORECASE
     )
@@ -505,3 +520,131 @@ def match_series_in_calibre(extracted_series: str, calibre_series_list: list, th
             best_match = c_ser
             
     return best_match
+
+
+KNOWN_PUBLISHERS = {
+    'yen press', 'yen on', 'j-novel club', 'j-novel heart', 'seven seas',
+    'seven seas entertainment', 'airship', 'ghost ship', 'one peace books',
+    'cross infinite world', 'tentai books', 'hanashi media', 'square enix',
+    'square enix manga & books', 'kodansha', 'kodansha usa', 'viz', 'viz media',
+    'tokyopop', 'dark horse', 'kaiten books', 'denpa', 'vertical', 'monogatari'
+}
+
+DEFAULT_KNOWN_GROUPS = [
+    "Stick", "Yen Press", "J-Novel Club", "Seven Seas", "One Peace Books",
+    "danke-Empire", "Lu自主规制", "a-sloth", "1R0N", "Kobo", "BW", "BookWalker",
+    "nao", "GZ", "Anonymous", "TenmaLand", "LuCirAn", "NaBi", "aKraa", "LostYears"
+]
+
+BUZZWORDS = {
+    # Document and book formats
+    "epub", "pdf", "cbz", "cbr", "mobi", "azw3", "azw", "djvu", "fb2", "txt", "html", "htm", "rtf", "lit", "prc",
+    "zip", "rar", "7z", "tar",
+    # Audio formats, codecs, channels & buzzwords
+    "audio", "multi-audio", "dual-audio", "multi audio", "dual audio",
+    "multi", "dual", "audiobook", "audiobooks", "audio-book", "audio book",
+    "flac", "aac", "mp3", "opus", "ogg", "wav", "m4a", "m4b", "alac", "ac3", "eac3", "dts", "lossless", "truehd", "atmos",
+    "kbps",
+    # Video resolutions, codecs, containers & formats
+    "1080p", "720p", "480p", "2160p", "4k", "uhd", "hd", "hq", "fhd", "sd",
+    "remux", "bd", "bluray", "blu-ray", "blu", "ray", "bdrerip", "bdrip", "dvd", "dvdrip", "vob",
+    "web-dl", "webdl", "webrip", "siterip", "web", "dl",
+    "mkv", "mp4", "avi", "wmv", "iso", "m4v", "mov", "flv", "webm", "ts",
+    "x264", "x265", "h264", "h265", "hevc", "avc", "av1", "xvid", "divx", "h", "x",
+    "10bit", "10-bit", "8bit", "8-bit", "bit", "hdr", "hdr10", "sdr",
+    # Subtitles, dubs & language tags
+    "sub", "subs", "subbed", "dub", "dubs", "dubbed",
+    "multi-sub", "dual-sub", "multisub", "dualsub", "multi-subs", "dual-subs", "raw", "softsub", "hardsub",
+    "jap", "jpn", "chs", "cht",
+    # Status, packaging & edition tags
+    "digital", "retail", "rip", "scan", "scanlation", "scans",
+    "complete", "completed", "complete series", "ongoing", "batch", "pack",
+    "novel", "novels", "light novel", "light novels", "ln", "wn", "web novel",
+    "english", "eng", "en", "official", "official release",
+    "repack", "proper", "rerip", "untrimmed", "fixed", "remastered", "uncensored", "censored",
+    "bonus", "extras", "artbook", "artbooks", "illustrations", "illustration",
+    "v1", "v2", "v3", "v4", "v5"
+}
+
+def is_valid_group_candidate(clean: str, known_groups: Optional[List[str]] = None) -> bool:
+    clean = clean.strip()
+    if not clean or len(clean) < 2 or len(clean) > 40:
+        return False
+    # Explicitly recognized groups bypass buzzwords
+    groups = {g.lower() for g in (known_groups or DEFAULT_KNOWN_GROUPS)}
+    if clean.lower() in groups:
+        return True
+    if re.match(r"^(?:19|20)\d{2}(?:\s*[-–—~to/]\s*(?:19|20)\d{2})?$", clean):
+        return False
+    if re.match(r"^(?:vol\.?|volume|v|ch\.?|chapter|c|book)\s*\d+", clean, re.IGNORECASE):
+        return False
+    if re.match(r"^\d+(?:\s*[-–—~to/]\s*\d+)?$", clean):
+        return False
+    lower = clean.lower()
+    if lower in BUZZWORDS:
+        return False
+    tokens = [t.strip().lower() for t in re.split(r"[\s\-–—~_.+/|,:&]+", clean) if t.strip()]
+    if tokens and all(t in BUZZWORDS or re.match(r"^\d+(?:p|bit|k|kbps)?$|^\d+x\d+$", t) or re.match(r"^(?:19|20)\d{2}$", t) for t in tokens):
+        return False
+    return True
+
+def extract_release_group(raw_title: str, known_groups: Optional[List[str]] = None) -> Optional[str]:
+    """
+    Extracts release group or publisher tag from raw release titles.
+    e.g. '[Yen Press] Overlord Vol. 1' -> 'Yen Press'
+         '[Seven Seas] [Stick] Mushoku Tensei v01' -> 'Stick'
+         'Re:Zero Vol 1 (J-Novel Club)' -> 'J-Novel Club'
+         '[danke-Empire] Bleach v01-v20 [Completed]' -> 'danke-Empire'
+    """
+    if not raw_title:
+        return None
+
+    groups_to_check = sorted(list(known_groups or []) + DEFAULT_KNOWN_GROUPS, key=len, reverse=True)
+
+    # 1. Extract bracketed candidates [Group] or (Group)
+    bracket_pairs = re.findall(r'\[([^\]]+)\]|\(([^\)]+)\)', raw_title)
+    all_candidates = []
+    for b1, b2 in bracket_pairs:
+        cand = (b1 or b2).strip()
+        if is_valid_group_candidate(cand, known_groups=groups_to_check):
+            all_candidates.append(cand)
+
+    if all_candidates:
+        # Separate into ripper groups vs publishers
+        non_publishers = [c for c in all_candidates if c.lower() not in KNOWN_PUBLISHERS]
+        publishers = [c for c in all_candidates if c.lower() in KNOWN_PUBLISHERS]
+
+        # Check against known groups first among non_publishers
+        if non_publishers:
+            for cand in non_publishers:
+                for kg in groups_to_check:
+                    if cand.lower() == kg.lower():
+                        return kg
+            return non_publishers[0]
+
+        # If only publishers, match against known groups or return first publisher
+        if publishers:
+            for cand in publishers:
+                for kg in groups_to_check:
+                    if cand.lower() == kg.lower():
+                        return kg
+            return publishers[0]
+
+    # 2. Trailing scene group pattern e.g. Title-Stick (Digital)
+    m_scene = re.search(r'[-–—]([A-Za-z0-9_]{2,30})(?:\s*[\(\[]|\s*$)', raw_title)
+    if m_scene:
+        cand = m_scene.group(1).strip()
+        if is_valid_group_candidate(cand, known_groups=groups_to_check):
+            for kg in groups_to_check:
+                if cand.lower() == kg.lower():
+                    return kg
+            return cand
+
+    # 3. Known groups substring match
+    for kg in groups_to_check:
+        escaped = re.escape(kg)
+        if re.search(r'(?:^|[\s_.\-\(\[])' + escaped + r'(?:$|[\s_.\-\)\]])', raw_title, re.IGNORECASE):
+            return kg
+
+    return None
+

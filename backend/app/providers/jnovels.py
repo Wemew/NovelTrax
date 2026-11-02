@@ -425,33 +425,33 @@ class JNovelsProvider(BaseFeedProvider):
         if not content:
             return results
 
-            for a in content.find_all("a"):
-                href = (a.get("href") or "").strip()
-                raw_text = a.get_text(strip=True)
-                if not href or not raw_text or not href.startswith("https://jnovels.com/"):
-                    continue
-                if any(bad in href for bad in ("mode=", "app.adjust", "/faq", "/category/", "/tag/", "/contact", "/author/")):
-                    continue
-                if href == "https://jnovels.com/" or href in seen_links:
-                    continue
+        for a in content.find_all("a"):
+            href = (a.get("href") or "").strip()
+            raw_text = a.get_text(strip=True)
+            if not href or not raw_text or not href.startswith("https://jnovels.com/"):
+                continue
+            if any(bad in href for bad in ("mode=", "app.adjust", "/faq", "/category/", "/tag/", "/contact", "/author/")):
+                continue
+            if href == "https://jnovels.com/" or href in seen_links:
+                continue
 
-                seen_links.add(href)
-                parsed = extract_series_and_volume(raw_text)
-                series_name = parsed["series_name"]
-                if not series_name:
-                    continue
+            seen_links.add(href)
+            parsed = extract_series_and_volume(raw_text)
+            series_name = parsed["series_name"]
+            if not series_name:
+                continue
 
-                from app.providers.metadata import NovelMetadataProvider
-                clean_series = NovelMetadataProvider.clean_novel_title(series_name)
-                results.append(ReleaseItem(
-                    title=clean_series,
-                    link=href,
-                    series_name=clean_series,
-                    volume=parsed["volume"] or 1.0,
-                    series_link=href,
-                    source_feed_name="J-Novels Master Index",
-                    raw_data={"is_master_index": True}
-                ))
+            from app.providers.metadata import NovelMetadataProvider
+            clean_series = NovelMetadataProvider.clean_novel_title(series_name)
+            results.append(ReleaseItem(
+                title=clean_series,
+                link=href,
+                series_name=clean_series,
+                volume=parsed["volume"] or 1.0,
+                series_link=href,
+                source_feed_name="J-Novels Master Index",
+                raw_data={"is_master_index": True}
+            ))
 
         logger.info(f"Fetched {len(results)} series from J-Novels Master Index ({index_url}).")
         return results
@@ -587,7 +587,14 @@ class JNovelsProvider(BaseFeedProvider):
                 rss_url = f"{rss_url.rstrip('/')}/feed/"
 
         import feedparser
-        feed = feedparser.parse(rss_url, request_headers=DEFAULT_HEADERS)
+        from app.security import safe_http_get
+        try:
+            resp = safe_http_get(rss_url, timeout=15.0, headers=DEFAULT_HEADERS)
+            feed = feedparser.parse(resp.text)
+        except Exception as e:
+            logger.error(f"Error fetching/parsing J-Novels RSS feed at {rss_url}: {e}")
+            return []
+
         results = []
 
         for entry in feed.entries:

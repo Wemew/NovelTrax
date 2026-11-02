@@ -1,0 +1,536 @@
+{% extends "base.html" %}
+
+{% block title %}Prioritized Releases & Groups{% endblock %}
+
+{% block content %}
+<div class="space-y-6">
+
+    <!-- Header & Controls -->
+    <div class="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+        <div>
+            <h1 class="text-2xl font-bold text-white tracking-tight flex items-center gap-2">
+                <i data-lucide="star" class="w-6 h-6 text-amber-400"></i>
+                Prioritized Releases & Groups
+            </h1>
+            <p class="text-xs text-slate-400 mt-1">
+                Filter and prioritize trusted light novel publishers and digital release groups (e.g. Yen Press, J-Novel Club, Seven Seas, Stick, One Peace Books).
+            </p>
+        </div>
+
+        <!-- View Switcher & Status Filters -->
+        <div class="flex flex-wrap items-center gap-3">
+            <!-- View Mode Switcher -->
+            <div class="flex items-center bg-slate-900 border border-slate-800 rounded-xl p-1 text-xs font-semibold">
+                <a href="/prioritized?view=series{% if current_status %}&status={{ current_status }}{% endif %}" 
+                   class="px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition-colors {% if current_view != 'flat' %}bg-brand-600 text-white shadow-sm{% else %}text-slate-400 hover:text-white{% endif %}">
+                    <i data-lucide="layers" class="w-3.5 h-3.5"></i>
+                    Group by Series
+                </a>
+                <a href="/prioritized?view=flat{% if current_status %}&status={{ current_status }}{% endif %}" 
+                   class="px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition-colors {% if current_view == 'flat' %}bg-brand-600 text-white shadow-sm{% else %}text-slate-400 hover:text-white{% endif %}">
+                    <i data-lucide="list" class="w-3.5 h-3.5"></i>
+                    All Releases (Flat)
+                </a>
+            </div>
+
+            <!-- Status Filter Pills -->
+            <div class="flex items-center gap-1.5 bg-slate-900/60 p-1 rounded-xl border border-slate-800">
+                <a href="/prioritized?view={{ current_view }}" 
+                   class="px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors {% if not current_status %}bg-slate-700 text-white{% else %}text-slate-400 hover:text-white{% endif %}">
+                    All
+                </a>
+                <a href="/prioritized?view={{ current_view }}&status=REQUESTED" 
+                   class="px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors {% if current_status == 'REQUESTED' %}bg-amber-600 text-white{% else %}text-slate-400 hover:text-amber-400{% endif %}">
+                    Wanted
+                </a>
+                <a href="/prioritized?view={{ current_view }}&status=IN_CALIBRE" 
+                   class="px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors {% if current_status == 'IN_CALIBRE' %}bg-emerald-600 text-white{% else %}text-slate-400 hover:text-emerald-400{% endif %}">
+                    In Calibre
+                </a>
+                <a href="/prioritized?view={{ current_view }}&status=NEW" 
+                   class="px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors {% if current_status == 'NEW' %}bg-blue-600 text-white{% else %}text-slate-400 hover:text-blue-400{% endif %}">
+                    New / Discovery
+                </a>
+                <a href="/prioritized?view={{ current_view }}&status=IGNORED" 
+                   class="px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors {% if current_status == 'IGNORED' %}bg-slate-700 text-amber-300 border border-amber-500/40{% else %}text-slate-400 hover:text-amber-300{% endif %}" title="View ignored releases">
+                    Ignored
+                </a>
+            </div>
+        </div>
+    </div>
+
+    <!-- Prioritized Groups Management Card -->
+    <div class="bg-slate-900/90 border border-amber-500/20 rounded-2xl p-4 shadow-xl">
+        <div class="flex flex-col md:flex-row items-start md:items-center justify-between gap-3 mb-3">
+            <div class="flex items-center gap-2">
+                <span class="w-2.5 h-2.5 rounded-full bg-amber-400 animate-pulse"></span>
+                <h3 class="text-xs font-bold uppercase tracking-wider text-amber-300">
+                    Active Prioritized Release Groups ({{ prioritized_groups|length }})
+                </h3>
+            </div>
+            
+            <!-- Quick Add Group Form -->
+            <form onsubmit="addPrioritizedGroup(event)" class="flex items-center gap-2 w-full md:w-auto">
+                <input type="text" id="newGroupName" placeholder="Group / publisher name (e.g. Yen Press)" required
+                       class="bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-amber-400 w-full sm:w-48">
+                <input type="text" id="newGroupNotes" placeholder="Notes (optional)" 
+                       class="hidden sm:inline-block bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-amber-400 w-36">
+                <button type="submit" class="px-3 py-1 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs flex items-center gap-1 transition-colors whitespace-nowrap shadow-sm">
+                    <i data-lucide="plus" class="w-3.5 h-3.5"></i>
+                    Add Group
+                </button>
+            </form>
+        </div>
+
+        <!-- Groups Tags Pills -->
+        <div class="flex flex-wrap gap-2 pt-2 border-t border-slate-800">
+            {% for pg in prioritized_groups %}
+            <div class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-200 text-xs font-semibold shadow-sm group">
+                <i data-lucide="star" class="w-3 h-3 text-amber-400 fill-amber-400"></i>
+                <span>{{ pg.name }}</span>
+                {% if pg.release_count %}
+                <span class="px-1.5 py-0.2 rounded bg-amber-500/20 text-[10px] text-amber-300 font-mono">{{ pg.release_count }}</span>
+                {% endif %}
+                <button onclick="removePrioritizedGroup({{ pg.id }}, '{{ pg.name|escape }}')" title="Remove from prioritized groups" class="text-amber-400/60 hover:text-rose-400 ml-1 transition-colors">
+                    <i data-lucide="x" class="w-3 h-3"></i>
+                </button>
+            </div>
+            {% else %}
+            <p class="text-xs text-slate-500 italic py-1">
+                No release groups prioritized yet. Add groups above to filter this page!
+            </p>
+            {% endfor %}
+        </div>
+    </div>
+
+    <!-- Quick Search Filter Bar -->
+    <div class="bg-slate-900/90 border border-slate-800 rounded-xl p-3 flex items-center gap-3 shadow-md">
+        <i data-lucide="search" class="w-4 h-4 text-slate-400"></i>
+        <input type="text" id="prioritizedSearchInput" onkeyup="filterPrioritized()" placeholder="Filter prioritized releases by series name or release title..." 
+               class="bg-transparent border-0 text-sm text-slate-100 placeholder-slate-500 focus:outline-none w-full">
+        <span id="matchCounter" class="text-xs text-slate-500 font-mono whitespace-nowrap"></span>
+    </div>
+
+    {% if current_view != 'flat' %}
+    <!-- VIEW MODE: GROUPED BY CANONICAL SERIES -->
+    <div class="space-y-4" id="seriesGroupContainer">
+        {% if grouped_series %}
+            {% include "partials/series_card_chunk.html" %}
+        {% else %}
+            <div id="series-loading-skeleton" class="space-y-4">
+                {% for _ in range(3) %}
+                <div class="bg-slate-900/90 border border-amber-500/20 rounded-2xl p-5 shadow-lg animate-pulse">
+                    <div class="flex flex-col md:flex-row gap-5 items-start">
+                        <div class="w-24 h-36 bg-slate-800 rounded-xl flex-shrink-0"></div>
+                        <div class="flex-1 w-full space-y-3">
+                            <div class="h-6 bg-slate-800 rounded w-1/3"></div>
+                            <div class="h-4 bg-slate-800/60 rounded w-1/4"></div>
+                            <div class="h-12 bg-slate-800/40 rounded w-full"></div>
+                            <div class="h-8 bg-slate-800/50 rounded w-1/2"></div>
+                        </div>
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+        {% endif %}
+    </div>
+
+    <!-- Infinite Scroll / Progressive Load More Sentinel for Series -->
+    <div id="load-more-series-container" class="text-center py-6">
+        <div id="series-spinner" class="inline-flex items-center gap-2.5 px-4 py-2 rounded-xl bg-slate-900 border border-slate-800 text-xs text-amber-300">
+            <svg class="animate-spin w-4 h-4 text-amber-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+            </svg>
+            <span id="series-loading-text">Loading prioritized series...</span>
+        </div>
+        <button onclick="loadMoreSeries()" id="btn-load-more-series" class="hidden px-5 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold items-center gap-2 shadow-md hover:border-slate-600 transition-all active:scale-95">
+            <i data-lucide="chevrons-down" class="w-4 h-4 text-amber-400"></i>
+            <span>Load More Series (<span id="deferred-series-count">0</span> remaining)</span>
+        </button>
+    </div>
+
+    {% else %}
+    <!-- VIEW MODE: ALL RELEASES (FLAT TABLE) -->
+    <div class="bg-slate-900/90 border border-slate-800 rounded-2xl overflow-hidden shadow-xl" id="flatReleasesTable">
+        <div class="overflow-x-auto">
+            <table class="w-full text-left border-collapse text-xs">
+                <thead>
+                    <tr class="bg-slate-950 border-b border-slate-800 text-slate-400 font-semibold uppercase tracking-wider text-[11px]">
+                        <th class="py-3.5 px-4 w-12 text-center">Cover</th>
+                        <th class="py-3.5 px-4">Release Title</th>
+                        <th class="py-3.5 px-4">Series & Included Volumes</th>
+                        <th class="py-3.5 px-4">Status / Missing</th>
+                        <th class="py-3.5 px-4">Feed Source</th>
+                        <th class="py-3.5 px-4 text-right">Actions</th>
+                    </tr>
+                </thead>
+                <tbody class="divide-y divide-slate-800/60" id="flatTableBody">
+                    {% if releases %}
+                        {% include "partials/flat_release_row_chunk.html" %}
+                    {% else %}
+                    <tr id="flat-loading-skeleton" class="animate-pulse">
+                        <td colspan="6" class="py-8 text-center text-xs text-slate-500 font-medium">
+                            <div class="inline-flex items-center gap-2">
+                                <i data-lucide="loader-2" class="w-4 h-4 animate-spin text-amber-400"></i>
+                                <span>Loading prioritized releases...</span>
+                            </div>
+                        </td>
+                    </tr>
+                    {% endif %}
+                </tbody>
+            </table>
+        </div>
+        <div id="load-more-flat-container" class="text-center py-4 bg-slate-950/60 border-t border-slate-800">
+            <button onclick="loadMoreFlat()" id="btn-load-more-flat" class="hidden px-5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold inline-flex items-center gap-2 shadow-md hover:border-slate-600 transition-all active:scale-95">
+                <i data-lucide="chevrons-down" class="w-4 h-4 text-amber-400"></i>
+                <span>Load More Releases (<span id="deferred-flat-count">0</span> remaining)</span>
+            </button>
+        </div>
+    </div>
+    {% endif %}
+
+</div>
+
+<script>
+const currentStatus = "{{ current_status or '' }}";
+const currentView = "{{ current_view or 'series' }}";
+
+function toggleReleasesAccordion(id) {
+    const el = document.getElementById(id);
+    const icon = document.getElementById('icon-' + id);
+    if (!el) return;
+    const isHidden = el.classList.contains('hidden');
+    if (isHidden) {
+        el.classList.remove('hidden');
+        if (icon) icon.classList.add('rotate-180');
+        if (window.lucide) lucide.createIcons();
+    } else {
+        el.classList.add('hidden');
+        if (icon) icon.classList.remove('rotate-180');
+    }
+}
+
+// Progressive series lazy-loading
+let seriesOffset = 0;
+const seriesLimit = 8;
+let isLoadingSeries = false;
+let hasMoreSeries = true;
+let isFirstSeriesBatch = true;
+
+async function fetchNextSeriesBatch() {
+    if (isLoadingSeries || !hasMoreSeries) return;
+    isLoadingSeries = true;
+
+    const spinner = document.getElementById('load-more-series-container');
+    if (spinner && !isFirstSeriesBatch) spinner.style.display = 'block';
+
+    try {
+        const url = `/api/prioritized/cards?status=${encodeURIComponent(currentStatus)}&offset=${seriesOffset}&limit=${seriesLimit}`;
+        const res = await fetch(url);
+        const data = await res.json();
+
+        const container = document.getElementById('seriesGroupContainer');
+        const skeleton = document.getElementById('series-loading-skeleton');
+        if (skeleton) skeleton.remove();
+
+        if (isFirstSeriesBatch && data.count === 0) {
+            container.innerHTML = `
+                <div class="bg-slate-900 border border-amber-500/20 rounded-2xl p-12 text-center text-slate-500">
+                    <i data-lucide="inbox" class="w-12 h-12 mx-auto mb-3 opacity-40"></i>
+                    <p class="text-sm font-semibold">No prioritized light novel releases found matching current filters.</p>
+                </div>
+            `;
+            hasMoreSeries = false;
+            if (spinner) spinner.style.display = 'none';
+            if (window.lucide) lucide.createIcons();
+            return;
+        }
+
+        if (data.html) {
+            container.insertAdjacentHTML('beforeend', data.html);
+        }
+
+        seriesOffset += data.count;
+        hasMoreSeries = data.has_more;
+        isFirstSeriesBatch = false;
+
+        const remaining = Math.max(0, data.total - seriesOffset);
+        const countEl = document.getElementById('deferred-series-count');
+        if (countEl) countEl.innerText = remaining;
+
+        if (window.lucide) lucide.createIcons();
+
+        const query = (document.getElementById('prioritizedSearchInput')?.value || '').trim();
+        if (query) {
+            filterPrioritized();
+        }
+
+        if (!hasMoreSeries) {
+            if (spinner) spinner.style.display = 'none';
+        } else {
+            if (spinner) spinner.style.display = 'block';
+            setTimeout(fetchNextSeriesBatch, 60);
+        }
+    } catch (err) {
+        console.error("Error loading prioritized cards:", err);
+        const btn = document.getElementById('btn-load-more-series');
+        if (btn) btn.classList.remove('hidden');
+    } finally {
+        isLoadingSeries = false;
+    }
+}
+
+function loadMoreSeries(batchSize = 24) {
+    const deferred = document.querySelectorAll('.series-card-deferred');
+    if (deferred.length > 0) {
+        let count = 0;
+        deferred.forEach(card => {
+            if (count < batchSize) {
+                card.classList.remove('hidden', 'series-card-deferred');
+                count++;
+            }
+        });
+        const remaining = document.querySelectorAll('.series-card-deferred').length;
+        const countEl = document.getElementById('deferred-series-count');
+        if (countEl) countEl.innerText = remaining;
+        if (remaining === 0) {
+            const container = document.getElementById('load-more-series-container');
+            if (container) container.style.display = 'none';
+        }
+        if (window.lucide) lucide.createIcons();
+    } else {
+        fetchNextSeriesBatch();
+    }
+}
+
+// Progressive flat releases lazy-loading
+let flatOffset = 0;
+const flatLimit = 50;
+let isLoadingFlat = false;
+let hasMoreFlat = true;
+let isFirstFlatBatch = true;
+
+async function fetchNextFlatBatch() {
+    if (isLoadingFlat || !hasMoreFlat) return;
+    isLoadingFlat = true;
+
+    const spinner = document.getElementById('load-more-flat-container');
+    if (spinner && !isFirstFlatBatch) spinner.style.display = 'block';
+
+    try {
+        const url = `/api/prioritized/flat_rows?status=${encodeURIComponent(currentStatus)}&offset=${flatOffset}&limit=${flatLimit}`;
+        const res = await fetch(url);
+        const data = await res.json();
+
+        const tbody = document.getElementById('flatTableBody');
+        const skeleton = document.getElementById('flat-loading-skeleton');
+        if (skeleton) skeleton.remove();
+
+        if (isFirstFlatBatch && data.count === 0) {
+            tbody.innerHTML = `
+                <tr>
+                    <td colspan="6" class="py-12 text-center text-slate-500">
+                        No releases found from prioritized groups matching the selected filter.
+                    </td>
+                </tr>
+            `;
+            hasMoreFlat = false;
+            if (spinner) spinner.style.display = 'none';
+            return;
+        }
+
+        if (data.html) {
+            tbody.insertAdjacentHTML('beforeend', data.html);
+        }
+
+        flatOffset += data.count;
+        hasMoreFlat = data.has_more;
+        isFirstFlatBatch = false;
+
+        const countEl = document.getElementById('deferred-flat-count');
+        if (countEl) countEl.innerText = flatOffset;
+
+        if (window.lucide) lucide.createIcons();
+
+        const query = (document.getElementById('prioritizedSearchInput')?.value || '').trim();
+        if (query) {
+            filterPrioritized();
+        }
+
+        if (!hasMoreFlat) {
+            if (spinner) spinner.style.display = 'none';
+        } else {
+            if (spinner) spinner.style.display = 'block';
+            setTimeout(fetchNextFlatBatch, 60);
+        }
+    } catch (err) {
+        console.error("Error loading flat prioritized releases:", err);
+        const btn = document.getElementById('btn-load-more-flat');
+        if (btn) btn.classList.remove('hidden');
+    } finally {
+        isLoadingFlat = false;
+    }
+}
+
+function loadMoreFlat(batchSize = 50) {
+    const deferred = document.querySelectorAll('.flat-row-deferred');
+    if (deferred.length > 0) {
+        let count = 0;
+        deferred.forEach(row => {
+            if (count < batchSize) {
+                row.classList.remove('hidden', 'flat-row-deferred');
+                count++;
+            }
+        });
+        const remaining = document.querySelectorAll('.flat-row-deferred').length;
+        const countEl = document.getElementById('deferred-flat-count');
+        if (countEl) countEl.innerText = remaining;
+        if (remaining === 0) {
+            const container = document.getElementById('load-more-flat-container');
+            if (container) container.style.display = 'none';
+        }
+        if (window.lucide) lucide.createIcons();
+    } else {
+        fetchNextFlatBatch();
+    }
+}
+
+// Auto-trigger infinite scroll
+function setupInfiniteScroll() {
+    const seriesContainer = document.getElementById('load-more-series-container');
+    if (seriesContainer && 'IntersectionObserver' in window) {
+        const obs = new IntersectionObserver((entries) => {
+            if (entries[0].isIntersecting) {
+                loadMoreSeries();
+            }
+        }, { rootMargin: '300px' });
+        obs.observe(seriesContainer);
+    }
+    const flatContainer = document.getElementById('load-more-flat-container');
+    if (flatContainer && 'IntersectionObserver' in window) {
+        const obs = new IntersectionObserver((entries) => {
+            if (entries[0].isIntersecting) {
+                loadMoreFlat();
+            }
+        }, { rootMargin: '300px' });
+        obs.observe(flatContainer);
+    }
+}
+
+window.addEventListener('DOMContentLoaded', () => {
+    if (currentView === 'flat') {
+        const existingRows = document.querySelectorAll('#flatTableBody tr:not(#flat-loading-skeleton)');
+        if (existingRows.length === 0) {
+            fetchNextFlatBatch();
+        }
+    } else {
+        const existingCards = document.querySelectorAll('#seriesGroupContainer .series-card');
+        if (existingCards.length === 0) {
+            fetchNextSeriesBatch();
+        }
+    }
+    setupInfiniteScroll();
+});
+
+function filterPrioritized() {
+    const query = (document.getElementById('prioritizedSearchInput')?.value || '').toLowerCase().trim();
+    const seriesCards = document.querySelectorAll('.series-card');
+    const flatRows = document.querySelectorAll('.release-row');
+    let visible = 0;
+
+    const seriesMore = document.getElementById('load-more-series-container');
+    const flatMore = document.getElementById('load-more-flat-container');
+
+    if (query) {
+        if (seriesMore) seriesMore.style.display = 'none';
+        if (flatMore) flatMore.style.display = 'none';
+    } else {
+        if (seriesMore && hasMoreSeries) seriesMore.style.display = '';
+        if (flatMore && hasMoreFlat) flatMore.style.display = '';
+    }
+
+    if (seriesCards.length > 0) {
+        seriesCards.forEach(card => {
+            const data = card.getAttribute('data-series-name') || '';
+            if (!query) {
+                if (card.classList.contains('series-card-deferred')) {
+                    card.classList.add('hidden');
+                } else {
+                    card.classList.remove('hidden');
+                    visible++;
+                }
+            } else if (data.includes(query)) {
+                card.classList.remove('hidden');
+                visible++;
+            } else {
+                card.classList.add('hidden');
+            }
+        });
+    } else if (flatRows.length > 0) {
+        flatRows.forEach(row => {
+            const data = row.getAttribute('data-release-name') || '';
+            if (!query) {
+                if (row.classList.contains('flat-row-deferred')) {
+                    row.classList.add('hidden');
+                } else {
+                    row.classList.remove('hidden');
+                    visible++;
+                }
+            } else if (data.includes(query)) {
+                row.classList.remove('hidden');
+                visible++;
+            } else {
+                row.classList.add('hidden');
+            }
+        });
+    }
+
+    const counter = document.getElementById('matchCounter');
+    if (counter) {
+        counter.textContent = query ? `${visible} matches` : '';
+    }
+    if (window.lucide) lucide.createIcons();
+}
+
+async function addPrioritizedGroup(event) {
+    event.preventDefault();
+    const name = document.getElementById('newGroupName').value.trim();
+    const notes = document.getElementById('newGroupNotes').value.trim();
+    if (!name) return;
+
+    try {
+        const res = await fetch('/api/prioritized/groups', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name, notes })
+        });
+        const data = await res.json();
+        if (data.status === 'success') {
+            showToast(`Added prioritized group: ${name}`, 'success');
+            setTimeout(() => location.reload(), 800);
+        } else {
+            showToast(data.message || 'Error adding group', 'error');
+        }
+    } catch (err) {
+        showToast('Error: ' + err, 'error');
+    }
+}
+
+async function removePrioritizedGroup(id, name) {
+    if (!confirm(`Remove "${name}" from prioritized release groups?`)) return;
+    try {
+        const res = await fetch(`/api/prioritized/groups/${id}`, { method: 'DELETE' });
+        const data = await res.json();
+        if (data.status === 'success') {
+            showToast(`Removed prioritized group: ${name}`, 'success');
+            setTimeout(() => location.reload(), 800);
+        } else {
+            showToast(data.message || 'Error removing group', 'error');
+        }
+    } catch (err) {
+        showToast('Error: ' + err, 'error');
+    }
+}
+</script>
+{% endblock %}

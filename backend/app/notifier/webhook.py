@@ -9,6 +9,8 @@ try:
 except ImportError:
     httpx = None
 
+from app.security import is_safe_public_url
+
 logger = logging.getLogger("noveltrax.notifier")
 
 class SimpleHttpResponse:
@@ -17,6 +19,9 @@ class SimpleHttpResponse:
         self.text = text
 
 def _post_json(url: str, json_data: dict, timeout: float = 10.0) -> SimpleHttpResponse:
+    if not is_safe_public_url(url):
+        raise ValueError(f"SSRF blocked: URL targets unsafe or non-public destination: {url}")
+
     if httpx:
         with httpx.Client(timeout=timeout) as client:
             resp = client.post(url, json=json_data)
@@ -49,8 +54,6 @@ class NotificationService:
         link = release.get("link", "")
         cover = release.get("cover_url")
 
-        content = f"📖 **New Novel Release Requested!**\n**Series:** {series}\n**Volume:** {vol}\n**Title:** {title}\n🔗 [View Release]({link})"
-
         self._send_discord(
             title=f"New Release: {series} Vol {vol}",
             description=f"**{title}** has been added to your requested list.",
@@ -74,7 +77,7 @@ class NotificationService:
         self._send_generic({"event": "ACQUIRED", "release": release})
 
     def _send_discord(self, title: str, description: str, url: Optional[str] = None, image_url: Optional[str] = None, color: int = 0x3498db):
-        if not self.discord_webhook:
+        if not self.discord_webhook or not is_safe_public_url(self.discord_webhook):
             return
 
         payload = {
@@ -95,7 +98,7 @@ class NotificationService:
             logger.error(f"Failed to deliver Discord notification: {e}")
 
     def _send_generic(self, payload: Dict[str, Any]):
-        if not self.generic_webhook:
+        if not self.generic_webhook or not is_safe_public_url(self.generic_webhook):
             return
 
         try:
@@ -121,64 +124,80 @@ class NotificationService:
         all_succeeded = True
 
         if d_url:
-            payload = {
-                "username": "NovelTrax",
-                "avatar_url": "https://raw.githubusercontent.com/feathericons/feather/master/icons/book-open.svg",
-                "embeds": [{
-                    "title": "🔔 NovelTrax Notification Test",
-                    "description": "If you're reading this, your Discord webhook integration is functioning properly!",
-                    "color": 0x6366f1,
-                    "fields": [
-                        {"name": "Status", "value": "✅ Connected", "inline": True},
-                        {"name": "Application", "value": "NovelTrax", "inline": True}
-                    ]
-                }]
-            }
-            try:
-                resp = _post_json(d_url.strip(), payload, timeout=10.0)
-                if resp.status_code in (200, 204):
-                    results["discord"] = {
-                        "success": True,
-                        "message": f"Discord notification delivered successfully (HTTP {resp.status_code})!"
-                    }
-                else:
-                    all_succeeded = False
-                    results["discord"] = {
-                        "success": False,
-                        "message": f"Discord returned HTTP {resp.status_code}: {resp.text[:200]}"
-                    }
-            except Exception as e:
+            clean_d = d_url.strip()
+            if not is_safe_public_url(clean_d):
                 all_succeeded = False
                 results["discord"] = {
                     "success": False,
-                    "message": f"Connection error: {str(e)}"
+                    "message": "Blocked by SSRF protection: URL must target a public HTTP/HTTPS destination."
                 }
+            else:
+                payload = {
+                    "username": "NovelTrax",
+                    "avatar_url": "https://raw.githubusercontent.com/feathericons/feather/master/icons/book-open.svg",
+                    "embeds": [{
+                        "title": "🔔 NovelTrax Notification Test",
+                        "description": "If you're reading this, your Discord webhook integration is functioning properly!",
+                        "color": 0x6366f1,
+                        "fields": [
+                            {"name": "Status", "value": "✅ Connected", "inline": True},
+                            {"name": "Application", "value": "NovelTrax", "inline": True}
+                        ]
+                    }]
+                }
+                try:
+                    resp = _post_json(clean_d, payload, timeout=10.0)
+                    if resp.status_code in (200, 204):
+                        results["discord"] = {
+                            "success": True,
+                            "message": f"Discord notification delivered successfully (HTTP {resp.status_code})!"
+                        }
+                    else:
+                        all_succeeded = False
+                        results["discord"] = {
+                            "success": False,
+                            "message": f"Discord returned HTTP {resp.status_code}"
+                        }
+                except Exception as e:
+                    all_succeeded = False
+                    results["discord"] = {
+                        "success": False,
+                        "message": f"Connection error: {e}"
+                    }
 
         if g_url:
-            payload = {
-                "event": "TEST",
-                "title": "NovelTrax Notification Test",
-                "message": "Your generic/Apprise webhook endpoint is reachable and configured properly!"
-            }
-            try:
-                resp = _post_json(g_url.strip(), payload, timeout=10.0)
-                if 200 <= resp.status_code < 300:
-                    results["generic"] = {
-                        "success": True,
-                        "message": f"Generic webhook delivered successfully (HTTP {resp.status_code})!"
-                    }
-                else:
-                    all_succeeded = False
-                    results["generic"] = {
-                        "success": False,
-                        "message": f"Generic webhook returned HTTP {resp.status_code}: {resp.text[:200]}"
-                    }
-            except Exception as e:
+            clean_g = g_url.strip()
+            if not is_safe_public_url(clean_g):
                 all_succeeded = False
                 results["generic"] = {
                     "success": False,
-                    "message": f"Connection error: {str(e)}"
+                    "message": "Blocked by SSRF protection: URL must target a public HTTP/HTTPS destination."
                 }
+            else:
+                payload = {
+                    "event": "TEST",
+                    "title": "NovelTrax Notification Test",
+                    "message": "Your generic/Apprise webhook endpoint is reachable and configured properly!"
+                }
+                try:
+                    resp = _post_json(clean_g, payload, timeout=10.0)
+                    if 200 <= resp.status_code < 300:
+                        results["generic"] = {
+                            "success": True,
+                            "message": f"Generic webhook delivered successfully (HTTP {resp.status_code})!"
+                        }
+                    else:
+                        all_succeeded = False
+                        results["generic"] = {
+                            "success": False,
+                            "message": f"Generic webhook returned HTTP {resp.status_code}"
+                        }
+                except Exception as e:
+                    all_succeeded = False
+                    results["generic"] = {
+                        "success": False,
+                        "message": f"Connection error: {e}"
+                    }
 
         messages = [r["message"] for r in results.values()]
         return {

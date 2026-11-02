@@ -58,9 +58,37 @@
         @keyframes shimmer {
             to { background-position-x: -200%; }
         }
+
+        /* Instant page loading bar */
+        #page-progress-bar.loading {
+            opacity: 1 !important;
+        }
+        .nav-link-loading {
+            position: relative;
+            opacity: 0.85;
+            pointer-events: none;
+        }
+        .nav-link-loading::after {
+            content: '';
+            display: inline-block;
+            width: 0.75rem;
+            height: 0.75rem;
+            margin-left: 0.35rem;
+            border: 2px solid currentColor;
+            border-right-color: transparent;
+            border-radius: 9999px;
+            animation: spin 0.6s linear infinite;
+            vertical-align: middle;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
     </style>
 </head>
 <body class="bg-[#0b0f19] text-slate-100 min-h-screen flex flex-col font-sans antialiased selection:bg-brand-500 selection:text-white">
+
+    <!-- Global Top Loading Progress Bar for Instant Click Feedback -->
+    <div id="page-progress-bar" class="fixed top-0 left-0 h-[2.5px] bg-gradient-to-r from-emerald-500 via-brand-500 to-teal-400 z-50 transition-all duration-300 pointer-events-none opacity-0 shadow-sm shadow-brand-500/50" style="width: 0%;"></div>
 
     <!-- Top Navigation Bar -->
     <header class="bg-[#111827]/80 backdrop-blur-md border-b border-slate-800 sticky top-0 z-40">
@@ -95,6 +123,14 @@
                     <a href="/releases" class="px-3.5 py-2 rounded-lg text-sm font-medium transition-colors {% if active_page == 'releases' %}bg-slate-800 text-brand-400 border border-slate-700{% else %}text-slate-300 hover:text-white hover:bg-slate-800/60{% endif %} flex items-center gap-2">
                         <i data-lucide="sparkles" class="w-4 h-4"></i>
                         Releases
+                    </a>
+                    <a href="/prioritized" class="px-3.5 py-2 rounded-lg text-sm font-medium transition-colors {% if active_page == 'prioritized' %}bg-slate-800 text-amber-400 border border-slate-700{% else %}text-slate-300 hover:text-white hover:bg-slate-800/60{% endif %} flex items-center gap-2">
+                        <i data-lucide="star" class="w-4 h-4 text-amber-400"></i>
+                        Prioritized
+                    </a>
+                    <a href="/downloads" class="px-3.5 py-2 rounded-lg text-sm font-medium transition-colors {% if active_page == 'downloads' %}bg-slate-800 text-brand-400 border border-slate-700{% else %}text-slate-300 hover:text-white hover:bg-slate-800/60{% endif %} flex items-center gap-2">
+                        <i data-lucide="download-cloud" class="w-4 h-4 text-cyan-400"></i>
+                        Downloads
                     </a>
                     <a href="/discovery" class="px-3.5 py-2 rounded-lg text-sm font-medium transition-colors {% if active_page == 'discovery' %}bg-slate-800 text-brand-400 border border-slate-700{% else %}text-slate-300 hover:text-white hover:bg-slate-800/60{% endif %} flex items-center gap-2">
                         <i data-lucide="compass" class="w-4 h-4 text-amber-400"></i>
@@ -286,6 +322,152 @@
         document.addEventListener('keydown', (e) => {
             if (e.key === 'Escape') closeImageModal();
         });
+
+        // Global Navigation Progress Bar & Instant Click Feedback
+        const ProgressBar = {
+            bar: null,
+            timer: null,
+            width: 0,
+            init() {
+                this.bar = document.getElementById('page-progress-bar');
+            },
+            start() {
+                if (!this.bar) this.init();
+                if (!this.bar) return;
+                clearInterval(this.timer);
+                this.width = 15;
+                this.bar.style.width = '15%';
+                this.bar.classList.add('loading');
+                document.body.style.cursor = 'progress';
+
+                this.timer = setInterval(() => {
+                    if (this.width < 75) {
+                        this.width += Math.random() * 12 + 5;
+                    } else if (this.width < 90) {
+                        this.width += Math.random() * 3 + 1;
+                    }
+                    this.bar.style.width = `${Math.min(this.width, 92)}%`;
+                }, 120);
+            },
+            done() {
+                if (!this.bar) return;
+                clearInterval(this.timer);
+                this.bar.style.width = '100%';
+                document.body.style.cursor = '';
+                setTimeout(() => {
+                    this.bar.classList.remove('loading');
+                    setTimeout(() => {
+                        this.bar.style.width = '0%';
+                    }, 250);
+                }, 150);
+            }
+        };
+
+        // Instant click feedback for all navigation tabs and links
+        document.addEventListener('click', (e) => {
+            const link = e.target.closest('a');
+            if (!link) return;
+
+            const href = link.getAttribute('href');
+            if (!href) return;
+
+            // Ignore anchors, JS triggers, external links, modals, or download actions
+            if (href.startsWith('#') || href.startsWith('javascript:') || link.target === '_blank' || link.hasAttribute('download')) {
+                return;
+            }
+
+            // Ignore modifier keys
+            if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+
+            // Trigger instant progress bar & tab spinner on internal navigation
+            if (href.startsWith('/') || href.startsWith('?') || !href.includes('://')) {
+                ProgressBar.start();
+                if (link.closest('nav') || link.classList.contains('nav-tab') || link.closest('.pagination-btn')) {
+                    link.classList.add('nav-link-loading');
+                }
+            }
+        });
+
+        // Reset progress bar & cursor when page is displayed (including bfcache back/forward)
+        window.addEventListener('pageshow', () => {
+            ProgressBar.done();
+            document.querySelectorAll('.nav-link-loading').forEach(el => el.classList.remove('nav-link-loading'));
+            document.body.style.cursor = '';
+        });
+
+        // Shared 1-Click Ignore release function
+        async function ignoreReleaseGlobal(releaseId, targetElement = null) {
+            if (!releaseId) return;
+            try {
+                const res = await fetch(`/api/releases/${releaseId}/ignore`, { method: 'POST' });
+                const data = await res.json();
+                if (data.status === 'success') {
+                    showToast('Release marked as ignored', 'success');
+                    if (targetElement) {
+                        const row = targetElement.closest('tr, .release-row, [data-release-id]');
+                        if (row) {
+                            row.style.transition = 'all 0.3s ease';
+                            row.style.opacity = '0.35';
+                            targetElement.disabled = true;
+                        }
+                    } else {
+                        setTimeout(() => location.reload(), 600);
+                    }
+                } else {
+                    showToast(data.message || 'Error ignoring release', 'error');
+                }
+            } catch (err) {
+                showToast('Error: ' + err, 'error');
+            }
+        }
+
+        // Shared 1-Click Unignore release function
+        async function unignoreReleaseGlobal(releaseId, targetElement = null) {
+            if (!releaseId) return;
+            try {
+                const res = await fetch(`/api/releases/${releaseId}/unignore`, { method: 'POST' });
+                const data = await res.json();
+                if (data.status === 'success') {
+                    showToast('Release restored to active', 'success');
+                    setTimeout(() => location.reload(), 600);
+                } else {
+                    showToast(data.message || 'Error restoring release', 'error');
+                }
+            } catch (err) {
+                showToast('Error: ' + err, 'error');
+            }
+        }
+
+        // Shared targeted series backfill trigger
+        async function backfillSeriesGlobal(seriesName, btn = null) {
+            if (!seriesName) return;
+            if (btn) {
+                const icon = btn.querySelector('i');
+                if (icon) icon.classList.add('animate-spin');
+                btn.disabled = true;
+            }
+            try {
+                const res = await fetch('/api/series/backfill', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ series_name: seriesName, max_pages: 3 })
+                });
+                const data = await res.json();
+                if (data.status === 'started') {
+                    showToast(`Searching providers for past releases of "${seriesName}"...`, 'success');
+                } else {
+                    showToast(data.message || 'Backfill already in progress', 'info');
+                }
+            } catch (err) {
+                showToast('Error: ' + err, 'error');
+            } finally {
+                if (btn) {
+                    const icon = btn.querySelector('i');
+                    if (icon) icon.classList.remove('animate-spin');
+                    btn.disabled = false;
+                }
+            }
+        }
     </script>
 </body>
 </html>

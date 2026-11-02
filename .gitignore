@@ -39,3 +39,6 @@ htmlcov/
 # Scratch & temporary test scripts
 scratch/
 
+# Agent process artifacts (run reports stay local, not in the repo)
+.agents/
+

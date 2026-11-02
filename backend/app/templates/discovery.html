@@ -503,7 +503,12 @@
             const res = await fetch(`/api/releases/${releaseId}/synopsis`, { method: 'POST' });
             if (!res.ok) {
                 const errData = await res.json().catch(() => ({}));
-                btn.innerHTML = `<span class="text-rose-400" title="${errData.detail || res.statusText}">Error (${res.status})</span>`;
+                const errSpan = document.createElement('span');
+                errSpan.className = 'text-rose-400';
+                errSpan.title = errData.detail || res.statusText || '';
+                errSpan.textContent = `Error (${res.status})`;
+                btn.innerHTML = '';
+                btn.appendChild(errSpan);
                 btn.disabled = false;
                 showToast(errData.detail || `Failed to load description (${res.status})`, 'error');
                 return;
@@ -512,8 +517,11 @@
             if (data.status === 'success' && data.synopsis) {
                 const box = document.getElementById(`synopsis-box-${releaseId}`);
                 if (box) {
-                    const safeSynopsis = data.synopsis.replace(/"/g, '&quot;');
-                    box.outerHTML = `<div class="max-h-28 overflow-y-auto pr-1 text-xs text-slate-300/90 mt-2.5 leading-relaxed bg-slate-950/50 p-2.5 rounded-xl border border-slate-800/60 whitespace-pre-line custom-scrollbar" title="${safeSynopsis}">${data.synopsis.trim()}</div>`;
+                    const synDiv = document.createElement('div');
+                    synDiv.className = "max-h-28 overflow-y-auto pr-1 text-xs text-slate-300/90 mt-2.5 leading-relaxed bg-slate-950/50 p-2.5 rounded-xl border border-slate-800/60 whitespace-pre-line custom-scrollbar";
+                    synDiv.title = data.synopsis;
+                    synDiv.textContent = data.synopsis.trim();
+                    box.replaceWith(synDiv);
                 }
                 if (data.cover_url) {
                     const coverBox = document.getElementById(`cover-box-${releaseId}`);

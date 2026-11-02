@@ -4,6 +4,7 @@ from typing import List, Dict, Any, Optional
 import feedparser
 from app.providers.base import BaseFeedProvider, ReleaseItem
 from app.parser import extract_series_and_volume, is_pdf_release
+from app.security import safe_http_get
 
 logger = logging.getLogger("noveltrax.providers.rss")
 
@@ -19,7 +20,13 @@ class RSSFeedProvider(BaseFeedProvider):
         headers = {
             "User-Agent": "NovelTrax/1.0 (Book Release Monitor; +https://github.com/noveltrax)",
         }
-        feed = feedparser.parse(self.url, request_headers=headers)
+        try:
+            resp = safe_http_get(self.url, timeout=15.0, headers=headers)
+            feed = feedparser.parse(resp.text)
+        except Exception as e:
+            logger.error(f"Error fetching/parsing RSS feed at {self.url}: {e}")
+            return []
+
         if feed.bozo and not feed.entries:
             logger.error(f"Error parsing RSS feed at {self.url}: {feed.bozo_exception}")
             return []
