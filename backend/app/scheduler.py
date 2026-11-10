@@ -2,6 +2,7 @@ import os
 import json
 import logging
 import threading
+import time
 import concurrent.futures
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
@@ -42,6 +43,19 @@ logger = logging.getLogger("noveltrax.scheduler")
 FEED_CATCHUP_ENABLED_KEY = "feed_catchup_enabled"
 FEED_CATCHUP_MAX_PAGES_KEY = "feed_catchup_max_pages"
 
+#: Series identity / AniList title sync settings.  All are read with hard-coded
+#: defaults (never seeded into app_settings) so an existing install gets the
+#: feature without a migration; "false"/"0"/"no"/"off" disables a boolean.
+SERIES_ANILIST_SYNC_ENABLED_KEY = "series_anilist_sync_enabled"
+SERIES_ANILIST_SYNC_LIMIT_KEY = "series_anilist_sync_limit"
+SERIES_ANILIST_MATCH_ENABLED_KEY = "series_anilist_match_enabled"
+SERIES_ANILIST_MATCH_BUDGET_KEY = "series_anilist_match_budget"
+SERIES_ANILIST_SYNC_LIMIT_DEFAULT = 15
+SERIES_ANILIST_MATCH_BUDGET_DEFAULT = 10
+
+#: How long a successful per-series AniList title lookup stays hot in process.
+SERIES_ALT_TITLE_TTL_SECONDS = 6 * 60 * 60
+
 
 class TaskManager:
     def __init__(self, db: Database, calibre_path: str, data_dir: Optional[str] = None):
@@ -56,6 +70,11 @@ class TaskManager:
         self.is_backfilling = False
         self.stop_backfill_requested = False
         self.media_resolver = self._build_media_resolver()
+        # In-process TTL cache for AniList title lookups (normalized series name
+        # -> {"titles": [...], "ts": epoch}). Prevents a per-release network hit
+        # during a big scan and across scans; the SQLite metadata cache is still
+        # consulted first, so a restart is cheap.
+        self._series_alt_cache: Dict[str, Dict[str, Any]] = {}
 
     def _build_media_resolver(self):
         from app.media_type import MediaTypeResolver
@@ -271,6 +290,1045 @@ class TaskManager:
         """Enriches a payload with the consolidated detection fields, then persists it."""
         return self.db.upsert_release(self._enrich_release(rel_dict))
 
+    # --- Series identity / Calibre auto-link / AniList title integration -------
+    #
+    # Contract: .agents/series_identity/CONTRACT.md §5.2-§5.5.  The matching
+    # rules themselves live in app.series_identity (owner A); everything here is
+    # the scheduler glue: a per-scan snapshot, canonicalisation of release series
+    # names, bounded AniList lookups, best-effort enrichment and status
+    # reconciliation.  Every helper is best-effort: a metadata outage or a
+    # partially-migrated database must never break a Calibre sync or feed scan.
+
+    @staticmethod
+    def _resolution_value(resolution: Any, key: str, default: Any = None) -> Any:
+        """Reads a field from a SeriesResolution that may be a dict or an object."""
+        if resolution is None:
+            return default
+        try:
+            if isinstance(resolution, dict):
+                value = resolution.get(key, default)
+            else:
+                value = getattr(resolution, key, default)
+                if callable(value):
+                    value = value()
+            return default if value is None else value
+        except Exception:
+            return default
+
+    @staticmethod
+    def _parse_anilist_meta(row: Any) -> Optional[dict]:
+        """Parses a series_tracking row's anilist_meta_json into a dict."""
+        if not isinstance(row, dict):
+            return None
+        raw = row.get("anilist_meta_json")
+        if not raw:
+            return None
+        try:
+            meta = json.loads(raw)
+        except (TypeError, ValueError):
+            return None
+        return meta if isinstance(meta, dict) else None
+
+    @staticmethod
+    def _anilist_titles(meta: Optional[dict]) -> List[str]:
+        """Returns the AniList title set (english/title/romaji/native/synonyms)."""
+        try:
+            from app.series_identity import anilist_title_list
+            return [str(t).strip() for t in anilist_title_list(meta) if str(t or "").strip()]
+        except Exception:
+            if not isinstance(meta, dict):
+                return []
+            titles: List[str] = []
+            for key in ("english_title", "title", "romaji_title", "native_title"):
+                value = meta.get(key)
+                if value and str(value).strip():
+                    titles.append(str(value).strip())
+            synonyms = meta.get("synonyms")
+            if isinstance(synonyms, list):
+                titles.extend(str(s).strip() for s in synonyms if str(s or "").strip())
+            return titles
+
+    @staticmethod
+    def _dedupe_titles(titles: List[str], exclude_norm: Optional[str] = None) -> List[str]:
+        """Order-preserving de-duplication of candidate titles."""
+        from app.parser import normalize_text
+        seen = set()
+        cleaned: List[str] = []
+        for title in titles or []:
+            text = str(title or "").strip()
+            if not text:
+                continue
+            norm = normalize_text(text)
+            if not norm or norm in seen:
+                continue
+            if exclude_norm and norm == exclude_norm:
+                continue
+            seen.add(norm)
+            cleaned.append(text)
+        return cleaned
+
+    def _calibre_series_snapshot(self) -> List[dict]:
+        """Live Calibre series list with a stale-safe fallback.
+
+        Uses ``CalibreScanner``; when the library is unavailable or the read is
+        torn, falls back to the tracked rows that already carry a
+        ``calibre_series_id`` so identity matching never sees an empty library
+        during a transient Calibre failure.
+        """
+        try:
+            calibre_dir = self.db.get_setting("calibre_path", self.calibre_path)
+            scanner = CalibreScanner(calibre_dir)
+            if scanner.is_available():
+                live_series = scanner.get_all_series() or []
+                if live_series:
+                    return live_series
+        except Exception as exc:
+            logger.debug(f"Calibre series snapshot unavailable: {exc}")
+
+        fallback: List[dict] = []
+        try:
+            rows = self.db.get_all_series(monitored_only=False)
+        except Exception as exc:
+            logger.debug(f"Calibre series fallback failed: {exc}")
+            return fallback
+        for row in rows or []:
+            calibre_id = row.get("calibre_series_id")
+            if calibre_id in (None, ""):
+                continue
+            name = (row.get("name") or "").strip()
+            if not name:
+                continue
+            try:
+                series_id = int(calibre_id)
+            except (TypeError, ValueError):
+                continue
+            try:
+                latest = float(row.get("latest_index") or 0.0)
+            except (TypeError, ValueError):
+                latest = 0.0
+            try:
+                book_count = int(row.get("book_count") or 0)
+            except (TypeError, ValueError):
+                book_count = 0
+            fallback.append({
+                "series_id": series_id,
+                "series_name": name,
+                "book_count": book_count,
+                "latest_index": latest,
+                "authors": row.get("authors") or "",
+            })
+        return fallback
+
+    def _fallback_calibre_books(self, series_list: List[dict]) -> List[dict]:
+        """Synthesizes books for a stale series snapshot from tracked rows.
+
+        Used only when the Calibre library read is torn; the release->volume
+        checks need book rows, and owned_volumes_json is the best available
+        truth without opening Calibre.
+        """
+        books: List[dict] = []
+        try:
+            rows = self.db.get_all_series(monitored_only=False)
+        except Exception:
+            rows = []
+        by_calibre_id = {}
+        for row in rows or []:
+            calibre_id = row.get("calibre_series_id")
+            if calibre_id not in (None, ""):
+                by_calibre_id[str(calibre_id)] = row
+        for ser in series_list or []:
+            name = (ser.get("series_name") or ser.get("name") or "").strip()
+            series_id = ser.get("series_id")
+            if not name or series_id is None:
+                continue
+            row = by_calibre_id.get(str(series_id))
+            owned: List[float] = []
+            if row is not None:
+                try:
+                    raw = json.loads(row.get("owned_volumes_json") or "[]")
+                    if isinstance(raw, list):
+                        owned = [float(v) for v in raw if v is not None]
+                except (TypeError, ValueError):
+                    owned = []
+            if not owned:
+                try:
+                    latest = float(ser.get("latest_index") or 0.0)
+                except (TypeError, ValueError):
+                    latest = 0.0
+                owned = [float(v) for v in range(1, int(latest) + 1)] if latest > 0 else []
+            for vol in owned:
+                books.append({
+                    "book_id": int(series_id) * 1000 + int(round(vol)),
+                    "title": f"{name} Vol {vol:.0f}",
+                    "series_id": series_id,
+                    "series_name": name,
+                    "series_index": float(vol),
+                })
+        return books
+
+    def _calibre_library_snapshot(self):
+        """Returns ``(series_list, books_list)`` for the current Calibre library."""
+        try:
+            calibre_dir = self.db.get_setting("calibre_path", self.calibre_path)
+            scanner = CalibreScanner(calibre_dir)
+            if scanner.is_available():
+                live_series = scanner.get_all_series() or []
+                if live_series:
+                    return live_series, scanner.get_all_books() or []
+        except Exception as exc:
+            logger.debug(f"Calibre library snapshot unavailable: {exc}")
+        series_list = self._calibre_series_snapshot()
+        return series_list, self._fallback_calibre_books(series_list)
+
+    def series_identity_snapshot(self) -> dict:
+        """Builds the per-scan series identity snapshot (contract §5.2)."""
+        rows: List[dict] = []
+        aliases: List[dict] = []
+        try:
+            rows = self.db.get_series_identity_rows()
+        except Exception as exc:
+            logger.debug(f"Series identity rows unavailable: {exc}")
+            try:
+                rows = self.db.get_all_series(monitored_only=False)
+            except Exception:
+                rows = []
+        try:
+            aliases = self.db.get_series_alias_overrides()
+        except Exception as exc:
+            logger.debug(f"Series alias overrides unavailable: {exc}")
+            aliases = []
+        calibre_series = self._calibre_series_snapshot()
+        alias_map: Dict[str, dict] = {}
+        calibre_index = None
+        try:
+            from app.series_identity import CalibreSeriesIndex, build_alias_lookup
+            alias_map = build_alias_lookup(rows, aliases)
+            calibre_index = CalibreSeriesIndex(calibre_series)
+        except Exception as exc:
+            logger.debug(f"Series identity index unavailable: {exc}")
+        return {
+            "rows": rows,
+            "aliases": aliases,
+            "alias_map": alias_map,
+            "calibre_series": calibre_series,
+            "calibre_index": calibre_index,
+        }
+
+    def _series_alias_map_for_matcher(self, snapshot: Optional[dict] = None) -> Dict[str, str]:
+        """Builds ``{normalize_text(spelling): canonical tracked name}`` for the matcher."""
+        from app.parser import normalize_text
+        if snapshot is None:
+            snapshot = {"rows": [], "aliases": []}
+            try:
+                snapshot["rows"] = self.db.get_series_identity_rows()
+            except Exception:
+                try:
+                    snapshot["rows"] = self.db.get_all_series(monitored_only=False)
+                except Exception:
+                    snapshot["rows"] = []
+            try:
+                snapshot["aliases"] = self.db.get_series_alias_overrides()
+            except Exception:
+                snapshot["aliases"] = []
+        mapping: Dict[str, str] = {}
+        for override in snapshot.get("aliases") or []:
+            source = (override.get("source_name") or "").strip()
+            target = (override.get("target_name") or "").strip()
+            if source and target:
+                norm_source = normalize_text(source)
+                if norm_source:
+                    mapping[norm_source] = target
+        for row in snapshot.get("rows") or []:
+            name = (row.get("name") or "").strip()
+            if not name:
+                continue
+            norm_name = normalize_text(name)
+            if not norm_name:
+                continue
+            display_title = (row.get("display_title") or "").strip()
+            if display_title:
+                norm_display = normalize_text(display_title)
+                if norm_display and norm_display != norm_name:
+                    mapping.setdefault(norm_display, name)
+            for title in self._anilist_titles(self._parse_anilist_meta(row)):
+                norm_title = normalize_text(title)
+                if norm_title and norm_title != norm_name:
+                    mapping.setdefault(norm_title, name)
+        return mapping
+
+    def _series_titles_from_metadata_cache(self, series_name: str) -> List[str]:
+        """Reads cached AniList titles for a series from ``novel_metadata_cache``.
+
+        Keys are normalised with ``parser.normalize_text`` (never plain lower) so
+        punctuation-heavy titles such as "Trapped in a Dating Sim: ..." hit the
+        same cache bucket as the matcher's candidate keys.
+        """
+        from app.parser import normalize_text
+        titles: List[str] = []
+        keys: List[str] = []
+        norm_key = normalize_text(series_name)
+        if norm_key:
+            keys.append(norm_key)
+        try:
+            from app.providers.metadata import NovelMetadataProvider
+            for candidate in (NovelMetadataProvider.clean_search_title(series_name), series_name):
+                if candidate and candidate not in keys:
+                    keys.append(candidate)
+        except Exception:
+            if series_name not in keys:
+                keys.append(series_name)
+        for key in keys:
+            try:
+                cached = self.db.get_cached_novel_metadata(key)
+            except Exception:
+                continue
+            if cached:
+                titles.extend(self._anilist_titles(cached))
+        return self._dedupe_titles(titles, exclude_norm=norm_key)
+
+    def _cached_series_alternate_titles(self, series_name: str,
+                                        rows: Optional[List[dict]] = None) -> List[str]:
+        """Cached-only title lookup (no network) used during a feed scan/link."""
+        from app.parser import normalize_text
+        norm_key = normalize_text(series_name or "")
+        if not norm_key:
+            return []
+        titles: List[str] = []
+        cache = getattr(self, "_series_alt_cache", None) or {}
+        cached = cache.get(norm_key)
+        if cached:
+            titles.extend(cached.get("titles") or [])
+        if rows is None:
+            try:
+                rows = self.db.get_series_identity_rows()
+            except Exception:
+                rows = []
+        for row in rows or []:
+            name = (row.get("name") or "").strip()
+            display = (row.get("display_title") or "").strip()
+            if normalize_text(name) != norm_key and (
+                not display or normalize_text(display) != norm_key
+            ):
+                continue
+            titles.extend(self._anilist_titles(self._parse_anilist_meta(row)))
+            if display:
+                titles.append(display)
+        titles.extend(self._series_titles_from_metadata_cache(series_name))
+        return self._dedupe_titles(titles, exclude_norm=norm_key)
+
+    def lookup_series_alternate_titles(self, series_name: str, force: bool = False) -> List[str]:
+        """Bounded AniList title lookup for a series (contract §5.2).
+
+        Consults, in order: the per-process TTL cache, the tracked rows' stored
+        AniList metadata, ``novel_metadata_cache`` (normalized keys), and finally
+        one ``NovelMetadataProvider.fetch_series_metadata`` call per series per
+        TTL. Never raises and never performs a network lookup for an empty name.
+        """
+        try:
+            from app.parser import normalize_text
+            name = (series_name or "").strip()
+            key = normalize_text(name)
+            if not key:
+                return []
+            cache = getattr(self, "_series_alt_cache", None)
+            if cache is None:
+                cache = self._series_alt_cache = {}
+            now = time.time()
+            cached = cache.get(key)
+            if cached and not force and (now - float(cached.get("ts") or 0.0)) < SERIES_ALT_TITLE_TTL_SECONDS:
+                return list(cached.get("titles") or [])
+
+            titles: List[str] = []
+            try:
+                rows = self.db.get_series_identity_rows()
+            except Exception:
+                rows = []
+            for row in rows or []:
+                row_name = (row.get("name") or "").strip()
+                display = (row.get("display_title") or "").strip()
+                if normalize_text(row_name) != key and (
+                    not display or normalize_text(display) != key
+                ):
+                    continue
+                titles.extend(self._anilist_titles(self._parse_anilist_meta(row)))
+                if display:
+                    titles.append(display)
+            # A forced lookup deliberately bypasses the SQLite metadata cache so
+            # the provider is asked again (it may still answer from its own cache).
+            if not force:
+                titles.extend(self._series_titles_from_metadata_cache(name))
+
+            titles = self._dedupe_titles(titles, exclude_norm=key)
+            if not titles:
+                meta = None
+                try:
+                    from app.providers.metadata import NovelMetadataProvider
+                    meta = NovelMetadataProvider.fetch_series_metadata(name)
+                except Exception as exc:
+                    logger.debug(f"AniList series title lookup failed for '{name}': {exc}")
+                    meta = None
+                if meta:
+                    titles = self._dedupe_titles(
+                        self._anilist_titles(meta), exclude_norm=key
+                    )
+                    try:
+                        self.db.cache_novel_metadata(key, dict(meta))
+                    except Exception as exc:
+                        logger.debug(f"Could not cache AniList metadata for '{name}': {exc}")
+
+            cache[key] = {"titles": list(titles), "ts": now}
+            return list(titles)
+        except Exception as exc:
+            logger.debug(f"Alternate-title lookup skipped for {series_name!r}: {exc}")
+            return []
+
+    def resolve_release_series_identity(self, release_dict: dict, snapshot: Optional[dict] = None) -> dict:
+        """Canonicalises a release's series name through the identity snapshot.
+
+        Order (contract §5.2): alias overrides / tracked display+AniList titles /
+        exact series title first (``resolve_series_title``), then a Calibre fuzzy
+        match via the snapshot's ``CalibreSeriesIndex``. Returns the canonical
+        stable name, its display title, the Calibre series id, and the alternate
+        names to hand to the release matcher.
+        """
+        from app.parser import normalize_text
+        result = {
+            "series_name": "",
+            "display_title": "",
+            "calibre_series_id": None,
+            "matched": False,
+            "source": "none",
+            "alt_names": [],
+        }
+        if isinstance(release_dict, str):
+            release_dict = {"series_name": release_dict}
+        if not isinstance(release_dict, dict):
+            return result
+        title = (release_dict.get("series_name") or "").strip()
+        if not title:
+            return result
+        norm_title = normalize_text(title)
+        result["series_name"] = title
+        result["display_title"] = title
+
+        try:
+            if snapshot is None:
+                snapshot = self.series_identity_snapshot()
+        except Exception as exc:
+            logger.debug(f"Series identity snapshot failed: {exc}")
+            return result
+
+        rows = snapshot.get("rows") or []
+        aliases = snapshot.get("aliases") or []
+        alt_names: List[str] = list(self._cached_series_alternate_titles(title, rows=rows))
+
+        canonical = title
+        display_title = title
+        series_id: Optional[int] = None
+        calibre_series_id: Optional[int] = None
+        matched = False
+        source = "none"
+        matched_row: Optional[dict] = None
+
+        resolution = None
+        try:
+            from app.series_identity import resolve_series_title
+            resolution = resolve_series_title(title, rows, aliases)
+        except Exception as exc:
+            logger.debug(f"resolve_series_title failed for '{title}': {exc}")
+
+        if resolution is not None:
+            resolved_canonical = str(
+                self._resolution_value(resolution, "canonical_name", "") or ""
+            ).strip()
+            if resolved_canonical:
+                canonical = resolved_canonical
+            resolved_display = str(
+                self._resolution_value(resolution, "display_title", "") or ""
+            ).strip()
+            if resolved_display:
+                display_title = resolved_display
+            series_id = self._resolution_value(resolution, "series_id")
+            calibre_series_id = self._resolution_value(resolution, "calibre_series_id")
+            source = str(self._resolution_value(resolution, "source", "none") or "none")
+            matched = bool(self._resolution_value(resolution, "matched", False))
+            if matched and normalize_text(canonical) != norm_title:
+                source = source if source not in ("", "none") else "alias"
+            if (
+                matched
+                and series_id is None
+                and calibre_series_id in (None, "")
+                and normalize_text(canonical) != norm_title
+                and not any(
+                    normalize_text(row.get("name") or "") == normalize_text(canonical)
+                    for row in rows
+                )
+            ):
+                # A stale alias override can point at a merged/deleted tracked
+                # row; never let that dead target shadow the real series or the
+                # Calibre fuzzy fallback below.
+                matched = False
+                source = "none"
+                canonical = title
+                display_title = title
+                series_id = None
+                calibre_series_id = None
+
+        # Find the tracked row backing the resolution (for display/AniList titles).
+        for row in rows:
+            row_calibre = row.get("calibre_series_id")
+            row_id = row.get("id")
+            if series_id is not None and row_id == series_id:
+                matched_row = row
+                break
+            if calibre_series_id is not None and row_calibre == calibre_series_id:
+                matched_row = row
+                break
+            if normalize_text(row.get("name") or "") == normalize_text(canonical):
+                matched_row = row
+                break
+        if matched_row is not None:
+            if not (display_title or "").strip() or normalize_text(display_title) == normalize_text(canonical):
+                row_display = (matched_row.get("display_title") or "").strip()
+                if row_display:
+                    display_title = row_display
+            if calibre_series_id is None and matched_row.get("calibre_series_id") is not None:
+                calibre_series_id = matched_row.get("calibre_series_id")
+            alt_names.extend(self._anilist_titles(self._parse_anilist_meta(matched_row)))
+
+        if not matched:
+            # Calibre fuzzy fallback: a discovered/provider title that no tracked
+            # row/alias knows may still be a near-match for a Calibre series.
+            calibre_index = snapshot.get("calibre_index")
+            calibre_series_list = snapshot.get("calibre_series") or []
+            if calibre_index is None and calibre_series_list:
+                try:
+                    from app.series_identity import CalibreSeriesIndex
+                    calibre_index = CalibreSeriesIndex(calibre_series_list)
+                except Exception as exc:
+                    logger.debug(f"CalibreSeriesIndex unavailable: {exc}")
+                    calibre_index = None
+            if calibre_index is not None and calibre_series_list:
+                try:
+                    matched_calibre = calibre_index.match(
+                        title, alt_names=alt_names or None
+                    )
+                except Exception as exc:
+                    logger.debug(f"Calibre fuzzy resolve failed for '{title}': {exc}")
+                    matched_calibre = None
+                if matched_calibre:
+                    matched_canonical = self._canonical_calibre_name(matched_calibre)
+                    if matched_canonical:
+                        canonical = matched_canonical
+                        display_title = matched_canonical
+                        calibre_series_id = matched_calibre.get("series_id") or matched_calibre.get("id")
+                        matched = True
+                        source = "fuzzy"
+                        # Pick up the tracked row's display titles for the match.
+                        for row in rows:
+                            if normalize_text(row.get("name") or "") == normalize_text(canonical):
+                                alt_names.extend(self._anilist_titles(self._parse_anilist_meta(row)))
+                                row_display = (row.get("display_title") or "").strip()
+                                if row_display:
+                                    alt_names.append(row_display)
+                                break
+
+        result["series_name"] = (canonical or title).strip()
+        result["display_title"] = (display_title or result["series_name"]).strip()
+        result["calibre_series_id"] = calibre_series_id
+        if series_id is not None:
+            result["series_id"] = series_id
+        result["matched"] = bool(matched)
+        result["source"] = source or ("none" if not matched else "fuzzy")
+        result["alt_names"] = self._dedupe_titles(alt_names, exclude_norm=normalize_text(result["series_name"]))
+        return result
+
+    @staticmethod
+    def _canonical_calibre_name(series: dict) -> str:
+        if not isinstance(series, dict):
+            return ""
+        return str(series.get("series_name") or series.get("name") or "").strip()
+
+    def _rekey_release_series_name(self, release_id: Optional[int], canonical_name: str) -> bool:
+        """Re-keys one release to a canonical tracked/Calibre name.
+
+        ``db.update_release_details`` deliberately protects the stored stable
+        key from *metadata* rewrites; reconcile/identity adoption is the opposite
+        direction (a detached spelling -> the linked tracked name), so it updates
+        the column directly. Returns True when a row was re-keyed.
+        """
+        from app.parser import normalize_text
+        canonical = (canonical_name or "").strip()
+        if release_id is None or not canonical:
+            return False
+        try:
+            with self.db.get_connection() as conn:
+                cur = conn.cursor()
+                cur.execute("SELECT series_name FROM releases WHERE id = ?;", (release_id,))
+                row = cur.fetchone()
+                if row is None:
+                    return False
+                stored = (row["series_name"] or "").strip()
+                if normalize_text(stored) == normalize_text(canonical):
+                    return False
+                cur.execute(
+                    "UPDATE releases SET series_name = ?, updated_at = CURRENT_TIMESTAMP "
+                    "WHERE id = ?;",
+                    (canonical, release_id),
+                )
+                conn.commit()
+                return True
+        except Exception as exc:
+            logger.debug(f"Stable-key re-key failed for release #{release_id}: {exc}")
+            return False
+
+    def _link_targets(self, links: List[dict]) -> List[str]:
+        """Extracts unique canonical target names from auto-link summaries."""
+        from app.parser import normalize_text
+        targets: List[str] = []
+        seen = set()
+        for link in links or []:
+            target = str(link.get("target") or link.get("source") or "").strip()
+            norm = normalize_text(target)
+            if norm and norm not in seen:
+                seen.add(norm)
+                targets.append(target)
+        return targets
+
+    def enrich_tracked_series_anilist(self, limit: int = SERIES_ANILIST_SYNC_LIMIT_DEFAULT) -> dict:
+        """Fetches AniList metadata for a bounded batch of un-enriched tracked rows.
+
+        Then attempts the Calibre auto-link for the enriched rows (contract
+        §5.2/§5.3). Never raises: a metadata outage leaves rows untouched.
+        Returns ``{"synced", "linked", "failed"}`` plus ``linked_names``.
+        """
+        result = {"synced": 0, "linked": 0, "failed": 0, "linked_names": [], "links": []}
+        try:
+            batch_limit = int(limit)
+        except (TypeError, ValueError):
+            batch_limit = SERIES_ANILIST_SYNC_LIMIT_DEFAULT
+        if batch_limit <= 0:
+            return result
+        try:
+            rows = self.db.get_series_identity_rows()
+        except Exception:
+            try:
+                rows = self.db.get_all_series(monitored_only=False)
+            except Exception:
+                return result
+
+        pending = [
+            row for row in rows or []
+            if not (row.get("anilist_meta_json") or "").strip()
+            and (row.get("name") or "").strip()
+            and row.get("id") is not None
+        ][:batch_limit]
+        if not pending:
+            return result
+
+        synced_names: List[str] = []
+        for row in pending:
+            name = (row.get("name") or "").strip()
+            series_id = row.get("id")
+            meta = None
+            try:
+                from app.providers.metadata import NovelMetadataProvider
+                meta = NovelMetadataProvider.fetch_series_metadata(name)
+            except Exception as exc:
+                logger.debug(f"AniList enrichment failed for '{name}': {exc}")
+                meta = None
+            if not meta:
+                result["failed"] += 1
+                continue
+            try:
+                self.db.store_series_anilist_metadata(int(series_id), meta)
+            except Exception as exc:
+                logger.debug(f"AniList metadata persist failed for '{name}': {exc}")
+                result["failed"] += 1
+                continue
+            result["synced"] += 1
+            synced_names.append(name)
+
+        if not synced_names:
+            return result
+
+        # Auto-link the enriched rows that are still unlinked (bounded: the DB
+        # method only looks at tracked rows without a Calibre id).
+        try:
+            calibre_series_list = self._calibre_series_snapshot()
+            links = self.db.auto_link_series_to_calibre(calibre_series_list, actor="scheduler") or []
+        except Exception as exc:
+            logger.debug(f"Auto-link after AniList enrichment failed: {exc}")
+            links = []
+        if links:
+            result["links"] = list(links)
+            from app.parser import normalize_text
+            synced_norms = {normalize_text(name) for name in synced_names}
+            for link in links:
+                source = str(link.get("source") or "").strip()
+                if normalize_text(source) in synced_norms:
+                    result["linked"] += 1
+                    target = str(link.get("target") or source).strip()
+                    if target:
+                        result["linked_names"].append(target)
+        return result
+
+    def reconcile_series_releases(self, series_name: str) -> dict:
+        """Re-runs Calibre matching for a linked series' releases (contract §5.2).
+
+        Releases stored under an alias/display variant of the series are
+        re-keyed to the canonical tracked name first, then their statuses are
+        recomputed with ``enforce_precedence=True`` so IGNORED / BLACKLISTED /
+        IN_CALIBRE are never downgraded. Returns
+        ``{"checked", "in_calibre", "requested", "new"}`` (+ ``rekeyed``).
+        """
+        from app.parser import normalize_text
+        counts = {"checked": 0, "in_calibre": 0, "requested": 0, "new": 0, "rekeyed": 0}
+        target = (series_name or "").strip()
+        if not target:
+            return counts
+        try:
+            snapshot = self.series_identity_snapshot()
+        except Exception as exc:
+            logger.debug(f"Reconcile snapshot failed for '{target}': {exc}")
+            return counts
+        rows = snapshot.get("rows") or []
+        aliases = snapshot.get("aliases") or []
+
+        canonical = target
+        calibre_series_id: Optional[int] = None
+        target_row: Optional[dict] = None
+        # Prefer a direct stable-name lookup: callers pass the canonical tracked
+        # name, so a stale alias override must never redirect reconciliation.
+        target_norm = normalize_text(target)
+        for row in rows:
+            if normalize_text(row.get("name") or "") != target_norm:
+                continue
+            target_row = row
+            if row.get("calibre_series_id") is not None:
+                calibre_series_id = row.get("calibre_series_id")
+            break
+        if target_row is None:
+            try:
+                from app.series_identity import resolve_series_title
+                resolution = resolve_series_title(target, rows, aliases)
+            except Exception as exc:
+                logger.debug(f"Reconcile resolution failed for '{target}': {exc}")
+                resolution = None
+            if resolution is not None:
+                resolved_canonical = str(
+                    self._resolution_value(resolution, "canonical_name", "") or ""
+                ).strip()
+                resolved_calibre = self._resolution_value(resolution, "calibre_series_id")
+                # Ignore a dead resolution (e.g. a stale alias override pointing
+                # at a merged/deleted row) instead of reconciling the wrong series.
+                if resolved_canonical and (
+                    resolved_calibre is not None
+                    or any(normalize_text(row.get("name") or "") == normalize_text(resolved_canonical)
+                           for row in rows)
+                ):
+                    canonical = resolved_canonical
+                    calibre_series_id = resolved_calibre
+                    target_norm = normalize_text(canonical)
+                    for row in rows:
+                        if normalize_text(row.get("name") or "") == target_norm:
+                            target_row = row
+                            if calibre_series_id is None and row.get("calibre_series_id") is not None:
+                                calibre_series_id = row.get("calibre_series_id")
+                            break
+        if calibre_series_id in (None, ""):
+            if target_row is not None:
+                calibre_series_id = target_row.get("calibre_series_id")
+        if calibre_series_id in (None, ""):
+            # Without a Calibre series id there is nothing to reconcile against.
+            return counts
+
+        series_list, books = self._calibre_library_snapshot()
+        if not series_list:
+            return counts
+        try:
+            matcher = CalibreMatcher(series_list, books)
+        except Exception as exc:
+            logger.debug(f"Reconcile matcher unavailable: {exc}")
+            return counts
+        alt_names: List[str] = []
+        if target_row is not None:
+            alt_names.extend(self._anilist_titles(self._parse_anilist_meta(target_row)))
+            display = (target_row.get("display_title") or "").strip()
+            if display:
+                alt_names.append(display)
+        alt_names = self._dedupe_titles(alt_names, exclude_norm=target_norm) or None
+
+        # Candidate spellings: canonical + every alias-override source that
+        # targets it. Any other stored variant is resolved through the snapshot.
+        variant_norms = {target_norm}
+        for override in aliases:
+            if normalize_text(override.get("target_name") or "") == target_norm:
+                source_norm = normalize_text(override.get("source_name") or "")
+                if source_norm:
+                    variant_norms.add(source_norm)
+
+        try:
+            releases = self.db.get_releases(limit=50000, include_ignored=True)
+        except Exception as exc:
+            logger.debug(f"Reconcile release read failed: {exc}")
+            releases = []
+
+        for release in releases or []:
+            stored = (release.get("series_name") or "").strip()
+            if not stored:
+                continue
+            stored_norm = normalize_text(stored)
+            is_variant = stored_norm in variant_norms
+            if not is_variant:
+                try:
+                    variant_resolution = resolve_series_title(stored, rows, aliases)
+                except Exception:
+                    variant_resolution = None
+                if variant_resolution is not None:
+                    resolved = str(
+                        self._resolution_value(variant_resolution, "canonical_name", "") or ""
+                    ).strip()
+                    is_variant = bool(
+                        self._resolution_value(variant_resolution, "matched", False)
+                    ) and normalize_text(resolved) == target_norm
+            if not is_variant:
+                continue
+
+            release_id = release.get("id")
+            if release_id is None:
+                continue
+            counts["checked"] += 1
+            stored_status = (release.get("status") or "").strip().upper()
+            # User-veto tier: never touched by automation.
+            if stored_status in ("IGNORED", "BLACKLISTED"):
+                continue
+
+            if stored_norm != target_norm:
+                if self._rekey_release_series_name(release_id, canonical):
+                    counts["rekeyed"] += 1
+
+            payload = dict(release)
+            payload["series_name"] = canonical
+            try:
+                match_result = matcher.check_release(
+                    payload,
+                    auto_request_monitored=True,
+                    alt_series_names=alt_names,
+                )
+            except Exception as exc:
+                logger.debug(f"Reconcile check_release failed for release #{release_id}: {exc}")
+                continue
+            incoming_status = (match_result.get("status") or "").strip().upper()
+            # An "unofficial" IGNORED verdict is not a user veto; do not let it
+            # overwrite any stored lifecycle status.
+            if incoming_status in ("", "IGNORED", "BLACKLISTED"):
+                continue
+            try:
+                self.db.update_release_status(
+                    release_id,
+                    status=incoming_status,
+                    matched_book_id=match_result.get("matched_book_id"),
+                    enforce_precedence=True,
+                )
+            except Exception as exc:
+                logger.debug(f"Reconcile status update failed for release #{release_id}: {exc}")
+                continue
+            if incoming_status == "IN_CALIBRE":
+                counts["in_calibre"] += 1
+            elif incoming_status == "REQUESTED":
+                counts["requested"] += 1
+            elif incoming_status == "NEW":
+                counts["new"] += 1
+
+        if counts["rekeyed"]:
+            try:
+                self.db.log_activity(
+                    "SERIES_REKEYED",
+                    f"Re-keyed releases to tracked series '{canonical}'",
+                    f"rekeyed={counts['rekeyed']} checked={counts['checked']}",
+                )
+            except Exception:
+                pass
+        return counts
+
+    def refresh_series_metadata(self, series_id: int) -> dict:
+        """Fetches AniList metadata for one tracked series, then link + reconcile."""
+        result = {
+            "status": "error",
+            "message": "",
+            "display_title": "",
+            "anilist_id": None,
+            "linked": False,
+            "reconciled": {},
+        }
+        try:
+            series_id_int = int(series_id)
+        except (TypeError, ValueError):
+            result["message"] = f"Invalid series id: {series_id!r}"
+            return result
+        row = None
+        try:
+            for candidate in self.db.get_series_identity_rows() or []:
+                if candidate.get("id") == series_id_int:
+                    row = candidate
+                    break
+        except Exception as exc:
+            logger.debug(f"Series row lookup failed for #{series_id_int}: {exc}")
+        if row is None:
+            result["message"] = f"Series #{series_id_int} not found"
+            return result
+
+        name = (row.get("name") or "").strip()
+        meta = None
+        if name:
+            try:
+                from app.providers.metadata import NovelMetadataProvider
+                meta = NovelMetadataProvider.fetch_series_metadata(name)
+            except Exception as exc:
+                logger.debug(f"AniList refresh failed for '{name}': {exc}")
+                meta = None
+            if meta:
+                try:
+                    self.db.store_series_anilist_metadata(series_id_int, meta)
+                except Exception as exc:
+                    logger.debug(f"AniList refresh persist failed for '{name}': {exc}")
+                    meta = None
+
+        linked = row.get("calibre_series_id") not in (None, "")
+        target_name = name
+        if not linked and name:
+            try:
+                calibre_series_list = self._calibre_series_snapshot()
+                links = self.db.auto_link_series_to_calibre(calibre_series_list, actor="user") or []
+            except Exception as exc:
+                logger.debug(f"Auto-link during AniList refresh failed: {exc}")
+                links = []
+            from app.parser import normalize_text
+            for link in links:
+                if normalize_text(link.get("source") or "") == normalize_text(name):
+                    target_name = str(link.get("target") or name).strip()
+                    linked = True
+                    break
+
+        reconciled = {}
+        if linked:
+            try:
+                reconciled = self.reconcile_series_releases(target_name)
+            except Exception as exc:
+                logger.debug(f"Reconcile after AniList refresh failed: {exc}")
+                reconciled = {}
+            result["linked"] = True
+
+        display_title = (meta or {}).get("english_title") or (meta or {}).get("title") or (
+            row.get("display_title") or ""
+        ) or name
+        anilist_id = (meta or {}).get("anilist_id") or row.get("anilist_id")
+        result.update({
+            "status": "success",
+            "display_title": str(display_title or "").strip(),
+            "anilist_id": anilist_id,
+            "reconciled": reconciled,
+            "message": (
+                f"AniList metadata refreshed for '{name}'"
+                if meta else f"No AniList metadata found for '{name}'"
+            ),
+        })
+        try:
+            self.db.log_activity(
+                "SERIES_ANILIST_REFRESHED",
+                f"AniList metadata refreshed for '{name}'",
+                json.dumps({
+                    "series_id": series_id_int,
+                    "synced": bool(meta),
+                    "linked": bool(result["linked"]),
+                }),
+            )
+        except Exception:
+            pass
+        return result
+
+    def match_series_to_calibre(self, source_name: str, calibre_series: dict,
+                                actor: str = "user", release_id: Optional[int] = None) -> dict:
+        """Manually links a tracked/discovered series to a Calibre series.
+
+        Wraps ``db.link_series_to_calibre`` (existing tracker) or
+        ``db.match_discovered_series_to_calibre`` (discovery-only series), then
+        reconciles the linked series' releases and logs ``SERIES_MANUALLY_MATCHED``.
+        ``release_id`` is accepted for callers that want to act on one release;
+        the merge/re-key is series-wide so it needs no extra handling.
+        """
+        source = (source_name or "").strip()
+        if not source:
+            raise ValueError("source_name must not be empty")
+        target_name = self._canonical_calibre_name(calibre_series)
+        if not target_name:
+            raise ValueError("calibre_series must carry a series_name/name")
+        calibre_series_id = calibre_series.get("series_id") or calibre_series.get("id")
+
+        source_row = None
+        try:
+            source_row = self.db.get_series_by_name(source)
+        except Exception as exc:
+            logger.debug(f"Series lookup failed for '{source}': {exc}")
+
+        if source_row is not None:
+            summary = self.db.link_series_to_calibre(
+                source, calibre_series, actor=actor, owned_volumes=None
+            )
+            discovered = False
+        else:
+            summary = self.db.match_discovered_series_to_calibre(
+                source, calibre_series, actor=actor
+            )
+            discovered = True
+
+        summary = dict(summary or {})
+        summary.setdefault("status", "success")
+        summary.setdefault("source", source)
+        summary.setdefault("target", target_name)
+        if summary.get("calibre_series_id") in (None, "") and calibre_series_id is not None:
+            summary["calibre_series_id"] = calibre_series_id
+        summary["discovered"] = discovered
+
+        # The merged tracker's canonical name may differ in case from the
+        # scanner spelling; reconcile using the stored tracked row.
+        canonical_target = str(summary.get("target") or target_name)
+        try:
+            stored_target = self.db.get_series_by_calibre_id(
+                summary.get("calibre_series_id")
+            ) if summary.get("calibre_series_id") is not None else None
+            if stored_target and (stored_target.get("name") or "").strip():
+                canonical_target = stored_target["name"].strip()
+        except Exception as exc:
+            logger.debug(f"Linked series row lookup failed: {exc}")
+
+        reconciled = {}
+        try:
+            reconciled = self.reconcile_series_releases(canonical_target)
+        except Exception as exc:
+            logger.debug(f"Reconcile after manual match failed: {exc}")
+            reconciled = {}
+        summary["reconciled"] = reconciled
+
+        try:
+            self.db.log_activity(
+                "SERIES_MANUALLY_MATCHED",
+                f"Series manually matched: '{source}' -> '{canonical_target}'",
+                json.dumps({
+                    "actor": actor,
+                    "source": source,
+                    "target": canonical_target,
+                    "calibre_series_id": summary.get("calibre_series_id"),
+                    "release_id": release_id,
+                    "merged": bool(summary.get("merged")),
+                    "rekeyed_releases": summary.get("rekeyed_releases", 0),
+                }),
+            )
+        except Exception:
+            pass
+        return summary
+
     def start(self):
         calibre_min = int(self.db.get_setting("calibre_sync_interval_minutes", "15"))
         feed_min = int(self.db.get_setting("feed_check_interval_minutes", "60"))
@@ -361,8 +1419,21 @@ class TaskManager:
             series_list = scanner.get_all_series()
             books_list = scanner.get_all_books()
 
+            # Omnibus-aware owned volumes: get_series_volumes_map() expands
+            # bundled omnibus titles ("Vol 1-3") into their contained volumes, so
+            # a periodic sync must not degrade owned_volumes_json to the single
+            # latest_index (which would make existing volumes look missing).
+            volumes_map = None
+            try:
+                volumes_map = scanner.get_series_volumes_map()
+            except Exception as exc:
+                logger.debug(f"Calibre volumes map unavailable; owned volumes may be coarse: {exc}")
+
             # 1. Auto-populate series into database
-            updated_series_count = self.db.sync_calibre_series(series_list)
+            if volumes_map:
+                updated_series_count = self.db.sync_calibre_series(series_list, volumes_map=volumes_map)
+            else:
+                updated_series_count = self.db.sync_calibre_series(series_list)
 
             # 2. Check and resolve active requests
             pending_requests = self.db.get_pending_requests()
@@ -380,7 +1451,77 @@ class TaskManager:
                 )
                 notifier.notify_acquired(acq)
 
+            # --- 3. Series identity: auto-link, bounded AniList enrichment, reconcile ---
+            # Everything below is best-effort: a metadata outage or a database
+            # that has not had the identity migration applied must never break
+            # the Calibre sync itself. Counters are additive return keys.
+            series_linked = 0
+            series_anilist_synced = 0
+            auto_links: List[Dict[str, Any]] = []
+            try:
+                auto_links = list(
+                    self.db.auto_link_series_to_calibre(series_list, actor="scheduler") or []
+                )
+            except Exception as exc:
+                logger.debug(f"Series auto-link skipped: {exc}")
+
+            try:
+                sync_enabled = self._setting_flag(
+                    self.db.get_setting(SERIES_ANILIST_SYNC_ENABLED_KEY, "true"),
+                    default=True,
+                )
+                if sync_enabled:
+                    try:
+                        sync_limit = int(
+                            self.db.get_setting(
+                                SERIES_ANILIST_SYNC_LIMIT_KEY,
+                                str(SERIES_ANILIST_SYNC_LIMIT_DEFAULT),
+                            )
+                        )
+                    except (TypeError, ValueError):
+                        sync_limit = SERIES_ANILIST_SYNC_LIMIT_DEFAULT
+                    enrichment = self.enrich_tracked_series_anilist(limit=sync_limit)
+                    series_anilist_synced = int(enrichment.get("synced") or 0)
+                    # The enrichment pass auto-links its own rows; carry those
+                    # summaries up so step 3 reconciles/logs them too.
+                    auto_links.extend(enrichment.get("links") or [])
+                    if series_anilist_synced:
+                        # Enriched rows may now match a Calibre series (AniList
+                        # synonyms/romaji/native titles).
+                        try:
+                            auto_links.extend(
+                                self.db.auto_link_series_to_calibre(
+                                    series_list, actor="scheduler"
+                                ) or []
+                            )
+                        except Exception as exc:
+                            logger.debug(f"Post-enrichment auto-link skipped: {exc}")
+            except Exception as exc:
+                logger.debug(f"Series AniList enrichment skipped: {exc}")
+
+            linked_targets = self._link_targets(auto_links)
+            series_linked = len(linked_targets)
+            for target in linked_targets:
+                reconciled: Dict[str, Any] = {}
+                try:
+                    reconciled = self.reconcile_series_releases(target)
+                except Exception as exc:
+                    logger.debug(f"Reconcile after auto-link failed for '{target}': {exc}")
+                try:
+                    self.db.log_activity(
+                        "SERIES_AUTO_LINKED",
+                        f"Series auto-linked to Calibre: '{target}'",
+                        json.dumps({
+                            "series": target,
+                            "reconciled": reconciled,
+                        }),
+                    )
+                except Exception:
+                    pass
+
             log_msg = f"Synced {updated_series_count} series, {len(books_list)} books. Resolved {len(newly_acquired)} requests."
+            if series_linked or series_anilist_synced:
+                log_msg += f" Linked {series_linked} series, enriched {series_anilist_synced} with AniList."
             logger.info(log_msg)
             self.db.log_activity("CALIBRE_SYNC", "Calibre library sync completed", log_msg)
 
@@ -389,7 +1530,10 @@ class TaskManager:
                 "series_count": updated_series_count,
                 "books_count": len(books_list),
                 "resolved_requests": len(newly_acquired),
-                "resolved_items": newly_acquired
+                "resolved_items": newly_acquired,
+                # Additive series-identity counters (legacy callers keep every key).
+                "series_linked": series_linked,
+                "series_anilist_synced": series_anilist_synced,
             }
         except Exception as e:
             logger.error(f"Error during Calibre sync: {e}", exc_info=True)
@@ -458,6 +1602,8 @@ class TaskManager:
         Polls all enabled feeds, checks releases against Calibre,
         and requests new volumes for monitored series.
         """
+        from app.parser import normalize_text
+
         if self.is_checking_feeds:
             return {"status": "in_progress", "message": "Feed check already running"}
 
@@ -479,12 +1625,51 @@ class TaskManager:
         # unverified releases drains over successive scans.
         self.media_resolver = self._build_media_resolver()
 
+        # Per-scan series-identity state. A metadata/DB failure degrades to the
+        # classic matching path; it never aborts the scan.
+        identity_snapshot: Dict[str, Any] = {
+            "rows": [], "aliases": [], "alias_map": {},
+            "calibre_series": [], "calibre_index": None,
+        }
+        series_match_enabled = True
+        series_match_budget = SERIES_ANILIST_MATCH_BUDGET_DEFAULT
+        alt_lookups_used = 0
+
         try:
             calibre_dir = self.db.get_setting("calibre_path", self.calibre_path)
             scanner = CalibreScanner(calibre_dir)
             calibre_series = scanner.get_all_series() if scanner.is_available() else []
             calibre_books = scanner.get_all_books() if scanner.is_available() else []
-            matcher = CalibreMatcher(calibre_series, calibre_books)
+            try:
+                identity_snapshot = self.series_identity_snapshot()
+            except Exception as exc:
+                logger.debug(f"Series identity snapshot skipped: {exc}")
+            try:
+                matcher = CalibreMatcher(
+                    calibre_series,
+                    calibre_books,
+                    series_aliases=self._series_alias_map_for_matcher(identity_snapshot),
+                )
+            except Exception as exc:
+                logger.debug(f"Alias-aware matcher unavailable ({exc}); using classic matching")
+                matcher = CalibreMatcher(calibre_series, calibre_books)
+            try:
+                series_match_enabled = self._setting_flag(
+                    self.db.get_setting(SERIES_ANILIST_MATCH_ENABLED_KEY, "true"),
+                    default=True,
+                )
+            except Exception:
+                series_match_enabled = True
+            try:
+                series_match_budget = max(
+                    0,
+                    int(self.db.get_setting(
+                        SERIES_ANILIST_MATCH_BUDGET_KEY,
+                        str(SERIES_ANILIST_MATCH_BUDGET_DEFAULT),
+                    )),
+                )
+            except (TypeError, ValueError):
+                series_match_budget = SERIES_ANILIST_MATCH_BUDGET_DEFAULT
 
             # Get monitored series names and blacklisted series for filtering
             monitored_series = {s["name"].lower(): s for s in self.db.get_all_series(monitored_only=True)}
@@ -549,21 +1734,91 @@ class TaskManager:
                     new_requests_for_feed = 0
                     for r in releases:
                         series_name = r.series_name or ""
+                        canonical_series_name = series_name
+                        identity: Optional[Dict[str, Any]] = None
+                        rel_dict = r.to_dict()
 
-                        # If series is blacklisted, immediately mark as BLACKLISTED
-                        if series_name and series_name.lower() in blacklisted_series:
+                        # Canonicalise the stored/provider series spelling to the
+                        # stable tracked key before matching (alias override ->
+                        # tracked display/AniList titles -> exact -> Calibre fuzzy).
+                        if series_name:
+                            try:
+                                identity = self.resolve_release_series_identity(rel_dict, identity_snapshot)
+                            except Exception as exc:
+                                logger.debug(f"Series identity resolve failed for '{series_name}': {exc}")
+                                identity = None
+                            if identity:
+                                candidate_name = (identity.get("series_name") or "").strip()
+                                if candidate_name:
+                                    canonical_series_name = candidate_name
+                        rel_dict["series_name"] = canonical_series_name or series_name or None
+
+                        # If either the original or canonical spelling is
+                        # blacklisted, the release stays blacklisted.
+                        is_blacklisted = bool(
+                            series_name and series_name.lower() in blacklisted_series
+                        ) or bool(
+                            canonical_series_name and canonical_series_name.lower() in blacklisted_series
+                        )
+
+                        if is_blacklisted:
+                            # Immediately mark as BLACKLISTED
                             status = "BLACKLISTED"
                             match_result = {"status": "BLACKLISTED", "matched_book_id": None}
+                            is_monitored = False
+                            eff_vol = float(r.volume) if r.volume is not None else 1.0
                         else:
+                            alt_names = list(identity.get("alt_names") or []) if identity else []
                             # Evaluate against Calibre
                             match_result = matcher.check_release(
-                                r.to_dict(),
-                                auto_request_monitored=auto_request
+                                rel_dict,
+                                auto_request_monitored=auto_request,
+                                alt_series_names=alt_names or None,
                             )
+
+                            # Bounded AniList lookup fallback (contract §5.4): a NEW
+                            # vol-1/unnumbered release whose series spelling nobody
+                            # knows may still be resolvable through AniList titles.
+                            if (
+                                match_result.get("status") == "NEW"
+                                and canonical_series_name
+                                and not (identity or {}).get("matched")
+                                and (r.volume is None or r.volume == 1.0)
+                                and series_match_enabled
+                                and alt_lookups_used < series_match_budget
+                            ):
+                                alt_lookups_used += 1
+                                try:
+                                    anilist_titles = self.lookup_series_alternate_titles(
+                                        canonical_series_name
+                                    )
+                                except Exception as exc:
+                                    logger.debug(
+                                        f"AniList title fallback failed for '{canonical_series_name}': {exc}"
+                                    )
+                                    anilist_titles = []
+                                if anilist_titles:
+                                    retry_payload = dict(rel_dict)
+                                    retry_payload["series_name"] = canonical_series_name
+                                    retry_result = matcher.check_release(
+                                        retry_payload,
+                                        auto_request_monitored=auto_request,
+                                        alt_series_names=anilist_titles,
+                                    )
+                                    if retry_result.get("status") != "NEW":
+                                        match_result = retry_result
+                                        adopted = (
+                                            retry_result.get("canonical_series_name") or ""
+                                        ).strip()
+                                        if adopted:
+                                            canonical_series_name = adopted
+                                            rel_dict["series_name"] = adopted
 
                             # Determine if series is monitored
                             is_monitored = False
-                            if series_name.lower() in monitored_series:
+                            if canonical_series_name and canonical_series_name.lower() in monitored_series:
+                                is_monitored = True
+                            elif series_name and series_name.lower() in monitored_series:
                                 is_monitored = True
                             elif match_result.get("matched_series"):
                                 is_monitored = True
@@ -590,7 +1845,6 @@ class TaskManager:
                         if media_type == AUDIOBOOK:
                             skipped_audiobooks += 1
 
-                        rel_dict = r.to_dict()
                         rel_dict.update({
                             "source_feed_id": feed_id,
                             "source_feed_name": feed_name,
@@ -601,6 +1855,37 @@ class TaskManager:
                         })
 
                         is_new, rel_id = self._upsert(rel_dict)
+
+                        # An existing row keeps its stored series_name through the
+                        # upsert (deliberate stable-key rule). When identity
+                        # resolution proved a different stable tracked key, re-key
+                        # the row so a scan cannot split one series across spellings.
+                        if (
+                            not is_new and rel_id and rel_id > 0
+                            and canonical_series_name
+                            and normalize_text(canonical_series_name) != normalize_text(series_name)
+                            and (
+                                (identity or {}).get("matched")
+                                or (
+                                    match_result.get("matched_series")
+                                    and match_result.get("canonical_series_name")
+                                )
+                            )
+                        ):
+                            stored_row = None
+                            try:
+                                stored_row = self.db.get_release_by_id(rel_id)
+                            except Exception:
+                                stored_row = None
+                            if stored_row:
+                                stored_name = (stored_row.get("series_name") or "").strip()
+                                stored_status = (stored_row.get("status") or "").strip().upper()
+                                if (
+                                    stored_name
+                                    and stored_status not in ("IGNORED", "BLACKLISTED")
+                                    and normalize_text(stored_name) != normalize_text(canonical_series_name)
+                                ):
+                                    self._rekey_release_series_name(rel_id, canonical_series_name)
 
                         # Pre-cache cover image asynchronously without blocking feed scanning
                         if r.cover_url:
@@ -615,7 +1900,7 @@ class TaskManager:
                             self.db.log_activity(
                                 "NEW_RELEASE",
                                 f"New release requested: {r.title}",
-                                f"Series: {series_name} Vol {final_volume} from '{feed_name}'"
+                                f"Series: {canonical_series_name or series_name} Vol {final_volume} from '{feed_name}'"
                             )
                             notifier.notify_new_request(rel_dict)
 
@@ -944,30 +2229,101 @@ class TaskManager:
                         series_name=d.get('series_name')
                     )
                     from app.providers.metadata import NovelMetadataProvider
-                    new_series_name = NovelMetadataProvider.clean_novel_title(details.get("english_title") or d.get("series_name"))
+                    # The parsed/tracked series name is the STABLE matching key.
+                    # The provider (AniList/Kitsu) English title is display data
+                    # only: it must never be written to releases.series_name, or
+                    # the release detaches from its Calibre series (M1 bug).
+                    stable_series_name = (d.get("series_name") or "").strip()
+                    display_title = NovelMetadataProvider.clean_novel_title(
+                        details.get("english_title") or ""
+                    )
                     new_title = None
-                    if d.get("title"):
+                    if d.get("title") and display_title:
                         if any(v in d["title"].lower() for v in ("volume", "vol.", "vol ")):
                             from app.parser import extract_series_and_volume
                             parsed = extract_series_and_volume(d["title"])
                             vol = parsed.get("volume")
-                            new_title = f"{new_series_name} Vol. {vol}" if vol is not None else new_series_name
+                            new_title = f"{display_title} Vol. {vol}" if vol is not None else display_title
                         else:
-                            new_title = new_series_name
-                    else:
-                        new_title = new_series_name
+                            new_title = display_title
 
-                    if details.get("synopsis") or details.get("series_link") or details.get("cover_url") or (new_series_name and new_series_name != d.get("series_name")):
+                    has_enrichment = bool(
+                        details.get("synopsis")
+                        or details.get("series_link")
+                        or details.get("cover_url")
+                        or (display_title and display_title != stable_series_name)
+                    )
+                    if has_enrichment:
                         self.db.update_release_details(
                             d["id"],
                             description=details.get("synopsis"),
                             series_link=details.get("series_link"),
                             cover_url=details.get("cover_url"),
-                            series_name=new_series_name,
-                            title=new_title
+                            title=new_title,
                         )
                         if details.get("cover_url"):
                             self.cover_cache.cache_sync(details["cover_url"])
+
+                    if display_title and stable_series_name and display_title != stable_series_name:
+                        # Persist the AniList title as display metadata of the
+                        # tracked series when the release already resolves to one.
+                        meta = {
+                            "title": display_title,
+                            "english_title": display_title,
+                            "source": details.get("metadata_source") or "AniList",
+                            "fetched_at": datetime.now(timezone.utc).isoformat(),
+                        }
+                        target_series_id = None
+                        try:
+                            identity = self.resolve_release_series_identity(
+                                {"series_name": stable_series_name}
+                            )
+                        except Exception as exc:
+                            logger.debug(
+                                f"Series identity resolve during enrichment failed for "
+                                f"'{stable_series_name}': {exc}"
+                            )
+                            identity = None
+                        if identity and identity.get("matched"):
+                            target_series_id = identity.get("series_id")
+                            if target_series_id is None and identity.get("calibre_series_id") is not None:
+                                try:
+                                    row = self.db.get_series_by_calibre_id(
+                                        identity["calibre_series_id"]
+                                    )
+                                    if row:
+                                        target_series_id = row.get("id")
+                                except Exception:
+                                    target_series_id = None
+                        if target_series_id is not None:
+                            try:
+                                self.db.update_series_identity(
+                                    int(target_series_id),
+                                    display_title=display_title,
+                                    anilist_meta_json=json.dumps(meta),
+                                )
+                            except Exception as exc:
+                                logger.debug(
+                                    f"Display-title persist failed for series "
+                                    f"#{target_series_id}: {exc}"
+                                )
+                        else:
+                            # Unknown series: keep the release's stable key and
+                            # cache the title so a later Calibre sync/manual match
+                            # can use it as a matching candidate.
+                            try:
+                                from app.parser import normalize_text
+                                cache_key = normalize_text(stable_series_name)
+                                if cache_key:
+                                    self.db.cache_novel_metadata(cache_key, {
+                                        **meta,
+                                        "synopsis": details.get("synopsis") or "",
+                                        "cover_url": details.get("cover_url") or "",
+                                    })
+                            except Exception as exc:
+                                logger.debug(
+                                    f"Provider-title cache failed for '{stable_series_name}': {exc}"
+                                )
 
                     await asyncio.sleep(delay_seconds)
 

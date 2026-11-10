@@ -271,6 +271,31 @@
 
 </div>
 
+<!-- Manual Calibre match modal (discovery page) -->
+<div id="discovery-match-modal" class="hidden fixed inset-0 z-50">
+    <div class="absolute inset-0 bg-slate-950/80 backdrop-blur-sm" onclick="closeDiscoveryMatchModal()" aria-hidden="true"></div>
+    <div class="relative z-10 w-full max-w-lg mx-auto mt-24 bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl p-5" role="dialog" aria-modal="true" aria-labelledby="discovery-match-title">
+        <div class="flex items-start justify-between gap-3">
+            <div class="min-w-0">
+                <h2 id="discovery-match-title" class="text-sm font-bold text-white flex items-center gap-2">
+                    <i data-lucide="link" class="w-4 h-4 text-brand-400"></i>
+                    Match discovered series to Calibre
+                </h2>
+                <p class="text-[11px] text-slate-400 mt-1 truncate">Discovered: <span id="discovery-match-source" class="font-mono text-slate-300"></span></p>
+            </div>
+            <button type="button" id="discovery-match-cancel" onclick="closeDiscoveryMatchModal()" class="p-1.5 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-white transition-colors" title="Close (Esc)">
+                <i data-lucide="x" class="w-4 h-4"></i>
+            </button>
+        </div>
+        <div class="relative mt-4">
+            <i data-lucide="search" class="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2"></i>
+            <input type="text" id="discovery-match-search" oninput="onDiscoveryMatchSearchInput()" autocomplete="off" placeholder="Search Calibre series or author..." class="w-full bg-slate-950/70 border border-slate-700/80 rounded-xl pl-9 pr-3 py-2 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-brand-500">
+        </div>
+        <div id="discovery-match-results" class="mt-3 max-h-72 overflow-y-auto space-y-1.5 custom-scrollbar"></div>
+        <p class="text-[10px] text-slate-500 mt-3">Choosing a series links and re-keys the discovered releases to the Calibre series, merges trackers and stores an alias so future releases match automatically. Already linked? Picking another series re-links the tracker.</p>
+    </div>
+</div>
+
 <script>
     function switchTab(tab) {
         const discContent = document.getElementById('tab-content-discovery');
@@ -565,6 +590,136 @@
 
     document.addEventListener('DOMContentLoaded', () => {
         checkBackfillStatus();
+    });
+</script>
+
+<script>
+    // Manual Calibre matching modal (discovery page). Search ranking is server-side.
+    let _discoveryMatchState = { seriesName: '', releaseId: null, timer: null, trigger: null };
+
+    function openDiscoveryMatchModal(seriesName, releaseId) {
+        const modal = document.getElementById('discovery-match-modal');
+        if (!modal) return;
+        _discoveryMatchState.trigger = document.activeElement;
+        _discoveryMatchState.seriesName = seriesName || '';
+        _discoveryMatchState.releaseId = Number(releaseId) || null;
+        const source = document.getElementById('discovery-match-source');
+        if (source) source.textContent = seriesName || '';
+        const input = document.getElementById('discovery-match-search');
+        if (input) input.value = seriesName || '';
+        const results = document.getElementById('discovery-match-results');
+        if (results) {
+            results.innerHTML = '';
+            const hint = document.createElement('p');
+            hint.className = 'text-[11px] text-slate-500 px-2 py-1.5';
+            hint.textContent = 'Searching Calibre…';
+            results.appendChild(hint);
+        }
+        modal.classList.remove('hidden');
+        if (input) { input.focus(); input.select(); }
+        searchDiscoveryCalibreSeries(seriesName || '', seriesName || '');
+    }
+
+    function closeDiscoveryMatchModal() {
+        const modal = document.getElementById('discovery-match-modal');
+        if (modal) modal.classList.add('hidden');
+        if (_discoveryMatchState.timer) {
+            clearTimeout(_discoveryMatchState.timer);
+            _discoveryMatchState.timer = null;
+        }
+        const trigger = _discoveryMatchState.trigger;
+        _discoveryMatchState.trigger = null;
+        if (trigger && typeof trigger.focus === 'function') trigger.focus();
+    }
+
+    function onDiscoveryMatchSearchInput() {
+        const input = document.getElementById('discovery-match-search');
+        if (!input) return;
+        if (_discoveryMatchState.timer) clearTimeout(_discoveryMatchState.timer);
+        _discoveryMatchState.timer = setTimeout(() => {
+            searchDiscoveryCalibreSeries(input.value.trim(), _discoveryMatchState.seriesName);
+        }, 250);
+    }
+
+    async function searchDiscoveryCalibreSeries(query, source) {
+        const params = new URLSearchParams();
+        if (query) params.set('search', query);
+        if (source) params.set('source', source);
+        params.set('limit', '25');
+        try {
+            const res = await fetch(`/api/calibre/series?${params.toString()}`);
+            const data = await res.json();
+            renderDiscoveryMatchResults((data && data.series) || []);
+        } catch (err) {
+            renderDiscoveryMatchResults([]);
+        }
+    }
+
+    function renderDiscoveryMatchResults(list) {
+        const box = document.getElementById('discovery-match-results');
+        if (!box) return;
+        const items = Array.isArray(list) ? list : [];
+        box.innerHTML = '';
+        if (!items.length) {
+            const empty = document.createElement('p');
+            empty.className = 'text-[11px] text-slate-500 px-2 py-1.5';
+            empty.textContent = 'No Calibre series matched that search.';
+            box.appendChild(empty);
+            return;
+        }
+        items.forEach((item) => {
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'w-full text-left px-3 py-2 rounded-xl bg-slate-950/60 hover:bg-brand-500/10 border border-slate-800 hover:border-brand-500/30 transition-colors';
+            btn.dataset.calibreSeriesId = String(item.id);
+            const title = document.createElement('p');
+            title.className = 'text-xs font-semibold text-white';
+            title.textContent = item.name || ('Calibre series #' + item.id);
+            btn.appendChild(title);
+            if (item.display_title && item.display_title !== item.name) {
+                const alt = document.createElement('p');
+                alt.className = 'text-[10px] text-slate-400 mt-0.5';
+                alt.textContent = 'AniList: ' + item.display_title;
+                btn.appendChild(alt);
+            }
+            const meta = document.createElement('p');
+            meta.className = 'text-[10px] text-slate-500 mt-0.5 font-mono';
+            meta.textContent = '#' + item.id + ' · ' + (item.book_count || 0) + ' books'
+                + (item.tracked ? ' · already tracked' : '');
+            btn.appendChild(meta);
+            btn.onclick = () => applyDiscoveryMatch(item.id, item.name || '');
+            box.appendChild(btn);
+        });
+    }
+
+    async function applyDiscoveryMatch(calibreSeriesId, calibreName) {
+        if (!_discoveryMatchState.seriesName) return;
+        const body = {
+            series_name: _discoveryMatchState.seriesName,
+            calibre_series_id: calibreSeriesId
+        };
+        if (_discoveryMatchState.releaseId) body.release_id = _discoveryMatchState.releaseId;
+        try {
+            const res = await fetch('/api/discovery/match', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body)
+            });
+            const data = await res.json();
+            if (res.ok && data.status === 'success') {
+                showToast(data.message || `Linked to Calibre series "${calibreName}"`, 'success');
+                closeDiscoveryMatchModal();
+                setTimeout(() => location.reload(), 700);
+            } else {
+                showToast(data.message || data.detail || 'Could not match series', 'error');
+            }
+        } catch (err) {
+            showToast(`Error: ${err}`, 'error');
+        }
+    }
+
+    document.addEventListener('keydown', (evt) => {
+        if (evt.key === 'Escape') closeDiscoveryMatchModal();
     });
 </script>
 {% endblock %}

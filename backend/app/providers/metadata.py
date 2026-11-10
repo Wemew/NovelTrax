@@ -131,7 +131,13 @@ class NovelMetadataProvider:
 
     @classmethod
     def query_kitsu(cls, cleaned_title: str) -> Optional[Dict[str, Any]]:
-        """Queries Kitsu JSON:API for light novels and translated web novels."""
+        """Queries Kitsu JSON:API for light novels and translated web novels.
+
+        Returns the title identity keys (``canonical_title``, ``title``,
+        ``english_title``, ``romaji_title``, ``native_title``,
+        ``alternate_titles``) plus synopsis/cover when available.  The synopsis is
+        not required: series-identity consumers use :meth:`fetch_series_metadata`.
+        """
         url = f"https://kitsu.io/api/edge/manga?filter[text]={urllib.parse.quote(cleaned_title)}"
         data = None
 
@@ -171,28 +177,54 @@ class NovelMetadataProvider:
         novel_item = next((it for it in items if it.get("attributes", {}).get("subtype") == "novel"), items[0])
         attr = novel_item.get("attributes", {})
         synopsis = attr.get("synopsis")
-        poster = attr.get("posterImage", {})
+        poster = attr.get("posterImage", {}) or {}
         cover = poster.get("large") or poster.get("original") or poster.get("medium")
         titles_obj = attr.get("titles", {})
+        if not isinstance(titles_obj, dict):
+            titles_obj = {}
         en_title = titles_obj.get("en") or titles_obj.get("en_us")
-        canonical_title = attr.get("canonicalTitle")
+        canonical_raw = attr.get("canonicalTitle") or ""
+        romaji_raw = titles_obj.get("ja_jp") or ""
+        native_raw = titles_obj.get("ja") or titles_obj.get("ja_jp") or ""
 
-        preferred_title = cls.clean_novel_title(en_title or canonical_title)
-        clean_en = cls.clean_novel_title(en_title) if en_title else None
+        preferred_title = cls.clean_novel_title(en_title or canonical_raw)
+        clean_en = cls.clean_novel_title(en_title) if en_title else ""
+        clean_canonical = cls.clean_novel_title(canonical_raw) if canonical_raw else ""
 
-        if synopsis and len(synopsis.strip()) > 20:
-            return {
-                "title": preferred_title,
-                "english_title": clean_en,
-                "synopsis": synopsis.strip(),
-                "cover_url": cover,
-                "source": "Kitsu"
-            }
-        return None
+        alternate_titles = []
+        candidates = list(titles_obj.values()) + list(attr.get("abbreviatedTitles") or [])
+        for value in candidates:
+            if not isinstance(value, str):
+                continue
+            cleaned_value = cls.clean_novel_title(value)
+            if cleaned_value and cleaned_value not in alternate_titles:
+                alternate_titles.append(cleaned_value)
+
+        result = {
+            "title": preferred_title,
+            "english_title": clean_en or None,
+            "canonical_title": clean_canonical or preferred_title,
+            "romaji_title": cls.clean_novel_title(romaji_raw) if romaji_raw else None,
+            "native_title": cls.clean_novel_title(native_raw) if native_raw else None,
+            "alternate_titles": alternate_titles,
+            "synonyms": list(alternate_titles),
+            "anilist_id": None,
+            "synopsis": synopsis.strip() if synopsis else "",
+            "cover_url": cover,
+            "source": "Kitsu",
+        }
+        return result if (result.get("title") or alternate_titles) else None
 
     @classmethod
     def query_anilist(cls, cleaned_title: str) -> Optional[Dict[str, Any]]:
-        """Queries AniList GraphQL API for official light novel metadata."""
+        """Queries AniList GraphQL API for official light novel metadata.
+
+        Returns the title identity keys used by the series-identity resolver
+        (``canonical_title``, ``title``, ``english_title``, ``romaji_title``,
+        ``native_title``, ``synonyms``, ``anilist_id``, ``source``) plus the
+        existing synopsis/cover fields.  A missing description no longer hides the
+        titles (only the synopsis consumers care about that).
+        """
         query = """
         query ($search: String) {
           Media (search: $search, type: MANGA, format_in: [NOVEL]) {
@@ -200,7 +232,9 @@ class NovelMetadataProvider:
             title {
               romaji
               english
+              native
             }
+            synonyms
             description(asHtml: false)
             coverImage {
               large
@@ -251,24 +285,111 @@ class NovelMetadataProvider:
             # Strip any remaining HTML tags from AniList description
             desc = re.sub(r'<[^>]+>', '', desc).strip()
 
-        cover_img = media.get("coverImage", {})
+        cover_img = media.get("coverImage", {}) or {}
         cover = cover_img.get("large") or cover_img.get("extraLarge")
-        title_obj = media.get("title", {})
+        title_obj = media.get("title", {}) or {}
         en_title = title_obj.get("english")
         romaji_title = title_obj.get("romaji")
+        native_title = title_obj.get("native")
 
-        preferred_title = cls.clean_novel_title(en_title or romaji_title)
-        clean_en = cls.clean_novel_title(en_title) if en_title else None
+        preferred_title = cls.clean_novel_title(en_title or romaji_title or "")
+        clean_en = cls.clean_novel_title(en_title) if en_title else ""
+        clean_romaji = cls.clean_novel_title(romaji_title) if romaji_title else ""
+        clean_native = cls.clean_novel_title(native_title) if native_title else ""
+        clean_canonical = cls.clean_novel_title(en_title or romaji_title or "")
 
-        if desc and len(desc) > 20:
-            return {
-                "title": preferred_title,
-                "english_title": clean_en,
-                "synopsis": desc,
-                "cover_url": cover,
-                "source": "AniList"
-            }
-        return None
+        synonyms = []
+        for value in media.get("synonyms") or []:
+            if not isinstance(value, str):
+                continue
+            cleaned_value = cls.clean_novel_title(value)
+            if cleaned_value and cleaned_value not in synonyms:
+                synonyms.append(cleaned_value)
+
+        result = {
+            "title": preferred_title,
+            "english_title": clean_en or None,
+            "canonical_title": clean_canonical,
+            "romaji_title": clean_romaji or None,
+            "native_title": clean_native or None,
+            "synonyms": synonyms,
+            "anilist_id": media.get("id"),
+            "synopsis": desc or "",
+            "cover_url": cover,
+            "source": "AniList",
+        }
+        if not (result.get("title") or synonyms):
+            return None
+        return result
+
+    @classmethod
+    def fetch_series_metadata(cls, raw_title: str) -> Optional[Dict[str, Any]]:
+        """Title-only metadata lookup for series identity (AniList first, Kitsu fallback).
+
+        Unlike :meth:`fetch_novel_metadata` a synopsis is **not** required: this
+        returns the title identity keys (canonical/english/romaji/native/synonyms,
+        AniList id and source) even when the provider has no description.  The
+        existing ``novel_metadata_cache`` is consulted first via the same cleaned
+        title keys.  Never raises.
+        """
+        cleaned = cls.clean_search_title(raw_title)
+        if not cleaned:
+            return None
+        active_db = cls._default_db
+        if active_db is not None:
+            try:
+                for k in (cleaned.lower(), str(raw_title or "").strip().lower()):
+                    cached = active_db.get_cached_novel_metadata(k)
+                    if cached and (cached.get("title") or "").strip():
+                        cached_title = (cached.get("title") or "").strip()
+                        return {
+                            "title": cached_title,
+                            "english_title": cached_title,
+                            "canonical_title": cached_title,
+                            "romaji_title": None,
+                            "native_title": None,
+                            "synonyms": [],
+                            "anilist_id": None,
+                            "synopsis": cached.get("synopsis", "") or "",
+                            "cover_url": cached.get("cover_url", "") or "",
+                            "source": cached.get("source", "cache"),
+                            "cached": True,
+                        }
+            except Exception as e:
+                logger.debug(f"Series metadata cache lookup failed for '{cleaned}': {e}")
+
+        result = None
+        try:
+            anilist_res = cls.query_anilist(cleaned)
+        except Exception as e:
+            logger.debug(f"AniList series-metadata query failed for '{cleaned}': {e}")
+            anilist_res = None
+        if anilist_res and (anilist_res.get("title") or anilist_res.get("synonyms")):
+            result = anilist_res
+        else:
+            try:
+                kitsu_res = cls.query_kitsu(cleaned)
+            except Exception as e:
+                logger.debug(f"Kitsu series-metadata query failed for '{cleaned}': {e}")
+                kitsu_res = None
+            if kitsu_res and (kitsu_res.get("title") or kitsu_res.get("alternate_titles")):
+                result = kitsu_res
+
+        if result and active_db is not None:
+            try:
+                cache_payload = {
+                    "title": result.get("title"),
+                    "synopsis": result.get("synopsis") or "",
+                    "cover_url": result.get("cover_url") or "",
+                    "source": result.get("source") or "unknown",
+                }
+                active_db.cache_novel_metadata(cleaned.lower(), cache_payload)
+                english_key = (result.get("english_title") or "").strip().lower()
+                if english_key and english_key != cleaned.lower():
+                    active_db.cache_novel_metadata(english_key, cache_payload)
+            except Exception as e:
+                logger.debug(f"Failed to cache series metadata for '{cleaned}': {e}")
+        return result
 
     @classmethod
     def fetch_novel_metadata(cls, raw_title: str, db: Optional[Any] = None) -> Optional[Dict[str, Any]]:
@@ -291,12 +412,21 @@ class NovelMetadataProvider:
                     cached = active_db.get_cached_novel_metadata(k)
                     if cached and (cached.get("synopsis") or cached.get("cover_url")):
                         logger.info(f"Retrieved novel metadata for '{cleaned}' from SQLite cache.")
+                        cached_title = cached.get("title") or cleaned
                         return {
-                            "title": cached.get("title") or cleaned,
-                            "english_title": cached.get("title") or cleaned,
+                            "title": cached_title,
+                            "english_title": cached_title,
+                            # Title identity keys travel through the cache too
+                            # (the cache itself only stores title/synopsis/cover/source).
+                            "canonical_title": cached_title,
+                            "romaji_title": None,
+                            "native_title": None,
+                            "synonyms": [],
+                            "anilist_id": None,
                             "synopsis": cached.get("synopsis", ""),
                             "cover_url": cached.get("cover_url", ""),
-                            "source": cached.get("source", "cache")
+                            "source": cached.get("source", "cache"),
+                            "cached": True,
                         }
             except Exception as e:
                 logger.debug(f"Metadata cache lookup failed for '{cleaned}': {e}")

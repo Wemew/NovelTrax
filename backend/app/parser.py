@@ -1180,52 +1180,45 @@ def is_chapter_release(raw_title: str) -> bool:
     return False
 
 
-def match_series_in_calibre(extracted_series: str, calibre_series_list: list, threshold: float = 0.80) -> Optional[dict]:
+def match_series_in_calibre(
+    extracted_series: str,
+    calibre_series_list: list,
+    threshold: float = 0.80,
+    alt_names: Optional[list] = None,
+    index: Optional[object] = None,
+) -> Optional[dict]:
     """
     Matches an extracted series name against Calibre's series list.
-    calibre_series_list can have 'name' or 'series_name'.
-    Supports dual titles separated by | or / (e.g. Romaji | English Title).
-    Returns the best matching dict or None.
+
+    The matching rules live in exactly one place: :class:`app.series_identity.
+    CalibreSeriesIndex` (exact normalized candidates, conservative substring
+    containment, fuzzy scoring with a head-token guard, and ambiguity rejection).
+    This function is the backwards-compatible entry point used by the release
+    matcher and the scheduler, so it must never reimplement those rules.
+
+    ``calibre_series_list`` entries may have ``series_name`` or ``name``.
+    ``alt_names`` are AniList titles/synonyms (or alias candidates) that are
+    tried in addition to the primary name; per the identity contract they are
+    ranked after an exact hit on the primary name. ``index`` lets a caller pass
+    a prebuilt ``CalibreSeriesIndex`` (the release matcher builds one per
+    library, not per release). Two-argument callers keep the legacy signature.
+
+    Returns the matching Calibre series dict or None.
     """
     if not extracted_series or not calibre_series_list:
         return None
-    
-    candidates = [extracted_series]
-    if "|" in extracted_series or "/" in extracted_series:
-        for sub in re.split(r'\s*[|/]\s*', extracted_series):
-            if len(sub.strip()) >= 3 and sub.strip() not in candidates:
-                candidates.append(sub.strip())
 
-    for cand in candidates:
-        norm_extracted = normalize_text(cand)
-        if not norm_extracted:
-            continue
-        
-        # 1. Exact match (normalized)
-        for c_ser in calibre_series_list:
-            s_name = c_ser.get("series_name") or c_ser.get("name", "")
-            if normalize_text(s_name) == norm_extracted:
-                return c_ser
-                
-        # 2. Substring containment match (e.g. "Mushoku Tensei" in "Mushoku Tensei: Jobless Reincarnation")
-        for c_ser in calibre_series_list:
-            s_name = c_ser.get("series_name") or c_ser.get("name", "")
-            norm_c = normalize_text(s_name)
-            if len(norm_c) >= 5 and len(norm_extracted) >= 5:
-                if norm_c in norm_extracted or norm_extracted in norm_c:
-                    return c_ser
+    from app.series_identity import CalibreSeriesIndex
 
-    # 3. Fuzzy similarity match
-    best_match = None
-    best_score = threshold
-    for c_ser in calibre_series_list:
-        s_name = c_ser.get("series_name") or c_ser.get("name", "")
-        score = string_similarity(extracted_series, s_name)
-        if score > best_score:
-            best_score = score
-            best_match = c_ser
-            
-    return best_match
+    if not isinstance(index, CalibreSeriesIndex):
+        index = CalibreSeriesIndex(calibre_series_list)
+
+    clean_alt = [name for name in (alt_names or []) if name and str(name).strip()]
+    return index.match(
+        extracted_series,
+        alt_names=clean_alt or None,
+        threshold=threshold,
+    )
 
 
 KNOWN_PUBLISHERS = {

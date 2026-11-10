@@ -2,9 +2,10 @@ import os
 import json
 import math
 import time
+import difflib
 import logging
 import asyncio
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, Query, HTTPException
@@ -211,6 +212,184 @@ def _result_error_code(result: Any) -> int:
         return int(result.get("code") or 0)
     except (TypeError, ValueError):
         return 0
+
+
+# --- Series identity / manual Calibre matching helpers (see .agents/series_identity/CONTRACT.md) ---
+
+def _series_match_clean(value: Any) -> str:
+    """Conservative series-spelling cleanup before normalized comparison."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        from app.series_identity import clean_series_for_matching
+        return clean_series_for_matching(text) or text
+    except Exception:
+        return text
+
+
+def _series_match_normalize(value: Any) -> str:
+    """Normalises a series title/author for the Calibre match picker."""
+    text = _series_match_clean(value)
+    if not text:
+        return ""
+    try:
+        from app.parser import normalize_text
+        return normalize_text(text)
+    except Exception:
+        return " ".join(text.lower().split())
+
+
+def _series_row_calibre_id(row: Dict[str, Any]) -> Optional[int]:
+    """Extracts the Calibre series id from a scanner or series_tracking row."""
+    for key in ("series_id", "calibre_series_id", "id"):
+        if row.get(key) is not None:
+            parsed = _coerce_int(row.get(key))
+            if parsed is not None:
+                return parsed
+    return None
+
+
+def _calibre_series_picker_rows() -> List[Dict[str, Any]]:
+    """Calibre series snapshot for the match pickers.
+
+    Prefers the TaskManager snapshot (scanner with stale/torn fallback), then a direct
+    Calibre scan, then tracked ``series_tracking`` rows that already carry a Calibre id.
+    Never raises: an unavailable scanner yields an empty candidate list upstream.
+    """
+    try:
+        snapshot_fn = getattr(task_manager, "_calibre_series_snapshot", None)
+        if callable(snapshot_fn):
+            rows = snapshot_fn() or []
+            if isinstance(rows, list) and rows:
+                return [dict(row) for row in rows if isinstance(row, dict)]
+    except Exception as exc:
+        logger.warning(f"Calibre series snapshot unavailable: {exc}")
+
+    try:
+        scanner = CalibreScanner(db.get_setting("calibre_path", CALIBRE_DIR))
+        if scanner.is_available():
+            rows = scanner.get_all_series() or []
+            if rows:
+                return [dict(row) for row in rows if isinstance(row, dict)]
+    except Exception as exc:
+        logger.warning(f"Calibre series scan unavailable: {exc}")
+
+    try:
+        return [dict(row) for row in db.get_all_series() or [] if row.get("calibre_series_id")]
+    except Exception:
+        return []
+
+
+def _series_picker_entry(
+    row: Dict[str, Any],
+    tracked_by_name: Dict[str, Dict[str, Any]],
+    tracked_by_calibre_id: Dict[int, Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Normalises a scanner/tracker row into the picker payload shape."""
+    if not isinstance(row, dict):
+        return None
+    calibre_id = _series_row_calibre_id(row)
+    name = str(row.get("series_name") or row.get("name") or "").strip()
+    if calibre_id is None or not name:
+        return None
+    tracked_row = tracked_by_calibre_id.get(calibre_id) or tracked_by_name.get(_series_match_normalize(name))
+    display_title = str(row.get("display_title") or "").strip()
+    if not display_title and tracked_row:
+        display_title = str(tracked_row.get("display_title") or "").strip()
+    return {
+        "id": calibre_id,
+        "name": name,
+        "display_title": display_title,
+        "authors": str(row.get("authors") or row.get("author") or "").strip(),
+        "book_count": _coerce_int(row.get("book_count")) or 0,
+        "tracked": bool(tracked_row),
+        "score": 0.0,
+    }
+
+
+def _rank_series_picker_entries(entries: List[Dict[str, Any]], source: str) -> List[Dict[str, Any]]:
+    """Ranks picker entries: exact match first, then substring, then SequenceMatcher score."""
+    source_norm = _series_match_normalize(source)
+    if not source_norm:
+        for entry in entries:
+            entry["score"] = 0.0
+        entries.sort(key=lambda item: (item.get("name") or "").lower())
+        return entries
+
+    def _score(entry: Dict[str, Any]) -> tuple:
+        candidates = [
+            norm for norm in (
+                _series_match_normalize(entry.get("name")),
+                _series_match_normalize(entry.get("display_title")),
+            ) if norm
+        ]
+        best = 0.0
+        is_exact = False
+        is_substring = False
+        for candidate in candidates:
+            if candidate == source_norm:
+                is_exact = True
+                best = 1.0
+            elif source_norm in candidate or candidate in source_norm:
+                is_substring = True
+                best = max(best, 0.95)
+            best = max(best, difflib.SequenceMatcher(None, source_norm, candidate).ratio())
+        entry["score"] = round(float(best), 4)
+        return (not is_exact, not is_substring, -best, (entry.get("name") or "").lower())
+
+    entries.sort(key=_score)
+    return entries
+
+
+def _find_series_row(series_id: int) -> Optional[Dict[str, Any]]:
+    """Looks up a series_tracking row by primary key."""
+    target = _coerce_int(series_id)
+    if target is None:
+        return None
+    try:
+        for row in db.get_all_series() or []:
+            if _coerce_int(row.get("id")) == target:
+                return dict(row)
+    except Exception as exc:
+        logger.warning(f"Could not read series #{series_id}: {exc}")
+    return None
+
+
+def _calibre_series_by_id(calibre_series_id: int) -> Optional[Dict[str, Any]]:
+    """Builds a Calibre series dict for a manual match from the snapshot or tracker row."""
+    for row in _calibre_series_picker_rows():
+        if _series_row_calibre_id(row) != calibre_series_id:
+            continue
+        name = str(row.get("series_name") or row.get("name") or "").strip()
+        return {
+            "id": calibre_series_id,
+            "series_id": calibre_series_id,
+            "name": name,
+            "series_name": name,
+            "display_title": str(row.get("display_title") or "").strip(),
+            "authors": str(row.get("authors") or row.get("author") or "").strip(),
+            "book_count": _coerce_int(row.get("book_count")) or 0,
+            "latest_index": _coerce_float(row.get("latest_index")) or 0.0,
+        }
+
+    lookup = getattr(db, "get_series_by_calibre_id", None)
+    if callable(lookup):
+        try:
+            tracker = lookup(calibre_series_id)
+        except Exception:
+            tracker = None
+        if tracker:
+            return dict(tracker)
+    return None
+
+
+def _series_match_payload(result: Any) -> Dict[str, Any]:
+    """Normalises a TaskManager manual-match summary for the JSON response."""
+    payload = dict(result) if isinstance(result, dict) else {}
+    payload.setdefault("status", "success")
+    payload.setdefault("reconciled", {})
+    return payload
 
 
 from app.providers.metadata import NovelMetadataProvider
@@ -1015,6 +1194,158 @@ async def api_discovery_blacklist(payload: Dict[str, Any]):
 
     db.add_to_blacklist(series_name, reason)
     db.log_activity("SERIES_BLACKLISTED", f"Blacklisted series from discovery: {series_name}")
+    return JSONResponse({"status": "success"})
+
+# --- Series identity: manual Calibre matching, AniList refresh and aliases ---
+
+@app.get("/api/calibre/series")
+async def api_calibre_series_picker(
+    search: Optional[str] = Query(None),
+    source: Optional[str] = Query(None),
+    limit: int = Query(25, ge=1, le=200)
+):
+    """Searchable, similarity-ranked Calibre series picker used by the manual match modal."""
+    try:
+        raw_rows = await asyncio.to_thread(_calibre_series_picker_rows)
+        tracked_rows = await asyncio.to_thread(db.get_all_series)
+    except Exception as exc:
+        logger.warning(f"Calibre series picker could not load series: {exc}")
+        return JSONResponse({"status": "success", "series": [], "count": 0})
+
+    try:
+        tracked_by_name: Dict[str, Dict[str, Any]] = {}
+        tracked_by_calibre_id: Dict[int, Dict[str, Any]] = {}
+        for row in tracked_rows or []:
+            if not isinstance(row, dict):
+                continue
+            norm = _series_match_normalize(row.get("name"))
+            if norm:
+                tracked_by_name.setdefault(norm, row)
+            calibre_id = _coerce_int(row.get("calibre_series_id"))
+            if calibre_id is not None:
+                tracked_by_calibre_id.setdefault(calibre_id, row)
+
+        entries: List[Dict[str, Any]] = []
+        seen_ids = set()
+        for row in raw_rows or []:
+            entry = _series_picker_entry(row, tracked_by_name, tracked_by_calibre_id)
+            if entry is None or entry["id"] in seen_ids:
+                continue
+            seen_ids.add(entry["id"])
+            entries.append(entry)
+
+        search_norm = _series_match_normalize(search)
+        if search_norm:
+            entries = [
+                entry for entry in entries
+                if search_norm in _series_match_normalize(entry.get("name"))
+                or search_norm in _series_match_normalize(entry.get("display_title"))
+                or search_norm in _series_match_normalize(entry.get("authors"))
+            ]
+
+        entries = _rank_series_picker_entries(entries, source or "")
+        payload = entries[:limit]
+        return JSONResponse({"status": "success", "series": payload, "count": len(payload)})
+    except Exception as exc:
+        logger.warning(f"Calibre series picker failed: {exc}")
+        return JSONResponse({"status": "success", "series": [], "count": 0})
+
+@app.post("/api/series/{series_id}/match-calibre")
+async def api_match_series_to_calibre(series_id: int, payload: Optional[Dict[str, Any]] = None):
+    """Manually links a tracked series to a Calibre series picked from the modal."""
+    series_row = await asyncio.to_thread(_find_series_row, series_id)
+    if not series_row:
+        raise HTTPException(status_code=404, detail="Series not found")
+
+    p = payload or {}
+    calibre_series_id = _coerce_int(p.get("calibre_series_id"))
+    if calibre_series_id is None:
+        raise HTTPException(status_code=400, detail="calibre_series_id is required")
+
+    calibre_row = await asyncio.to_thread(_calibre_series_by_id, calibre_series_id)
+    if not calibre_row:
+        raise HTTPException(status_code=400, detail=f"Unknown Calibre series id: {calibre_series_id}")
+
+    source_name = str(series_row.get("name") or "").strip()
+    try:
+        result = await asyncio.to_thread(
+            task_manager.match_series_to_calibre, source_name, calibre_row, actor="user"
+        )
+    except Exception as exc:
+        logger.warning(f"Manual Calibre match failed for '{source_name}': {type(exc).__name__}: {exc}")
+        raise HTTPException(status_code=500, detail=f"Could not match series: {exc}") from exc
+    return JSONResponse(_series_match_payload(result))
+
+@app.post("/api/discovery/match")
+async def api_discovery_match(payload: Optional[Dict[str, Any]] = None):
+    """Links a discovered (untracked) series to a Calibre series and saves the alias."""
+    p = payload or {}
+    source_name = str(p.get("series_name") or "").strip()
+    if not source_name:
+        raise HTTPException(status_code=400, detail="series_name is required")
+    calibre_series_id = _coerce_int(p.get("calibre_series_id"))
+    if calibre_series_id is None:
+        raise HTTPException(status_code=400, detail="calibre_series_id is required")
+
+    calibre_row = await asyncio.to_thread(_calibre_series_by_id, calibre_series_id)
+    if not calibre_row:
+        raise HTTPException(status_code=400, detail=f"Unknown Calibre series id: {calibre_series_id}")
+
+    match_kwargs: Dict[str, Any] = {"actor": "user"}
+    release_id = _coerce_int(p.get("release_id"))
+    if release_id is not None:
+        match_kwargs["release_id"] = release_id
+    try:
+        result = await asyncio.to_thread(
+            task_manager.match_series_to_calibre, source_name, calibre_row, **match_kwargs
+        )
+    except Exception as exc:
+        logger.warning(f"Discovery Calibre match failed for '{source_name}': {type(exc).__name__}: {exc}")
+        raise HTTPException(status_code=500, detail=f"Could not match series: {exc}") from exc
+    return JSONResponse(_series_match_payload(result))
+
+@app.post("/api/series/{series_id}/refresh-metadata")
+async def api_refresh_series_metadata(series_id: int):
+    """Fetches fresh AniList metadata (display title, synonyms) and reconciles the series."""
+    series_row = await asyncio.to_thread(_find_series_row, series_id)
+    if not series_row:
+        raise HTTPException(status_code=404, detail="Series not found")
+
+    try:
+        result = await asyncio.to_thread(task_manager.refresh_series_metadata, series_id)
+    except Exception as exc:
+        logger.warning(f"AniList refresh failed for series #{series_id}: {type(exc).__name__}: {exc}")
+        raise HTTPException(status_code=500, detail=f"Could not refresh series metadata: {exc}") from exc
+
+    payload = dict(result) if isinstance(result, dict) else {}
+    payload.setdefault("status", "success")
+    payload.setdefault("display_title", str(series_row.get("display_title") or ""))
+    payload.setdefault("anilist_id", series_row.get("anilist_id"))
+    payload.setdefault("linked", bool(series_row.get("calibre_series_id")))
+    payload.setdefault("reconciled", {})
+    payload.setdefault("message", "")
+    return JSONResponse(payload)
+
+@app.get("/api/series/aliases")
+async def api_get_series_aliases():
+    """Lists persistent series alias overrides (manual picks + AniList-derived titles)."""
+    try:
+        aliases = await asyncio.to_thread(db.get_series_alias_overrides)
+    except Exception as exc:
+        logger.warning(f"Could not read series alias overrides: {exc}")
+        aliases = []
+    return JSONResponse({"status": "success", "aliases": aliases or []})
+
+@app.delete("/api/series/aliases/{override_id}")
+async def api_delete_series_alias(override_id: int):
+    """Deletes a persistent series alias override."""
+    try:
+        deleted = await asyncio.to_thread(db.delete_series_alias_override, override_id)
+    except Exception as exc:
+        logger.warning(f"Could not delete series alias override #{override_id}: {exc}")
+        raise HTTPException(status_code=500, detail="Could not delete the alias override") from exc
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Alias override not found")
     return JSONResponse({"status": "success"})
 
 @app.post("/api/settings")

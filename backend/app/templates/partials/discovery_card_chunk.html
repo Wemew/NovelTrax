@@ -74,6 +74,10 @@
                 <i data-lucide="ban" class="w-3.5 h-3.5 text-rose-400"></i>
                 Blacklist
             </button>
+            <button type="button" id="match-btn-{{ item.id }}" data-series-name="{{ item.series_name }}" data-release-id="{{ item.id }}" onclick="openDiscoveryMatchModal(this.dataset.seriesName, this.dataset.releaseId)" class="discovery-match-btn col-span-2 w-full px-3 py-2 rounded-xl bg-slate-800 hover:bg-brand-500/20 text-slate-300 hover:text-brand-300 border border-slate-700 hover:border-brand-500/30 font-bold text-xs flex items-center justify-center gap-1.5 transition-all active:scale-95" title="Manually match this discovered series to a Calibre series">
+                <i data-lucide="link" class="w-3.5 h-3.5 text-brand-400"></i>
+                Match Calibre
+            </button>
         </div>
     </div>
 </div>
