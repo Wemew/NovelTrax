@@ -457,6 +457,17 @@ def test_main_py_and_schema_static_guards():
     ):
         check_in(literal, db_source, "database.py implements %r" % literal)
     check_in("clear-metadata", main_source, "debug/action supports clear-metadata")
+    # fastapi does NOT export BackgroundTask (it lives in starlette.background); a
+    # wrong import here crashes the whole application at startup.
+    fastapi_imports = [
+        line for line in main_source.splitlines() if line.strip().startswith("from fastapi import")
+    ]
+    check(len(fastapi_imports) >= 1, "main.py imports fastapi")
+    for line in fastapi_imports:
+        check("BackgroundTask" not in line,
+              "fastapi import line must not request BackgroundTask: %r" % line)
+    check_in("from starlette.background import BackgroundTask", main_source,
+             "BackgroundTask is imported from starchlette.background")
     check("NOVELTRAX_DEBUG_ACTIONS" not in main_source,
           "no accidental debug gate was introduced by this change")
     check_not_in("task_manager.scanner.metadata_db_exists()", main_source,

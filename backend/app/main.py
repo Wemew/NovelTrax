@@ -11,10 +11,11 @@ import zoneinfo
 from typing import Dict, Any, List, Optional
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request, Query, HTTPException, BackgroundTask
+from fastapi import FastAPI, Request, Query, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
+from starlette.background import BackgroundTask
 
 from app.database import Database
 from app import diagnostics
