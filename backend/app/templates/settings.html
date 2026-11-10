@@ -1162,7 +1162,14 @@
                         openReleaseRebindModal({
                             releaseId: item.release_id,
                             releaseTitle: item.title,
-                            seriesName: item.series_name
+                            seriesName: item.series_name,
+                            // In-place refresh: after a successful re-bind, drop the fixed row
+                            // and re-run the audit so the list reflects the new state without a
+                            // page reload (which used to lose the audit results).
+                            onSuccess: function () {
+                                try { row.remove(); } catch (removeErr) {}
+                                runSeriesAttributionAudit();
+                            }
                         });
                     });
                     row.appendChild(bindBtn);

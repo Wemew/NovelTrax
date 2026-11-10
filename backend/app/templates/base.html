@@ -687,7 +687,11 @@
             seriesName: '',
             mode: 'bind',
             selectedTarget: null,
-            pinned: false
+            pinned: false,
+            // Optional caller callback invoked after a successful re-bind/unpin.
+            // Used by the Settings attribution audit so its list refreshes in place
+            // instead of the page reloading and losing the audit results.
+            onSuccess: null
         };
         let _releaseRebindSearchTimer = null;
         let _releaseRebindFocus = null;
@@ -707,12 +711,15 @@
         }
 
         // Accepts either a .release-rebind-btn element (data-* attributes) or a plain
-        // object {releaseId, releaseTitle, seriesName} (e.g. from the Settings attribution audit).
+        // object {releaseId, releaseTitle, seriesName, onSuccess?} (e.g. from the Settings
+        // attribution audit).  ``onSuccess`` is invoked instead of the default page reload,
+        // so an audit can refresh its own results in place.
         function openReleaseRebindModal(source) {
             if (!source) return;
             let releaseId = 0;
             let releaseTitle = '';
             let seriesName = '';
+            let onSuccess = null;
             if (source.dataset) {
                 releaseId = Number(source.dataset.releaseId) || 0;
                 releaseTitle = source.dataset.releaseTitle || '';
@@ -721,6 +728,11 @@
                 releaseId = Number(source.releaseId || source.release_id) || 0;
                 releaseTitle = source.releaseTitle || source.title || '';
                 seriesName = source.seriesName || source.series_name || '';
+                if (typeof source.onSuccess === 'function') {
+                    onSuccess = source.onSuccess;
+                } else if (typeof source.on_success === 'function') {
+                    onSuccess = source.on_success;
+                }
             }
             if (!releaseId) return;
             _releaseRebind.releaseId = releaseId;
@@ -728,6 +740,7 @@
             _releaseRebind.seriesName = seriesName;
             _releaseRebind.selectedTarget = null;
             _releaseRebind.pinned = false;
+            _releaseRebind.onSuccess = onSuccess;
             _releaseRebindFocus = document.activeElement;
             const modal = document.getElementById('release-rebind-modal');
             const current = document.getElementById('release-rebind-current');
@@ -771,6 +784,7 @@
             _releaseRebindSearchTimer = null;
             _releaseRebind.releaseId = 0;
             _releaseRebind.selectedTarget = null;
+            _releaseRebind.onSuccess = null;
             if (_releaseRebindFocus && typeof _releaseRebindFocus.focus === 'function') {
                 try {
                     _releaseRebindFocus.focus();
@@ -942,9 +956,19 @@
                     data = {};
                 }
                 if (res.ok && data.status === 'success') {
+                    // Capture the caller callback before close() clears the modal state.
+                    const successCallback = _releaseRebind.onSuccess;
                     showToast(data.message || 'Release series re-bound', 'success');
                     closeReleaseRebindModal();
-                    setTimeout(function () { location.reload(); }, 500);
+                    if (typeof successCallback === 'function') {
+                        try {
+                            successCallback(data);
+                        } catch (callbackErr) {
+                            setTimeout(function () { location.reload(); }, 500);
+                        }
+                    } else {
+                        setTimeout(function () { location.reload(); }, 500);
+                    }
                 } else {
                     _releaseRebindError(data.detail || data.message || 'Could not re-bind this release');
                 }
@@ -995,9 +1019,18 @@
                     data = {};
                 }
                 if (res.ok && data.status === 'success') {
+                    const successCallback = _releaseRebind.onSuccess;
                     showToast('Release unpinned; automatic series matching resumes', 'success');
                     closeReleaseRebindModal();
-                    setTimeout(function () { location.reload(); }, 500);
+                    if (typeof successCallback === 'function') {
+                        try {
+                            successCallback(data);
+                        } catch (callbackErr) {
+                            setTimeout(function () { location.reload(); }, 500);
+                        }
+                    } else {
+                        setTimeout(function () { location.reload(); }, 500);
+                    }
                 } else {
                     _releaseRebindError(data.detail || data.message || 'Could not unpin this release');
                 }
