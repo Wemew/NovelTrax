@@ -125,6 +125,12 @@
                             <a href="{{ r.link }}" target="_blank" rel="noopener noreferrer" class="font-bold text-white hover:text-brand-400 transition-colors">
                                 {{ r.title }}
                             </a>
+                            {% if r.series_pinned %}
+                            <span class="release-pinned-badge inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded bg-cyan-500/10 text-cyan-300 border border-cyan-500/30 font-semibold" title="Series manually re-bound">
+                                <i data-lucide="pin" class="w-2.5 h-2.5"></i>
+                                Pinned
+                            </span>
+                            {% endif %}
                             {% if r.is_prioritized %}
                             <span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-500/15 text-amber-300 border border-amber-500/30 inline-flex items-center gap-1" title="Prioritized release group">
                                 <i data-lucide="star" class="w-2.5 h-2.5 fill-amber-400 text-amber-400"></i>
@@ -218,6 +224,9 @@
                                 <i data-lucide="eye" class="w-3.5 h-3.5"></i>
                             </button>
                             {% endif %}
+                            <button type="button" class="release-rebind-btn p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 transition-colors" data-release-id="{{ r.id }}" data-release-title="{{ r.title }}" data-series-name="{{ r.series_name or '' }}" onclick="openReleaseRebindModal(this)" title="Re-bind series / mark different series">
+                                <i data-lucide="git-branch" class="w-3.5 h-3.5"></i>
+                            </button>
                         </div>
                     </div>
                 </div>

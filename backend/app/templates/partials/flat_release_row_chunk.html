@@ -42,6 +42,12 @@
         {% else %}
         <span class="font-medium text-slate-200">{{ r.series_name or '—' }}</span>
         {% endif %}
+        {% if r.series_pinned %}
+        <span class="release-pinned-badge inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded bg-cyan-500/10 text-cyan-300 border border-cyan-500/30 font-semibold ml-1" title="Series manually re-bound">
+            <i data-lucide="pin" class="w-2.5 h-2.5"></i>
+            Pinned
+        </span>
+        {% endif %}
         {% if r.is_bundle or (r.volumes and r.volumes|length > 1) %}
         <span class="block mt-0.5 space-y-0.5">
             <span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-purple-500/15 text-purple-300 border border-purple-500/30 inline-block">
@@ -145,6 +151,9 @@
                 <i data-lucide="eye" class="w-3.5 h-3.5"></i>
             </button>
             {% endif %}
+            <button type="button" class="release-rebind-btn p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 transition-colors" data-release-id="{{ r.id }}" data-release-title="{{ r.title }}" data-series-name="{{ r.series_name or '' }}" onclick="openReleaseRebindModal(this)" title="Re-bind series / mark different series">
+                <i data-lucide="git-branch" class="w-3.5 h-3.5"></i>
+            </button>
         </div>
     </td>
 </tr>

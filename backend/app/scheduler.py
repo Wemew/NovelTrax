@@ -43,6 +43,19 @@ logger = logging.getLogger("noveltrax.scheduler")
 FEED_CATCHUP_ENABLED_KEY = "feed_catchup_enabled"
 FEED_CATCHUP_MAX_PAGES_KEY = "feed_catchup_max_pages"
 
+#: Automatic activity-log pruning settings + schedule (contract v2 §6.1/§6.3).
+ACTIVITY_RETENTION_DAYS_KEY = "activity_retention_days"
+ACTIVITY_MAX_ROWS_KEY = "activity_max_rows"
+ACTIVITY_RETENTION_DAYS_DEFAULT = 90
+ACTIVITY_MAX_ROWS_DEFAULT = 50000
+ACTIVITY_PRUNE_INTERVAL_MINUTES = 360
+
+#: Webhook event toggles (contract v2 §6.5). Read once per scan/loop; the
+#: default is enabled so existing installs keep sending notifications.
+WEBHOOK_NEW_REQUEST_KEY = "webhook_new_request_notifications"
+WEBHOOK_ACQUIRED_KEY = "webhook_acquired_notifications"
+_DISABLED_SETTING_VALUES = frozenset({"false", "0", "no", "off"})
+
 #: Series identity / AniList title sync settings.  All are read with hard-coded
 #: defaults (never seeded into app_settings) so an existing install gets the
 #: feature without a migration; "false"/"0"/"no"/"off" disables a boolean.
@@ -864,9 +877,11 @@ class TaskManager:
         try:
             with self.db.get_connection() as conn:
                 cur = conn.cursor()
-                cur.execute("SELECT series_name FROM releases WHERE id = ?;", (release_id,))
+                cur.execute("SELECT series_name, series_pinned FROM releases WHERE id = ?;", (release_id,))
                 row = cur.fetchone()
                 if row is None:
+                    return False
+                if self._release_identity_pinned(dict(row)):
                     return False
                 stored = (row["series_name"] or "").strip()
                 if normalize_text(stored) == normalize_text(canonical):
@@ -883,17 +898,136 @@ class TaskManager:
             return False
 
     def _link_targets(self, links: List[dict]) -> List[str]:
-        """Extracts unique canonical target names from auto-link summaries."""
+        """Extracts unique canonical target names from *successful* link summaries.
+
+        The DB layer returns ``{"status": "skipped", "reason": "identity_locked"}``
+        (or ``"error"``) summaries for rows it deliberately did not link; those
+        must never be counted as a successful auto-link or reconciled.
+        """
         from app.parser import normalize_text
         targets: List[str] = []
         seen = set()
         for link in links or []:
+            if not isinstance(link, dict):
+                continue
+            status = str(link.get("status") or "success").strip().lower()
+            if status != "success":
+                continue
             target = str(link.get("target") or link.get("source") or "").strip()
             norm = normalize_text(target)
             if norm and norm not in seen:
                 seen.add(norm)
                 targets.append(target)
         return targets
+
+    @staticmethod
+    def _webhook_setting_enabled(db, key: str) -> bool:
+        """Reads a webhook event toggle (default True; false/0/no/off disable)."""
+        try:
+            raw = db.get_setting(key, "true")
+        except Exception:
+            return True
+        return str(raw or "").strip().lower() not in _DISABLED_SETTING_VALUES
+
+    @staticmethod
+    def _release_identity_pinned(release: Any) -> bool:
+        """True when a release row carries the manual re-bind pin (``series_pinned``).
+
+        Pinned releases keep their ``series_name`` verbatim through feed
+        re-ingestion/canonicalisation/reconciliation until explicitly reset
+        (contract v2 §2.1/§3). Handles rows read before the v2 migration.
+        """
+        if not isinstance(release, dict):
+            return False
+        value = release.get("series_pinned")
+        if value is None:
+            return False
+        try:
+            return int(value) == 1
+        except (TypeError, ValueError):
+            return bool(value)
+
+    @staticmethod
+    def _series_identity_locked(row: Any) -> bool:
+        """True when a tracked series is identity-locked (manual new title)."""
+        if not isinstance(row, dict):
+            return False
+        value = row.get("identity_locked")
+        if value is None:
+            return False
+        try:
+            return int(value) == 1
+        except (TypeError, ValueError):
+            return bool(value)
+
+    def _release_row_by_guid(self, guid: str) -> Optional[dict]:
+        """Reads the stored identity/pin state for a feed GUID (never raises).
+
+        Used by ``check_feeds`` to honour a per-release pin *before* the
+        re-ingestion upsert and identity canonicalisation run.
+        """
+        if not guid:
+            return None
+        try:
+            with self.db.get_connection() as conn:
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT id, series_name, series_pinned, status, volume "
+                    "FROM releases WHERE guid = ?;",
+                    (str(guid),),
+                )
+                row = cur.fetchone()
+                return dict(row) if row else None
+        except Exception as exc:
+            logger.debug(f"Pinned-release lookup failed for guid {guid!r}: {exc}")
+            return None
+
+    def _calibre_release_status(self, release: dict, canonical_name: str,
+                                calibre_series_id: Optional[int]):
+        """Recomputes ``(status, matched_book_id)`` for a release bound to Calibre.
+
+        Returns ``(None, None)`` when the Calibre snapshot is unavailable so the
+        caller can fall back to the volume-based NEW/REQUESTED rule.
+        """
+        series_list, books = self._calibre_library_snapshot()
+        if not series_list:
+            return None, None
+        try:
+            matcher = CalibreMatcher(
+                series_list,
+                books,
+                series_aliases=self._series_alias_map_for_matcher(),
+            )
+        except Exception:
+            matcher = CalibreMatcher(series_list, books)
+        alt_names: List[str] = []
+        try:
+            target_row = (
+                self.db.get_series_by_calibre_id(calibre_series_id)
+                if calibre_series_id is not None else None
+            )
+        except Exception:
+            target_row = None
+        if target_row is not None:
+            alt_names.extend(self._anilist_titles(self._parse_anilist_meta(target_row)))
+            display = (target_row.get("display_title") or "").strip()
+            if display:
+                alt_names.append(display)
+        payload = dict(release)
+        payload["series_name"] = canonical_name
+        try:
+            result = matcher.check_release(
+                payload,
+                auto_request_monitored=True,
+                alt_series_names=self._dedupe_titles(alt_names) or None,
+            )
+        except Exception as exc:
+            logger.debug(f"Re-bind status recompute failed: {exc}")
+            return None, None
+        status = (result.get("status") or "").strip().upper()
+        if status not in ("IN_CALIBRE", "REQUESTED", "NEW"):
+            return None, None
+        return status, result.get("matched_book_id")
 
     def enrich_tracked_series_anilist(self, limit: int = SERIES_ANILIST_SYNC_LIMIT_DEFAULT) -> dict:
         """Fetches AniList metadata for a bounded batch of un-enriched tracked rows.
@@ -922,6 +1056,9 @@ class TaskManager:
             if not (row.get("anilist_meta_json") or "").strip()
             and (row.get("name") or "").strip()
             and row.get("id") is not None
+            # A manually locked/new-title tracker must never be enriched: its
+            # identity is deliberately detached from the automatic graph.
+            and not self._series_identity_locked(row)
         ][:batch_limit]
         if not pending:
             return result
@@ -965,6 +1102,8 @@ class TaskManager:
             from app.parser import normalize_text
             synced_norms = {normalize_text(name) for name in synced_names}
             for link in links:
+                if str(link.get("status") or "success").strip().lower() != "success":
+                    continue
                 source = str(link.get("source") or "").strip()
                 if normalize_text(source) in synced_norms:
                     result["linked"] += 1
@@ -1075,6 +1214,10 @@ class TaskManager:
             releases = []
 
         for release in releases or []:
+            # Manually pinned releases are explicitly excluded from automatic
+            # reconciliation until the user resets/unpins them.
+            if self._release_identity_pinned(release):
+                continue
             stored = (release.get("series_name") or "").strip()
             if not stored:
                 continue
@@ -1206,6 +1349,8 @@ class TaskManager:
                 links = []
             from app.parser import normalize_text
             for link in links:
+                if str(link.get("status") or "success").strip().lower() != "success":
+                    continue
                 if normalize_text(link.get("source") or "") == normalize_text(name):
                     target_name = str(link.get("target") or name).strip()
                     linked = True
@@ -1329,6 +1474,224 @@ class TaskManager:
             pass
         return summary
 
+    def rebind_release(self, release_id: int, mode: str,
+                       target_name: Optional[str] = None,
+                       calibre_series_id: Optional[int] = None,
+                       remember: bool = False, actor: str = "user") -> dict:
+        """Explicit per-release re-bind / new-title / detach (contract v2 §3).
+
+        Delegates the pinned write to ``db.rebind_release_series`` and then
+        recomputes the release's ownership status: a Calibre-bound target goes
+        through ``CalibreMatcher.check_release``; a brand-new/detached title gets
+        NEW for volume None/1.0 and REQUESTED otherwise. This is an explicit user
+        action (``enforce_precedence=False``) but an existing IGNORED/BLACKLISTED
+        veto is never downgraded. Returns the DB summary plus
+        ``release_status``/``message`` for the toast.
+        """
+        try:
+            release_id_int = int(release_id)
+        except (TypeError, ValueError):
+            raise ValueError(f"invalid release id: {release_id!r}")
+        mode_clean = str(mode or "").strip().lower()
+        if not mode_clean:
+            raise ValueError("mode is required")
+
+        summary = dict(self.db.rebind_release_series(
+            release_id_int,
+            mode_clean,
+            target_name=target_name,
+            calibre_series_id=calibre_series_id,
+            remember=bool(remember),
+            actor=actor,
+        ) or {})
+        release = self.db.get_release_by_id(release_id_int)
+        if not release:
+            raise LookupError(f"release #{release_id_int} not found")
+
+        canonical_name = str(
+            summary.get("series_name") or release.get("series_name") or ""
+        ).strip()
+        previous_series = str(summary.get("previous_series") or "").strip()
+        target_calibre_id = summary.get("calibre_series_id")
+        if target_calibre_id in (None, "") and canonical_name:
+            target_row = None
+            try:
+                target_row = self.db.get_series_by_name(canonical_name)
+            except Exception as exc:
+                logger.debug(f"Re-bind target lookup failed for '{canonical_name}': {exc}")
+            if target_row is not None:
+                target_calibre_id = target_row.get("calibre_series_id")
+
+        stored_status = (release.get("status") or "").strip().upper()
+        new_status: Optional[str] = None
+        matched_book_id: Optional[int] = None
+        if target_calibre_id not in (None, "") and canonical_name:
+            try:
+                new_status, matched_book_id = self._calibre_release_status(
+                    release, canonical_name, int(target_calibre_id)
+                )
+            except (TypeError, ValueError):
+                new_status, matched_book_id = None, None
+        if new_status is None:
+            volume = release.get("volume")
+            try:
+                volume_value = float(volume) if volume is not None else None
+            except (TypeError, ValueError):
+                volume_value = None
+            new_status = "REQUESTED" if (volume_value is not None and volume_value > 1.0) else "NEW"
+
+        if stored_status in ("IGNORED", "BLACKLISTED"):
+            # Explicit user veto data: a re-bind must not lift it.
+            release_status = stored_status
+            matched_book_id = None
+        else:
+            release_status = new_status or "NEW"
+            try:
+                self.db.update_release_status(
+                    release_id_int,
+                    status=release_status,
+                    matched_book_id=matched_book_id,
+                    enforce_precedence=False,
+                )
+            except Exception as exc:
+                logger.debug(f"Re-bind status write failed for release #{release_id_int}: {exc}")
+
+        if mode_clean == "bind":
+            try:
+                self.db.log_activity(
+                    "SERIES_MANUALLY_MATCHED",
+                    f"Release re-bound to series: '{previous_series}' -> '{canonical_name}'",
+                    json.dumps({
+                        "actor": actor,
+                        "release_id": release_id_int,
+                        "mode": mode_clean,
+                        "previous_series": previous_series,
+                        "target": canonical_name,
+                        "calibre_series_id": target_calibre_id,
+                        "remember": bool(remember),
+                        "pinned": True,
+                    }),
+                )
+            except Exception:
+                pass
+
+        if mode_clean == "bind":
+            message = f"Release re-bound to '{canonical_name}'"
+        elif mode_clean == "detach":
+            message = f"Release detached as new series '{canonical_name}'"
+        else:
+            message = f"Release re-indexed under new series '{canonical_name}'"
+        if release_status:
+            message += f" ({release_status})"
+
+        summary.update({
+            "status": "success",
+            "release_id": release_id_int,
+            "mode": mode_clean,
+            "previous_series": previous_series,
+            "series_name": canonical_name,
+            "calibre_series_id": target_calibre_id,
+            "release_status": release_status,
+            "new_status": release_status,
+            "pinned": True,
+            "message": message,
+        })
+        return summary
+
+    def reset_series_identity(self, series_id: int) -> dict:
+        """Per-series identity reset + one bounded automatic recovery pass.
+
+        ``db.reset_series_identity`` forgets aliases/display/locks/pins for the
+        series (it does not delete the tracker or change release titles). This
+        wrapper then lets automatic matching take over again: one forced AniList
+        title lookup, an auto-link attempt against the current Calibre snapshot,
+        and a status reconcile. Everything after the DB reset is best-effort.
+        """
+        try:
+            series_id_int = int(series_id)
+        except (TypeError, ValueError):
+            raise ValueError(f"invalid series id: {series_id!r}")
+
+        try:
+            summary = dict(self.db.reset_series_identity(
+                series_id_int, actor="user", rekey_to_parsed=True
+            ) or {})
+        except TypeError:
+            # Older DB layer without the parsed-title re-key extension.
+            summary = dict(self.db.reset_series_identity(series_id_int, actor="user") or {})
+        series_name = str(summary.get("series_name") or "").strip()
+        linked = None
+        reconciled: Dict[str, Any] = {}
+
+        if series_name:
+            try:
+                row = self.db.get_series_by_name(series_name)
+            except Exception as exc:
+                logger.debug(f"Reset recovery row lookup failed for '{series_name}': {exc}")
+                row = None
+            if row is not None:
+                target_name = (row.get("name") or series_name).strip() or series_name
+                calibre_id = row.get("calibre_series_id")
+                if calibre_id in (None, ""):
+                    match_enabled = True
+                    try:
+                        match_enabled = self._setting_flag(
+                            self.db.get_setting(SERIES_ANILIST_MATCH_ENABLED_KEY, "true"),
+                            default=True,
+                        )
+                    except Exception:
+                        match_enabled = True
+                    if match_enabled:
+                        try:
+                            self.lookup_series_alternate_titles(target_name, force=True)
+                        except Exception as exc:
+                            logger.debug(f"Reset AniList recovery skipped for '{target_name}': {exc}")
+                    try:
+                        calibre_series_list = self._calibre_series_snapshot()
+                        links = self.db.auto_link_series_to_calibre(
+                            calibre_series_list, actor="user"
+                        ) or []
+                    except Exception as exc:
+                        logger.debug(f"Reset auto-link recovery skipped: {exc}")
+                        links = []
+                    from app.parser import normalize_text
+                    for link in links:
+                        if str(link.get("status") or "success").strip().lower() != "success":
+                            continue
+                        if normalize_text(link.get("source") or "") != normalize_text(target_name):
+                            continue
+                        linked = dict(link)
+                        linked_target = str(link.get("target") or target_name).strip()
+                        if linked_target:
+                            target_name = linked_target
+                        break
+                try:
+                    reconciled = self.reconcile_series_releases(target_name)
+                except Exception as exc:
+                    logger.debug(f"Reset reconcile skipped for '{target_name}': {exc}")
+                    reconciled = {}
+
+        aliases_removed = int(summary.get("aliases_removed") or 0)
+        releases_unpinned = int(summary.get("releases_unpinned") or 0)
+        locked_cleared = int(summary.get("locked_cleared") or 0)
+        releases_rekeyed = int(summary.get("releases_rekeyed") or 0)
+        if not isinstance(reconciled, dict):
+            reconciled = {}
+        # Surface the DB re-key count in the reconciled summary the route returns.
+        reconciled.setdefault("releases_rekeyed", releases_rekeyed)
+        summary.update({
+            "status": "success",
+            "series_id": series_id_int,
+            "reconciled": reconciled,
+            "linked": linked,
+            "message": (
+                f"Identity reset for '{series_name}': "
+                f"{aliases_removed} alias(es), {releases_unpinned} pin(s), "
+                f"{locked_cleared} lock(s) cleared"
+            ),
+        })
+        return summary
+
     def start(self):
         calibre_min = int(self.db.get_setting("calibre_sync_interval_minutes", "15"))
         feed_min = int(self.db.get_setting("feed_check_interval_minutes", "60"))
@@ -1348,8 +1711,80 @@ class TaskManager:
             id="feed_check",
             replace_existing=True
         )
+        # Automatic activity-log pruning (settings activity_retention_days /
+        # activity_max_rows). A database hiccup must never break startup, so both
+        # the immediate catch-up call and the recurring job are guarded.
+        try:
+            self.prune_activity_logs()
+        except Exception as exc:
+            logger.debug(f"Startup activity-log prune skipped: {exc}")
+        try:
+            self.scheduler.add_job(
+                self.prune_activity_logs,
+                "interval",
+                minutes=ACTIVITY_PRUNE_INTERVAL_MINUTES,
+                id="activity_prune",
+                replace_existing=True,
+            )
+        except Exception as exc:
+            logger.warning(f"Could not schedule activity_prune: {exc}")
         self.scheduler.start()
         logger.info("Scheduler started successfully.")
+
+    @staticmethod
+    def _activity_prune_int_setting(db, key: str, default: int) -> int:
+        """Reads an integer setting with a hard default (invalid -> default)."""
+        try:
+            value = int(db.get_setting(key, str(default)))
+        except (TypeError, ValueError):
+            value = default
+        return max(0, value)
+
+    def prune_activity_logs(self) -> Dict[str, Any]:
+        """Prunes old/excess ``activity_logs`` rows using the retention settings.
+
+        ``activity_retention_days`` (default 90; 0 disables the age rule) and
+        ``activity_max_rows`` (default 50000; 0 disables the row cap) are read
+        with int guards; the actual pruning is delegated to
+        ``db.prune_activity_logs(days, max_rows)``. An INFO line is logged only
+        when rows were removed. Never raises.
+        """
+        result: Dict[str, Any] = {
+            "status": "success",
+            "removed": 0,
+            "removed_by_age": 0,
+            "removed_by_rows": 0,
+            "remaining": 0,
+        }
+        try:
+            days = self._activity_prune_int_setting(
+                self.db, ACTIVITY_RETENTION_DAYS_KEY, ACTIVITY_RETENTION_DAYS_DEFAULT
+            )
+            max_rows = self._activity_prune_int_setting(
+                self.db, ACTIVITY_MAX_ROWS_KEY, ACTIVITY_MAX_ROWS_DEFAULT
+            )
+            pruned = self.db.prune_activity_logs(days, max_rows)
+            if isinstance(pruned, dict):
+                result.update(pruned)
+            result["status"] = "success"
+            try:
+                removed = int(result.get("removed") or 0)
+            except (TypeError, ValueError):
+                removed = 0
+            if removed > 0:
+                logger.info(
+                    "Activity log pruned: %s row(s) removed "
+                    "(%s by age, %s by row cap, %s remaining).",
+                    removed,
+                    result.get("removed_by_age", 0),
+                    result.get("removed_by_rows", 0),
+                    result.get("remaining", 0),
+                )
+        except Exception as exc:
+            logger.warning(f"Activity log prune skipped: {exc}")
+            result["status"] = "error"
+            result["message"] = str(exc)
+        return result
 
     def reschedule_jobs(self, calibre_minutes: Optional[int] = None, feed_minutes: Optional[int] = None):
         """
@@ -1441,6 +1876,9 @@ class TaskManager:
             newly_acquired = matcher.resolve_pending_requests(pending_requests)
 
             notifier = self.get_notifier()
+            notify_acquired_enabled = self._webhook_setting_enabled(
+                self.db, WEBHOOK_ACQUIRED_KEY
+            )
             for acq in newly_acquired:
                 # Mark as acquired in Calibre (removes from active request list)
                 self.db.update_release_status(acq["release_id"], status="IN_CALIBRE", matched_book_id=acq["matched_book_id"])
@@ -1449,7 +1887,8 @@ class TaskManager:
                     f"Book acquired into Calibre: '{acq['title']}'",
                     f"Matched Calibre Book #{acq['matched_book_id']} ({acq['reason']})"
                 )
-                notifier.notify_acquired(acq)
+                if notify_acquired_enabled:
+                    notifier.notify_acquired(acq)
 
             # --- 3. Series identity: auto-link, bounded AniList enrichment, reconcile ---
             # Everything below is best-effort: a metadata outage or a database
@@ -1675,6 +2114,10 @@ class TaskManager:
             monitored_series = {s["name"].lower(): s for s in self.db.get_all_series(monitored_only=True)}
             blacklisted_series = {b["name"].lower() for b in self.db.get_blacklisted_series()}
             notifier = self.get_notifier()
+            # Webhook event toggles are read once per scan, not per release.
+            notify_new_requests_enabled = self._webhook_setting_enabled(
+                self.db, WEBHOOK_NEW_REQUEST_KEY
+            )
 
             feeds = self.db.get_all_feeds()
             for feed in feeds:
@@ -1738,20 +2181,34 @@ class TaskManager:
                         identity: Optional[Dict[str, Any]] = None
                         rel_dict = r.to_dict()
 
-                        # Canonicalise the stored/provider series spelling to the
-                        # stable tracked key before matching (alias override ->
-                        # tracked display/AniList titles -> exact -> Calibre fuzzy).
-                        if series_name:
-                            try:
-                                identity = self.resolve_release_series_identity(rel_dict, identity_snapshot)
-                            except Exception as exc:
-                                logger.debug(f"Series identity resolve failed for '{series_name}': {exc}")
-                                identity = None
-                            if identity:
-                                candidate_name = (identity.get("series_name") or "").strip()
-                                if candidate_name:
-                                    canonical_series_name = candidate_name
-                        rel_dict["series_name"] = canonical_series_name or series_name or None
+                        # A manually re-bound release is pinned: automatic
+                        # identity must never canonicalise or re-key it. It is
+                        # still matched against its pinned (stored) series so the
+                        # ownership status stays correct.
+                        pinned_row = self._release_row_by_guid(r.guid) if r.guid else None
+                        pinned = self._release_identity_pinned(pinned_row)
+                        if pinned:
+                            stored_series = (pinned_row.get("series_name") or "").strip()
+                            if stored_series:
+                                series_name = stored_series
+                                canonical_series_name = stored_series
+                            rel_dict["series_name"] = canonical_series_name or None
+                        else:
+                            # Canonicalise the stored/provider series spelling to
+                            # the stable tracked key before matching (alias
+                            # override -> tracked display/AniList titles -> exact
+                            # -> Calibre fuzzy).
+                            if series_name:
+                                try:
+                                    identity = self.resolve_release_series_identity(rel_dict, identity_snapshot)
+                                except Exception as exc:
+                                    logger.debug(f"Series identity resolve failed for '{series_name}': {exc}")
+                                    identity = None
+                                if identity:
+                                    candidate_name = (identity.get("series_name") or "").strip()
+                                    if candidate_name:
+                                        canonical_series_name = candidate_name
+                            rel_dict["series_name"] = canonical_series_name or series_name or None
 
                         # If either the original or canonical spelling is
                         # blacklisted, the release stays blacklisted.
@@ -1769,6 +2226,10 @@ class TaskManager:
                             eff_vol = float(r.volume) if r.volume is not None else 1.0
                         else:
                             alt_names = list(identity.get("alt_names") or []) if identity else []
+                            if pinned and canonical_series_name:
+                                alt_names = self._cached_series_alternate_titles(
+                                    canonical_series_name
+                                )
                             # Evaluate against Calibre
                             match_result = matcher.check_release(
                                 rel_dict,
@@ -1779,8 +2240,10 @@ class TaskManager:
                             # Bounded AniList lookup fallback (contract §5.4): a NEW
                             # vol-1/unnumbered release whose series spelling nobody
                             # knows may still be resolvable through AniList titles.
+                            # Never for a pinned release: the re-bind must survive.
                             if (
-                                match_result.get("status") == "NEW"
+                                not pinned
+                                and match_result.get("status") == "NEW"
                                 and canonical_series_name
                                 and not (identity or {}).get("matched")
                                 and (r.volume is None or r.volume == 1.0)
@@ -1861,7 +2324,8 @@ class TaskManager:
                         # resolution proved a different stable tracked key, re-key
                         # the row so a scan cannot split one series across spellings.
                         if (
-                            not is_new and rel_id and rel_id > 0
+                            not pinned
+                            and not is_new and rel_id and rel_id > 0
                             and canonical_series_name
                             and normalize_text(canonical_series_name) != normalize_text(series_name)
                             and (
@@ -1902,7 +2366,8 @@ class TaskManager:
                                 f"New release requested: {r.title}",
                                 f"Series: {canonical_series_name or series_name} Vol {final_volume} from '{feed_name}'"
                             )
-                            notifier.notify_new_request(rel_dict)
+                            if notify_new_requests_enabled:
+                                notifier.notify_new_request(rel_dict)
 
                     self.db.update_feed_status(feed_id, status="OK")
                     # Persist the time-aware watermarks only after a fully
@@ -2264,7 +2729,12 @@ class TaskManager:
                         if details.get("cover_url"):
                             self.cover_cache.cache_sync(details["cover_url"])
 
-                    if display_title and stable_series_name and display_title != stable_series_name:
+                    pinned_release = self._release_identity_pinned(d)
+                    if (
+                        not pinned_release
+                        and display_title and stable_series_name
+                        and display_title != stable_series_name
+                    ):
                         # Persist the AniList title as display metadata of the
                         # tracked series when the release already resolves to one.
                         meta = {
@@ -2600,6 +3070,10 @@ class TaskManager:
 
         total_found = 0
         total_requested = 0
+        # Webhook toggle read once for the whole backfill run (contract §6.5).
+        notify_new_requests_enabled = self._webhook_setting_enabled(
+            self.db, WEBHOOK_NEW_REQUEST_KEY
+        )
 
         # Search Nyaa provider
         nyaa_releases = []
@@ -2643,7 +3117,7 @@ class TaskManager:
             is_new, rel_id = self._upsert(rel_dict)
             if st == "REQUESTED":
                 total_requested += 1
-                if is_new and rel_id > 0:
+                if is_new and rel_id > 0 and notify_new_requests_enabled:
                     try:
                         rel_data = self.db.get_release_by_id(rel_id)
                         if rel_data:

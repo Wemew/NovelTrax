@@ -154,6 +154,11 @@ def _coerce_text(value: Any) -> str:
     return str(value).strip()
 
 
+def _utcnow_iso() -> str:
+    """UTC ISO-8601 timestamp used for diagnostic pin/refresh stamps."""
+    return datetime.utcnow().isoformat(timespec="seconds") + "Z"
+
+
 class Database:
     def __init__(self, db_path: str):
         self.db_path = db_path
@@ -265,6 +270,9 @@ class Database:
                 ("anilist_id", "INTEGER"),
                 ("anilist_meta_json", "TEXT DEFAULT ''"),
                 ("match_source", "TEXT DEFAULT ''"),
+                # Contract v2 §2.2: a manually-created ("different series") tracker
+                # is locked so automatic linking/enrichment/merges never rewrite it.
+                ("identity_locked", "INTEGER DEFAULT 0"),
             ]:
                 try:
                     cur.execute(
@@ -299,6 +307,10 @@ class Database:
                 ("torbox_progress_json", "TEXT DEFAULT '{}'"),
                 ("download_files_json", "TEXT DEFAULT '[]'"),
                 ("downloaded_at", "TEXT DEFAULT ''"),
+                # Contract v2 §2.1: explicit user re-bind pin. A pinned release keeps
+                # its series_name verbatim until reset/unpinned.
+                ("series_pinned", "INTEGER DEFAULT 0"),
+                ("series_pinned_at", "TEXT DEFAULT ''"),
             ]:
                 try:
                     cur.execute(f"ALTER TABLE releases ADD COLUMN {col_def[0]} {col_def[1]};")
@@ -442,6 +454,25 @@ class Database:
             for k, v in torbox_defaults:
                 cur.execute("INSERT OR IGNORE INTO app_settings (key, value) VALUES (?, ?);", (k, v))
 
+            # Contract v2 §6.1: generic display/logging/maintenance settings from
+            # the MangaTrax settings inventory.  UI validation lives in main.py.
+            maintenance_defaults = [
+                ("app_timezone", ""),
+                ("log_level", "INFO"),
+                ("activity_retention_days", "90"),
+                ("activity_max_rows", "50000"),
+            ]
+            for k, v in maintenance_defaults:
+                cur.execute("INSERT OR IGNORE INTO app_settings (key, value) VALUES (?, ?);", (k, v))
+
+            # Contract v2 §6.5: webhook event toggles (scheduler guards read these).
+            webhook_defaults = [
+                ("webhook_new_request_notifications", "true"),
+                ("webhook_acquired_notifications", "true"),
+            ]
+            for k, v in webhook_defaults:
+                cur.execute("INSERT OR IGNORE INTO app_settings (key, value) VALUES (?, ?);", (k, v))
+
             # Seed default J-Novels feed if feeds table is empty
             cur.execute("SELECT count(*) FROM feeds;")
             if cur.fetchone()[0] == 0:
@@ -551,7 +582,7 @@ class Database:
         victim_ids: List[int] = []
         with self.get_connection() as conn:
             cur = conn.cursor()
-            cur.execute("SELECT id, title FROM releases WHERE status IN ('NEW', 'REQUESTED') OR status IS NULL;")
+            cur.execute("SELECT id, title FROM releases WHERE (status IN ('NEW', 'REQUESTED') OR status IS NULL) AND COALESCE(series_pinned, 0) = 0;")
             for row in cur.fetchall():
                 if is_chapter_release(row["title"] or ""):
                     victim_ids.append(row["id"])
@@ -811,7 +842,7 @@ class Database:
                     canonical = name
                 claims.setdefault(normalize_text(canonical), set()).add(name)
 
-            cur.execute("SELECT id, series_name FROM releases WHERE series_name IS NOT NULL AND trim(series_name) != '';")
+            cur.execute("SELECT id, series_name FROM releases WHERE series_name IS NOT NULL AND trim(series_name) != '' AND COALESCE(series_pinned, 0) = 0;")
             for row in cur.fetchall():
                 current = row["series_name"].strip()
                 current_norm = normalize_text(current)
@@ -1267,6 +1298,14 @@ class Database:
         if found is None:
             return
         row = dict(found)
+        # Contract v2 §2.2: a manually-created ("different series") tracker is
+        # identity-locked; automatic AniList enrichment must not rewrite it.
+        if _coerce_int(row.get("identity_locked")) == 1:
+            logger.info(
+                "Skipping AniList metadata store for identity-locked series %r",
+                _coerce_text(row.get("name")),
+            )
+            return
         name = _coerce_text(row.get("name"))
         titles = anilist_title_list(meta)
         display_source = (
@@ -1397,9 +1436,12 @@ class Database:
             norms.add(norm)
         if not norms:
             return 0
+        # Contract v2 §2.4: an explicit user re-bind pin must survive a series
+        # merge, so pinned releases are never re-keyed.
         cur.execute(
             "SELECT id, series_name FROM releases "
-            "WHERE series_name IS NOT NULL AND trim(series_name) != '';"
+            "WHERE series_name IS NOT NULL AND trim(series_name) != '' "
+            "AND COALESCE(series_pinned, 0) = 0;"
         )
         updates = []
         for row in cur.fetchall():
@@ -1526,6 +1568,34 @@ class Database:
             ))
         if not incoming_volumes and latest_index > 0:
             incoming_volumes.add(latest_index)
+        # Contract v2 §2.2/§2.4: automatic linking never folds an identity-locked
+        # ("different series") tracker into another series.  Explicit user links
+        # (origin != 'candidate') are still allowed.
+        if origin == "candidate":
+            candidate_source_row = self.get_series_by_name(source)
+            candidate_target_row = self.get_series_by_name(target_name)
+            if (
+                candidate_source_row is not None
+                and _coerce_int(candidate_source_row.get("identity_locked")) == 1
+            ) or (
+                candidate_target_row is not None
+                and _coerce_int(candidate_target_row.get("identity_locked")) == 1
+            ):
+                logger.info(
+                    "Skipping auto-link of identity-locked series (source=%r target=%r)",
+                    source, target_name,
+                )
+                return {
+                    "status": "skipped",
+                    "reason": "identity_locked",
+                    "source": source,
+                    "target": target_name,
+                    "calibre_series_id": calibre_id,
+                    "merged": False,
+                    "rekeyed_releases": 0,
+                    "owned_volumes": [],
+                    "book_count": 0,
+                }
         spellings = self._series_release_spellings(source)
         merged = False
         rekeyed = 0
@@ -1859,6 +1929,11 @@ class Database:
         if keep.get("id") == drop.get("id"):
             skipped["reason"] = "same_row"
             return skipped
+        # Contract v2 §2.2: an identity-locked manual tracker is never folded into
+        # (or allowed to absorb) another tracked series by automatic de-duplication.
+        if _coerce_int(keep.get("identity_locked")) == 1 or _coerce_int(drop.get("identity_locked")) == 1:
+            skipped["reason"] = "identity_locked"
+            return skipped
         if not self._series_are_duplicates(keep, drop):
             skipped["reason"] = "not_duplicates"
             return skipped
@@ -1924,6 +1999,8 @@ class Database:
         keep = self.get_series_by_name(target_name)
         if keep is None:
             return 0
+        if _coerce_int(keep.get("identity_locked")) == 1:
+            return 0
         keep_norm = normalize_text(keep.get("name"))
         keep_candidates = self._series_candidate_norms(keep)
         merged = 0
@@ -1932,6 +2009,8 @@ class Database:
                 if other.get("calibre_series_id") is not None:
                     continue
                 if other.get("id") == keep.get("id"):
+                    continue
+                if _coerce_int(other.get("identity_locked")) == 1:
                     continue
                 other_norm = normalize_text(other.get("name"))
                 if not other_norm or other_norm == keep_norm:
@@ -1996,6 +2075,10 @@ class Database:
         for row in self.get_series_identity_rows():
             try:
                 if row.get("calibre_series_id") is not None:
+                    continue
+                # Contract v2 §2.2: identity-locked manual series are never
+                # auto-linked/enriched into an existing series.
+                if _coerce_int(row.get("identity_locked")) == 1:
                     continue
                 name = _coerce_text(row.get("name"))
                 if not name:
@@ -2062,6 +2145,619 @@ class Database:
             except Exception as exc:
                 logger.debug("Duplicate tracker cleanup failed for %r: %s", target_name, exc)
         return results
+
+    # --- Release re-bind / "different series" + per-series identity reset (v2 §2) ---
+    def _known_series_title_norms(self) -> Dict[str, str]:
+        """Normalised spellings already owned by a tracked series or alias.
+
+        Used to reject a "genuinely new title" that is actually the current series,
+        an existing tracked name/display title/AniList title, or an alias
+        source/target spelling.
+        """
+        from app.parser import normalize_text
+        from app.series_identity import anilist_title_list
+
+        known: Dict[str, str] = {}
+        for row in self.get_series_identity_rows():
+            name = _coerce_text(row.get("name"))
+            if name:
+                known.setdefault(normalize_text(name), "tracked name")
+            display = _coerce_text(row.get("display_title"))
+            if display:
+                known.setdefault(normalize_text(display), "display title")
+            meta_raw = row.get("anilist_meta_json")
+            meta: Dict[str, Any] = {}
+            if isinstance(meta_raw, dict):
+                meta = meta_raw
+            elif isinstance(meta_raw, str) and meta_raw.strip():
+                try:
+                    parsed = json.loads(meta_raw)
+                    meta = parsed if isinstance(parsed, dict) else {}
+                except (TypeError, ValueError):
+                    meta = {}
+            for title in anilist_title_list(meta):
+                norm = normalize_text(title)
+                if norm:
+                    known.setdefault(norm, "anilist title")
+        for override in self.get_series_alias_overrides():
+            for field, label in (
+                ("source_name", "alias source"),
+                ("target_name", "alias target"),
+            ):
+                norm = normalize_text(_coerce_text(override.get(field)))
+                if norm:
+                    known.setdefault(norm, label)
+        known.pop("", None)
+        return known
+
+    def _validate_new_series_title(self, new_title: Optional[str],
+                                   previous_series: Optional[str]) -> str:
+        """Validate a "different series"/detach title (contract v2 §2.3).
+
+        The new title must be non-empty, 2..300 characters, and must not resolve
+        to the release's current series or to any tracked name/display title/
+        AniList title/alias source/target.
+        """
+        from app.parser import normalize_text
+
+        text = _coerce_text(new_title)
+        if not text:
+            raise ValueError("a new series title is required")
+        if len(text) < 2 or len(text) > 300:
+            raise ValueError("new series title must be between 2 and 300 characters")
+        new_norm = normalize_text(text)
+        if not new_norm:
+            raise ValueError("new series title must contain letters or digits")
+        conflict_message = (
+            "that title already belongs to an existing series; "
+            "pick a genuinely new title"
+        )
+        if new_norm == normalize_text(previous_series):
+            raise ValueError(conflict_message)
+        if new_norm in self._known_series_title_norms():
+            raise ValueError(conflict_message)
+        return text
+
+    def _create_locked_series(self, target_name: str,
+                              actor: str = "user") -> Dict[str, Any]:
+        """Create a brand-new manual tracker (``identity_locked=1``, no alias)."""
+        from urllib.parse import quote_plus
+
+        name = _coerce_text(target_name)
+        conflict_message = (
+            "that title already belongs to an existing series; "
+            "pick a genuinely new title"
+        )
+        try:
+            with self.get_connection() as conn:
+                cur = conn.cursor()
+                cur.execute("""
+                    INSERT INTO series_tracking (
+                        name, book_count, latest_index, is_monitored, website_url,
+                        owned_volumes_json, identity_locked, match_source, last_sync
+                    ) VALUES (?, 0, 0.0, 1, ?, '[]', 1, 'manual-new', CURRENT_TIMESTAMP);
+                """, (name, f"https://jnovels.com/?s={quote_plus(name)}"))
+                conn.commit()
+                cur.execute(
+                    "SELECT * FROM series_tracking WHERE lower(trim(name)) = lower(trim(?));",
+                    (name,),
+                )
+                row = cur.fetchone()
+        except sqlite3.IntegrityError:
+            raise ValueError(conflict_message)
+        logger.info("Created manually-locked series %r (actor=%s)", name, actor)
+        return dict(row) if row is not None else {}
+
+    @staticmethod
+    def _set_release_pin(cur, release_id: int, series_name: str) -> None:
+        """Pin one release to *series_name* (explicit user re-bind)."""
+        cur.execute("""
+            UPDATE releases SET
+                series_name = ?,
+                series_pinned = 1,
+                series_pinned_at = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?;
+        """, (_coerce_text(series_name), _utcnow_iso(), int(release_id)))
+
+    def _resolve_bind_target(self, target_name: Optional[str],
+                             calibre_series_id: Optional[int],
+                             actor: str = "user"
+                             ) -> Tuple[str, Optional[int], bool]:
+        """Resolve (and ensure) the tracker for ``mode='bind'``.
+
+        Returns ``(canonical_name, calibre_series_id, created_series)``.  An
+        existing tracker is found by Calibre id (preferred) or exact name; a
+        missing tracker is created through :meth:`link_series_to_calibre` (the
+        same create/merge helper the discovery match uses).
+        """
+        from app.parser import normalize_text
+
+        cid = _coerce_int(calibre_series_id)
+        requested = _coerce_text(target_name)
+        if cid is None and not requested:
+            raise ValueError("target_name or calibre_series_id is required for mode 'bind'")
+
+        row: Optional[Dict[str, Any]] = None
+        if cid is not None:
+            row = self.get_series_by_calibre_id(cid)
+        if row is None and requested:
+            row = self.get_series_by_name(requested)
+            if row is None:
+                identity = self._get_series_identity_by_title(requested)
+                if identity is not None and identity.get("id") is not None:
+                    row = identity
+        if row is not None:
+            canonical = _coerce_text(row.get("name"))
+            if not canonical:
+                raise LookupError(f"could not resolve tracked series {requested!r}")
+            row_cid = cid if cid is not None else _coerce_int(row.get("calibre_series_id"))
+            try:
+                self._merge_duplicate_trackers_for(canonical, actor=actor)
+            except Exception as exc:
+                logger.debug("Bind duplicate-tracker cleanup failed for %r: %s", canonical, exc)
+            return canonical, row_cid, False
+
+        # No tracker yet: create/merge through the existing link helper.  Source
+        # and target are the same spelling, so only the target row is created and
+        # releases already carrying that spelling are canonicalised.
+        if not requested:
+            raise LookupError(f"unknown Calibre series id {cid}")
+        calibre_series: Dict[str, Any] = {"series_name": requested}
+        if cid is not None:
+            calibre_series["series_id"] = cid
+        summary = self.link_series_to_calibre(
+            requested, calibre_series, actor=actor, origin="manual"
+        )
+        canonical = _coerce_text(summary.get("target")) or requested
+        target_row = self.get_series_by_name(canonical)
+        if target_row is None:
+            raise LookupError(f"could not create tracked series {requested!r}")
+        created_cid = _coerce_int(summary.get("calibre_series_id"))
+        logger.info(
+            "Ensured tracked series %r for release re-bind (calibre_id=%r)",
+            canonical, created_cid,
+        )
+        return canonical, created_cid, True
+
+    def rebind_release_series(self, release_id: int, mode: str,
+                              target_name: Optional[str] = None,
+                              calibre_series_id: Optional[int] = None,
+                              remember: bool = False,
+                              actor: str = "user") -> Dict[str, Any]:
+        """Re-bind one release to an existing series or a genuinely new title.
+
+        Modes (contract v2 §2.3):
+
+        * ``bind``: move the release to an existing tracked/Calibre series (by
+          ``calibre_series_id`` or exact ``target_name``), creating the tracker via
+          the link helper when missing.  An alias override is only registered when
+          ``remember=True``.
+        * ``new_title`` / ``different_series``: create a brand-new identity-locked
+          tracker under ``target_name`` and pin the release to it.  The title must
+          not be the current series nor any known tracked/alias spelling.
+        * ``detach``: like ``new_title`` but defaults the new name to the release's
+          own parsed series; if that collides with the current/known spelling the
+          caller must supply a genuinely new title.
+
+        Any mode pins the release (``series_pinned=1``), never touches the release
+        title/volume and logs ``RELEASE_SERIES_REBOUND``.
+        """
+        from app.parser import extract_series_and_volume, normalize_text
+        from app.series_identity import clean_series_for_matching
+
+        rid = _coerce_int(release_id)
+        if rid is None:
+            raise ValueError("release_id is required")
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT * FROM releases WHERE id = ?;", (rid,))
+            found = cur.fetchone()
+        if found is None:
+            raise KeyError(f"release {rid} not found")
+        release = dict(found)
+        release_title = _coerce_text(release.get("title"))
+        previous_series = _coerce_text(release.get("series_name"))
+
+        requested_mode = _coerce_text(mode).lower().replace("-", "_")
+        if requested_mode not in ("bind", "new_title", "different_series", "detach"):
+            raise ValueError(f"unknown rebind mode {mode!r}")
+        mode_norm = "new_title" if requested_mode == "different_series" else requested_mode
+
+        created_series = False
+        alias_recorded = False
+        new_calibre_id: Optional[int] = None
+        if mode_norm == "bind":
+            new_series_name, new_calibre_id, created_series = self._resolve_bind_target(
+                target_name, calibre_series_id, actor=actor
+            )
+            with self.get_connection() as conn:
+                cur = conn.cursor()
+                self._set_release_pin(cur, rid, new_series_name)
+                conn.commit()
+            if remember and previous_series and (
+                normalize_text(previous_series) != normalize_text(new_series_name)
+            ):
+                try:
+                    self.add_series_alias_override(
+                        previous_series, new_series_name,
+                        calibre_series_id=new_calibre_id,
+                        origin="manual",
+                        actor=actor,
+                    )
+                    alias_recorded = True
+                except ValueError as exc:
+                    logger.debug("Could not record rebind alias override: %s", exc)
+                    alias_recorded = False
+        else:
+            if mode_norm == "new_title":
+                new_series_name = self._validate_new_series_title(
+                    target_name, previous_series
+                )
+            else:  # detach
+                requested = _coerce_text(target_name)
+                if requested:
+                    new_series_name = self._validate_new_series_title(
+                        requested, previous_series
+                    )
+                else:
+                    derived = ""
+                    try:
+                        parsed = extract_series_and_volume(release_title) or {}
+                        derived = _coerce_text(parsed.get("series_name"))
+                    except Exception:
+                        derived = ""
+                    if not derived:
+                        derived = _coerce_text(clean_series_for_matching(release_title))
+                    if not derived:
+                        raise ValueError(
+                            "could not derive a new series title; provide target_name"
+                        )
+                    new_series_name = self._validate_new_series_title(
+                        derived, previous_series
+                    )
+            self._create_locked_series(new_series_name, actor=actor)
+            created_series = True
+            with self.get_connection() as conn:
+                cur = conn.cursor()
+                self._set_release_pin(cur, rid, new_series_name)
+                conn.commit()
+
+        details = json.dumps({
+            "mode": mode_norm,
+            "previous_series": previous_series,
+            "new_series": new_series_name,
+            "calibre_series_id": new_calibre_id,
+            "remember": bool(remember),
+            "pinned": True,
+        })
+        self.log_activity(
+            "RELEASE_SERIES_REBOUND",
+            f"Re-bound release #{rid}: {previous_series or '(none)'} -> {new_series_name} ({mode_norm})",
+            details,
+        )
+        return {
+            "status": "success",
+            "mode": mode_norm,
+            "release_id": rid,
+            "series_name": new_series_name,
+            "calibre_series_id": new_calibre_id,
+            "pinned": True,
+            "created_series": created_series,
+            "alias_recorded": alias_recorded,
+            "previous_series": previous_series,
+        }
+
+    @staticmethod
+    def _parsed_release_series_name(title: Any) -> str:
+        """Title-parsed series spelling used to undo a manual re-index.
+
+        Uses ``app.parser.clean_feed_title`` + ``extract_series_and_volume``
+        (contract v2 §2.3 ``rekey_to_parsed``).  Returns ``''`` when the title
+        cannot be parsed.
+        """
+        from app.parser import clean_feed_title, extract_series_and_volume
+
+        raw = _coerce_text(title)
+        if not raw:
+            return ""
+        candidates: List[str] = []
+        try:
+            cleaned = _coerce_text(clean_feed_title(raw))
+        except Exception:
+            cleaned = ""
+        if cleaned and cleaned != raw:
+            candidates.append(cleaned)
+        candidates.append(raw)
+        for candidate in candidates:
+            try:
+                parsed = extract_series_and_volume(candidate) or {}
+            except Exception:
+                continue
+            series = _coerce_text(parsed.get("series_name"))
+            if series:
+                return series
+        return ""
+
+    def reset_series_identity(self, series_id: int, clear_aliases: bool = True,
+                              clear_display: bool = True,
+                              unpin_releases: bool = True,
+                              rekey_to_parsed: bool = True,
+                              actor: str = "user") -> Dict[str, Any]:
+        """Forget the learned/manual identity state of one tracked series.
+
+        Clears alias overrides pointing at (or sourced from) the series, the
+        cosmetic AniList display data, the ``identity_locked`` flag and the
+        per-release pins of that series, so automatic matching can resume.  The
+        tracker itself and its ``calibre_series_id`` are kept (Calibre linkage is
+        a library fact, not an identity override).
+
+        ``rekey_to_parsed`` (default True) undoes a manual ``new_title``/``detach``
+        re-index: for a manually-created series (``identity_locked=1`` or
+        ``match_source='manual-new'``) releases stored under the manual series name
+        are moved back to the title-parsed series spelling
+        (``clean_feed_title`` + ``extract_series_and_volume``).  Releases that do
+        not normalize to the series name are never touched.
+        """
+        from app.parser import normalize_text
+
+        sid = _coerce_int(series_id)
+        if sid is None:
+            raise ValueError("series_id is required")
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT * FROM series_tracking WHERE id = ?;", (sid,))
+            found = cur.fetchone()
+        if found is None:
+            raise KeyError(f"series {sid} not found")
+        row = dict(found)
+        name = _coerce_text(row.get("name"))
+        name_norm = normalize_text(name)
+        display = _coerce_text(row.get("display_title"))
+        target_norms = {name_norm}
+        if display:
+            target_norms.add(normalize_text(display))
+        target_norms.discard("")
+
+        # Capture BEFORE clear_display wipes match_source: a manual new-title /
+        # detached tracker is the only kind whose releases are re-keyed to parsed.
+        previous_locked = _coerce_int(row.get("identity_locked")) or 0
+        was_manual = (
+            previous_locked == 1
+            or _coerce_text(row.get("match_source")) == "manual-new"
+        )
+
+        aliases_removed = 0
+        if clear_aliases:
+            for override in self.get_series_alias_overrides():
+                source_norm = _coerce_text(override.get("source_norm")) or normalize_text(
+                    override.get("source_name")
+                )
+                target_norm = _coerce_text(override.get("target_norm")) or normalize_text(
+                    override.get("target_name")
+                )
+                if target_norm in target_norms or (name_norm and source_norm == name_norm):
+                    try:
+                        if self.delete_series_alias_override(override.get("id")):
+                            aliases_removed += 1
+                    except Exception as exc:
+                        logger.debug("Could not remove alias override during reset: %s", exc)
+
+        releases_unpinned = 0
+        releases_rekeyed = 0
+        display_cleared = False
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            if clear_display:
+                cur.execute("""
+                    UPDATE series_tracking SET
+                        display_title = '', anilist_id = NULL, anilist_meta_json = '',
+                        match_source = '', last_sync = CURRENT_TIMESTAMP
+                    WHERE id = ?;
+                """, (sid,))
+                display_cleared = True
+            cur.execute(
+                "UPDATE series_tracking SET identity_locked = 0, last_sync = CURRENT_TIMESTAMP WHERE id = ?;",
+                (sid,),
+            )
+            # Collect the series' releases ONCE (by normalised stored name) so the
+            # unpin and parsed-rekey rules operate on exactly the same rows.
+            release_rows: List[Dict[str, Any]] = []
+            if name_norm:
+                cur.execute("""
+                    SELECT id, title, series_name, series_pinned FROM releases
+                    WHERE series_name IS NOT NULL AND trim(series_name) != '';
+                """)
+                release_rows = [
+                    dict(release)
+                    for release in cur.fetchall()
+                    if normalize_text(release["series_name"]) == name_norm
+                ]
+            if unpin_releases and release_rows:
+                pinned_ids = [
+                    release["id"] for release in release_rows
+                    if _coerce_int(release.get("series_pinned")) == 1
+                ]
+                if pinned_ids:
+                    cur.executemany("""
+                        UPDATE releases SET series_pinned = 0, series_pinned_at = '',
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE id = ?;
+                    """, [(pinned_id,) for pinned_id in pinned_ids])
+                    releases_unpinned = len(pinned_ids)
+            if rekey_to_parsed and was_manual and release_rows:
+                for release in release_rows:
+                    stored_name = _coerce_text(release.get("series_name"))
+                    parsed_name = self._parsed_release_series_name(release.get("title"))
+                    if not parsed_name:
+                        continue
+                    if normalize_text(parsed_name) == normalize_text(stored_name):
+                        continue
+                    if normalize_text(parsed_name) == name_norm:
+                        continue
+                    cur.execute("""
+                        UPDATE releases SET series_name = ?, updated_at = CURRENT_TIMESTAMP
+                        WHERE id = ?;
+                    """, (parsed_name, release["id"]))
+                    releases_rekeyed += 1
+            conn.commit()
+
+        self.log_activity(
+            "SERIES_IDENTITY_RESET",
+            f"Reset identity state for series {name!r}",
+            json.dumps({
+                "series_id": sid,
+                "series_name": name,
+                "aliases_removed": aliases_removed,
+                "releases_unpinned": releases_unpinned,
+                "releases_rekeyed": releases_rekeyed,
+                "display_cleared": display_cleared,
+                "locked_cleared": bool(previous_locked),
+                "rekey_to_parsed": bool(rekey_to_parsed),
+                "actor": _coerce_text(actor),
+            }),
+        )
+        return {
+            "status": "success",
+            "series_id": sid,
+            "series_name": name,
+            "aliases_removed": aliases_removed,
+            "releases_unpinned": releases_unpinned,
+            "releases_rekeyed": releases_rekeyed,
+            "display_cleared": display_cleared,
+            "locked_cleared": bool(previous_locked),
+        }
+
+    def get_series_identity_overview(self, search: Optional[str] = None,
+                                     limit: int = 100) -> List[Dict[str, Any]]:
+        """Per-tracked-series identity summary used by the Settings reset card."""
+        from app.parser import normalize_text
+
+        try:
+            limit_int = int(limit)
+        except (TypeError, ValueError):
+            limit_int = 100
+        limit_int = max(1, min(500, limit_int))
+
+        alias_counts: Dict[str, int] = {}
+        try:
+            for override in self.get_series_alias_overrides():
+                target_norm = _coerce_text(override.get("target_norm")) or normalize_text(
+                    override.get("target_name")
+                )
+                if target_norm:
+                    alias_counts[target_norm] = alias_counts.get(target_norm, 0) + 1
+        except Exception:
+            alias_counts = {}
+
+        release_stats: Dict[str, Dict[str, int]] = {}
+        try:
+            with self.get_connection() as conn:
+                cur = conn.cursor()
+                cur.execute("""
+                    SELECT series_name, series_pinned FROM releases
+                    WHERE series_name IS NOT NULL AND trim(series_name) != '';
+                """)
+                for rel in cur.fetchall():
+                    rel_norm = normalize_text(rel["series_name"])
+                    if not rel_norm:
+                        continue
+                    stats = release_stats.setdefault(rel_norm, {"releases": 0, "pinned": 0})
+                    stats["releases"] += 1
+                    if _coerce_int(rel["series_pinned"]) == 1:
+                        stats["pinned"] += 1
+        except Exception as exc:
+            logger.debug("Series identity overview release scan failed: %s", exc)
+
+        search_norm = normalize_text(search) if search else ""
+        overview: List[Dict[str, Any]] = []
+        for row in self.get_series_identity_rows():
+            name = _coerce_text(row.get("name"))
+            if not name:
+                continue
+            name_norm = normalize_text(name)
+            display = _coerce_text(row.get("display_title"))
+            authors = _coerce_text(row.get("authors"))
+            if search_norm:
+                haystacks = (
+                    normalize_text(name),
+                    normalize_text(display),
+                    normalize_text(authors),
+                )
+                if not any(search_norm in haystack for haystack in haystacks if haystack):
+                    continue
+            stats = release_stats.get(name_norm, {"releases": 0, "pinned": 0})
+            overview.append({
+                "series_id": row.get("id"),
+                "name": name,
+                "display_title": display,
+                "calibre_series_id": row.get("calibre_series_id"),
+                "identity_locked": bool(_coerce_int(row.get("identity_locked"))),
+                "match_source": _coerce_text(row.get("match_source")),
+                "anilist_id": row.get("anilist_id"),
+                "aliases_count": alias_counts.get(name_norm, 0),
+                "pinned_releases": stats.get("pinned", 0),
+                "releases_count": stats.get("releases", 0),
+                "owned_volumes": _coerce_owned_volumes(row.get("owned_volumes_json")),
+            })
+            if len(overview) >= limit_int:
+                break
+        return overview
+
+    def get_release_series_identity(self, release_id: int) -> Optional[Dict[str, Any]]:
+        """Release + current tracked-series identity, for the re-bind modal."""
+        rid = _coerce_int(release_id)
+        if rid is None:
+            return None
+        release = self.get_release_by_id(rid)
+        if release is None:
+            return None
+        series_name = _coerce_text(release.get("series_name"))
+        tracking_series: Optional[Dict[str, Any]] = None
+        if series_name:
+            row = self.get_series_by_name(series_name)
+            if row is None:
+                row = self._get_series_identity_by_title(series_name)
+            if row is not None:
+                tracking_series = {
+                    "name": _coerce_text(row.get("name")),
+                    "display_title": _coerce_text(row.get("display_title")),
+                    "calibre_series_id": row.get("calibre_series_id"),
+                    "identity_locked": bool(_coerce_int(row.get("identity_locked"))),
+                }
+        return {
+            "release_id": int(release.get("id") or rid),
+            "title": release.get("title"),
+            "series_name": series_name,
+            "volume": release.get("volume"),
+            "status": release.get("status"),
+            "calibre_matched_book_id": release.get("calibre_matched_book_id"),
+            "series_pinned": bool(_coerce_int(release.get("series_pinned"))),
+            "tracking_series": tracking_series,
+        }
+
+    def unpin_release_series(self, release_id: int) -> bool:
+        """Clear the explicit re-bind pin of one release (contract v2 §2.3)."""
+        rid = _coerce_int(release_id)
+        if rid is None:
+            return False
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                UPDATE releases SET series_pinned = 0, series_pinned_at = '',
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ? AND COALESCE(series_pinned, 0) = 1;
+            """, (rid,))
+            changed = max(0, int(cur.rowcount or 0))
+            conn.commit()
+        if not changed:
+            return False
+        self.log_activity(
+            "RELEASE_SERIES_UNPINNED",
+            f"Unpinned release #{rid} series re-bind",
+            json.dumps({"release_id": rid}),
+        )
+        return True
 
     # --- Release Operations ---
     def purge_pdf_releases(self) -> int:
@@ -2276,7 +2972,7 @@ class Database:
             if blacklisted and status_val in ("NEW", "REQUESTED"):
                 status_val = "BLACKLISTED"
 
-            cur.execute("SELECT id, status, ignored, series_name FROM releases WHERE guid = ?;", (guid,))
+            cur.execute("SELECT id, status, ignored, series_name, series_pinned FROM releases WHERE guid = ?;", (guid,))
             existing = cur.fetchone()
 
             if existing:
@@ -2293,10 +2989,15 @@ class Database:
                     resolved_status = existing["status"]
                     resolved_ignored = existing["ignored"] if existing["ignored"] is not None else 0
                 # §12.1: a metadata/provider title must never rewrite the stored
-                # stable series key once it exists.
-                stable_series_val = self._stable_series_name(
-                    existing["series_name"], release_data.get("series_name")
-                )
+                # stable series key once it exists.  Contract v2 §2.4: a release the
+                # user explicitly re-bound (series_pinned=1) keeps its series_name
+                # verbatim through every re-ingestion.
+                if _coerce_int(existing["series_pinned"]) == 1:
+                    stable_series_val = _coerce_text(existing["series_name"]) or release_data.get("series_name")
+                else:
+                    stable_series_val = self._stable_series_name(
+                        existing["series_name"], release_data.get("series_name")
+                    )
                 cur.execute("""
                     UPDATE releases SET
                         title = ?,
@@ -3800,11 +4501,13 @@ class Database:
                   AND volume > 8.0;
             """)
 
-            # 3. Re-parse releases with volume IS NULL or status = 'NEW'
+            # 3. Re-parse releases with volume IS NULL or status = 'NEW'.
+            #    Pinned releases are skipped: the user's re-bind owns their series.
             cur.execute("""
                 SELECT id, title, series_name, volume 
                 FROM releases 
-                WHERE volume IS NULL OR status = 'NEW';
+                WHERE (volume IS NULL OR status = 'NEW')
+                  AND COALESCE(series_pinned, 0) = 0;
             """)
             rows = [dict(r) for r in cur.fetchall()]
             for r in rows:
@@ -3824,7 +4527,7 @@ class Database:
                 UPDATE releases 
                 SET series_name = trim(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(series_name, ' (Light Novel)', ''), ' [Light Novel]', ''), ' (Novel)', ''), ' (Web Novel)', ''), ' (LN)', '')),
                     title = trim(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(title, ' (Light Novel)', ''), ' [Light Novel]', ''), ' (Novel)', ''), ' (Web Novel)', ''), ' (LN)', ''))
-                WHERE series_name LIKE '%(Light Novel)%' 
+                WHERE (series_name LIKE '%(Light Novel)%' 
                    OR series_name LIKE '%[Light Novel]%'
                    OR series_name LIKE '%(Novel)%'
                    OR series_name LIKE '%(Web Novel)%'
@@ -3833,12 +4536,14 @@ class Database:
                    OR title LIKE '%[Light Novel]%'
                    OR title LIKE '%(Novel)%'
                    OR title LIKE '%(Web Novel)%'
-                   OR title LIKE '%(LN)%';
+                   OR title LIKE '%(LN)%')
+                  AND COALESCE(series_pinned, 0) = 0;
             """)
 
             # 5. Alias -> canonical for display, but never overwrite a tracked
             #    stable matching key (§12.1): series_tracking holds the name the
             #    Calibre library / user uses, and re-keying it would break matching.
+            #    Pinned releases are excluded: an explicit user re-bind wins.
             cur.execute("SELECT name FROM series_tracking;")
             tracked_norms = {
                 normalize_text(row["name"])
@@ -3847,7 +4552,8 @@ class Database:
             }
             cur.execute("""
                 SELECT id, series_name FROM releases
-                WHERE series_name IS NOT NULL AND trim(series_name) != '';
+                WHERE series_name IS NOT NULL AND trim(series_name) != ''
+                  AND COALESCE(series_pinned, 0) = 0;
             """)
             for row in cur.fetchall():
                 current_name = row["series_name"].strip()
@@ -3865,6 +4571,7 @@ class Database:
                 SELECT id, title, series_name, volume, description, cover_url, series_link, updated_at
                 FROM releases
                 WHERE status = 'NEW' AND (volume IS NULL OR volume = 1.0) AND series_name IS NOT NULL AND series_name != ''
+                  AND COALESCE(series_pinned, 0) = 0
                 ORDER BY 
                     (CASE WHEN description IS NOT NULL AND length(trim(description)) > 0 THEN 1 ELSE 0 END) DESC,
                     (CASE WHEN cover_url IS NOT NULL AND length(trim(cover_url)) > 0 THEN 1 ELSE 0 END) DESC,
@@ -3936,11 +4643,15 @@ class Database:
                 # ``releases.series_name`` is the STABLE matching key and must not
                 # be re-keyed to a display spelling while the same tracked series
                 # is already known under the stored name.  A genuinely different
-                # series name supplied explicitly is still written.
-                cur.execute("SELECT series_name FROM releases WHERE id = ?;", (release_id,))
+                # series name supplied explicitly is still written.  Contract v2
+                # §2.4: an explicitly re-bound (pinned) release is never moved.
+                cur.execute("SELECT series_name, series_pinned FROM releases WHERE id = ?;", (release_id,))
                 existing_row = cur.fetchone()
                 existing_name = (existing_row["series_name"] or "").strip() if existing_row else ""
-                series_val = self._resolve_updated_series_name(existing_name, series_name)
+                if existing_row is not None and _coerce_int(existing_row["series_pinned"]) == 1:
+                    series_val = existing_name
+                else:
+                    series_val = self._resolve_updated_series_name(existing_name, series_name)
             cur.execute("""
                 UPDATE releases 
                 SET description = COALESCE(?, description),
@@ -4035,12 +4746,238 @@ class Database:
                       SELECT lower(trim(sao.source_name))
                       FROM series_alias_overrides sao
                       JOIN series_tracking st ON lower(trim(st.name)) = lower(trim(sao.target_name))
-                  ));
+                  ))
+                  AND COALESCE(series_pinned, 0) = 0;
             """)
             count = cur.rowcount
             conn.commit()
             self.log_activity("DEBUG_CLEAR", "Cleared discovered series", f"Removed {count} unreviewed discovery releases.")
             return count
+
+    # --- Maintenance: activity log retention, DB stats/vacuum/backup, attribution ---
+    def prune_activity_logs(self, retention_days: int = 90,
+                            max_rows: int = 50000) -> Dict[str, Any]:
+        """Prune ``activity_logs`` by age and by a newest-N row cap (v2 §6).
+
+        Both rules are clamped and ``0`` disables that rule.  Runs in a single
+        connection/commit and returns
+        ``{"removed_by_age","removed_by_rows","removed","remaining"}``.
+        """
+        try:
+            days = int(retention_days)
+        except (TypeError, ValueError):
+            days = 90
+        try:
+            row_cap = int(max_rows)
+        except (TypeError, ValueError):
+            row_cap = 50000
+        days = max(0, min(3650, days))
+        row_cap = max(0, min(1000000, row_cap))
+        removed_by_age = 0
+        removed_by_rows = 0
+        try:
+            with self.get_connection() as conn:
+                cur = conn.cursor()
+                if days > 0:
+                    # created_at is written by CURRENT_TIMESTAMP (UTC text), so a
+                    # SQLite datetime modifier compares consistently.
+                    cur.execute(
+                        "DELETE FROM activity_logs WHERE created_at < datetime('now', ?);",
+                        (f"-{days} days",),
+                    )
+                    removed_by_age = max(0, int(cur.rowcount or 0))
+                if row_cap > 0:
+                    cur.execute("SELECT COUNT(*) AS count FROM activity_logs;")
+                    row = cur.fetchone()
+                    remaining_rows = int(row["count"] or 0) if row else 0
+                    if remaining_rows > row_cap:
+                        excess = remaining_rows - row_cap
+                        cur.execute("""
+                            DELETE FROM activity_logs WHERE id IN (
+                                SELECT id FROM activity_logs ORDER BY id ASC LIMIT ?
+                            );
+                        """, (excess,))
+                        removed_by_rows = max(0, int(cur.rowcount or 0))
+                cur.execute("SELECT COUNT(*) AS count FROM activity_logs;")
+                row = cur.fetchone()
+                remaining = int(row["count"] or 0) if row else 0
+                conn.commit()
+        except Exception as exc:
+            logger.warning("Activity log prune failed: %s", exc)
+            return {
+                "removed_by_age": 0,
+                "removed_by_rows": 0,
+                "removed": 0,
+                "remaining": 0,
+            }
+        return {
+            "removed_by_age": removed_by_age,
+            "removed_by_rows": removed_by_rows,
+            "removed": removed_by_age + removed_by_rows,
+            "remaining": remaining,
+        }
+
+    def database_stats(self) -> Dict[str, Any]:
+        """Size/page/row-count snapshot of the SQLite database (never raises)."""
+        stats: Dict[str, Any] = {
+            "path": self.db_path,
+            "size_bytes": 0,
+            "wal_size_bytes": 0,
+            "page_count": 0,
+            "page_size": 0,
+            "freelist_count": 0,
+            "row_counts": {},
+        }
+        try:
+            stats["size_bytes"] = int(os.path.getsize(self.db_path))
+        except OSError:
+            stats["size_bytes"] = 0
+        for wal_candidate in (self.db_path + "-wal", self.db_path + ".wal"):
+            try:
+                stats["wal_size_bytes"] = int(os.path.getsize(wal_candidate))
+                break
+            except OSError:
+                continue
+        try:
+            with self.get_connection() as conn:
+                cur = conn.cursor()
+                for key, pragma in (
+                    ("page_count", "PRAGMA page_count;"),
+                    ("page_size", "PRAGMA page_size;"),
+                    ("freelist_count", "PRAGMA freelist_count;"),
+                ):
+                    try:
+                        cur.execute(pragma)
+                        row = cur.fetchone()
+                        stats[key] = int(row[0] or 0) if row is not None else 0
+                    except Exception:
+                        stats[key] = 0
+                row_counts: Dict[str, int] = {}
+                for table in (
+                    "releases",
+                    "series_tracking",
+                    "activity_logs",
+                    "novel_metadata_cache",
+                    "feeds",
+                    "series_alias_overrides",
+                ):
+                    try:
+                        cur.execute(f"SELECT COUNT(*) AS count FROM {table};")
+                        row = cur.fetchone()
+                        row_counts[table] = int(row["count"] or 0) if row is not None else 0
+                    except Exception:
+                        row_counts[table] = 0
+                stats["row_counts"] = row_counts
+        except Exception as exc:
+            logger.debug("Database stats read failed: %s", exc)
+        # Convenience aliases for route payloads (kept additive).
+        stats["db_size_bytes"] = stats["size_bytes"]
+        stats["wal_bytes"] = stats["wal_size_bytes"]
+        stats["counts"] = dict(stats["row_counts"])
+        return stats
+
+    def vacuum_database(self) -> Dict[str, Any]:
+        """``integrity_check`` + ``VACUUM`` + ``ANALYZE`` (guarded, never raises)."""
+        before_bytes = 0
+        try:
+            before_bytes = int(os.path.getsize(self.db_path))
+        except OSError:
+            before_bytes = 0
+        result: Dict[str, Any] = {
+            "ok": False,
+            "integrity": "",
+            "before_bytes": before_bytes,
+            "after_bytes": before_bytes,
+            "message": "",
+        }
+        try:
+            # A plain connection (not the request/with-helper context) so the
+            # connection can be closed explicitly after maintenance.
+            conn = self.get_connection()
+            try:
+                cur = conn.cursor()
+                cur.execute("PRAGMA integrity_check;")
+                row = cur.fetchone()
+                result["integrity"] = _coerce_text(row[0] if row is not None else "")
+                conn.commit()
+                cur.execute("VACUUM;")
+                conn.commit()
+                cur.execute("ANALYZE;")
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception as exc:
+            logger.warning("Database vacuum failed: %s", exc)
+            result["message"] = f"Database maintenance failed: {exc}"
+            try:
+                result["after_bytes"] = int(os.path.getsize(self.db_path))
+            except OSError:
+                pass
+            return result
+        try:
+            result["after_bytes"] = int(os.path.getsize(self.db_path))
+        except OSError:
+            pass
+        integrity = result["integrity"].lower() or ""
+        result["ok"] = integrity == "ok" or integrity == ""
+        if result["ok"]:
+            result["message"] = "Database optimized (integrity check: ok)."
+        else:
+            result["message"] = f"Integrity check reported: {result['integrity']}"
+        return result
+
+    def backup_database(self, dest_path: str) -> str:
+        """Write a consistent SQLite snapshot of this database to *dest_path*.
+
+        Uses the sqlite3 online backup API from a fresh connection so WAL readers
+        are not disturbed.  Returns the destination path; OSError/sqlite3.Error
+        propagate to the caller (the route maps them to a 500 JSON response).
+        """
+        destination = _coerce_text(dest_path)
+        if not destination:
+            raise ValueError("destination path is required")
+        destination = os.path.abspath(destination)
+        destination_dir = os.path.dirname(destination)
+        if destination_dir:
+            os.makedirs(destination_dir, exist_ok=True)
+        source_conn = self.get_connection()
+        try:
+            destination_conn = sqlite3.connect(destination)
+            try:
+                source_conn.backup(destination_conn)
+                destination_conn.commit()
+            finally:
+                destination_conn.close()
+        finally:
+            source_conn.close()
+        return destination
+
+    def get_series_attribution_rows(self, scan_limit: int = 50000
+                                    ) -> List[Dict[str, Any]]:
+        """Read-only release rows for the series-attribution diagnostics audit.
+
+        Attribution resolution itself lives in ``app.diagnostics`` (owner C); this
+        helper is persistence-only.  Rows that are IGNORED/BLACKLISTED, explicitly
+        ignored or user-pinned are excluded.
+        """
+        try:
+            limit_int = int(scan_limit)
+        except (TypeError, ValueError):
+            limit_int = 50000
+        limit_int = max(1, min(200000, limit_int))
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT id, title, series_name, volume, status, series_pinned,
+                       ignored, media_type
+                FROM releases
+                WHERE COALESCE(status, '') NOT IN ('IGNORED', 'BLACKLISTED')
+                  AND COALESCE(ignored, 0) = 0
+                  AND COALESCE(series_pinned, 0) = 0
+                ORDER BY id ASC
+                LIMIT ?;
+            """, (limit_int,))
+            return [dict(row) for row in cur.fetchall()]
 
     # --- Novel Metadata Cache Operations ---
     def ensure_metadata_cache_table(self):

@@ -35,8 +35,8 @@
                     <p class="text-[11px] text-slate-400 font-mono">{{ log.details }}</p>
                     {% endif %}
                 </div>
-                <div class="text-[11px] text-slate-500 font-mono flex-shrink-0">
-                    {{ log.created_at }}
+                <div class="text-[11px] text-slate-500 font-mono flex-shrink-0" title="{{ log.created_at }}">
+                    {{ log.created_at|localtime("%Y-%m-%d %H:%M:%S") }}
                 </div>
             </div>
             {% else %}

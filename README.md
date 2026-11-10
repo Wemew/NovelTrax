@@ -218,13 +218,13 @@ services:
 | --- | --- |
 | **Overview** | Quick summary cards (Tracked Series, Wanted Requests, Acquired Books, Active Feeds), Calibre status banner, pending request cards with **Release** and **Series Hub** links, and recent activity logs. |
 | **Series** | Displays all novel series auto-populated from Calibre. Shows owned volumes (including omnibus-expanded volumes), latest index, and toggle switches to enable/disable monitoring. |
-| **Releases & Requests** | Searchable, sortable catalog of all detected releases in grouped or flat view. Filter by `Requested (Wanted)`, `In Calibre (Acquired)`, `Ignored`, or `All`; ignore/restore a release, dispatch it to qBittorrent with one click, run a per-series backfill, or open its release/hub links. |
+| **Releases & Requests** | Searchable, sortable catalog of all detected releases in grouped or flat view. Filter by `Requested (Wanted)`, `In Calibre (Acquired)`, `Ignored`, or `All`; ignore/restore a release, dispatch it to the downloader with one click, re-bind its series / mark it a different series, run a per-series backfill, or open its release/hub links. |
 | **Prioritized** | Releases from trusted release groups, with VIP badges, grouped/flat view switcher, group management (add/remove/note) and auto-loading on scroll. |
 | **Downloads** | Engine-aware downloader status and in-app configuration: for qBittorrent, the custom URL/host/port/username/password/HTTPS toggle/category/save path; for TorBox, an engine selector, the TorBox explanation and the live TorBox queue with **Check now**, retry/remove and two-step **Clear failed** controls. |
 | **Discovery** | New series discovery panel (Volume 1 and unnumbered/standalone releases) with 1-click **Track** or **Blacklist** buttons, search/sort, plus an editable **Blacklist Management** table. |
 | **Feeds & Scrapers** | Manage configured feeds (the seeded J-Novels and Nyaa Light Novels feeds, plus RSS, NovelUpdates and Custom HTML Scraper entries; Nyaa is also available as a preset in the Add-Feed dropdown). Includes live extraction preview ("Test Scraper") and per-feed check triggers. |
-| **Logs** | Chronological audit trail of all background checks, sync runs, downloader actions, ignore/restore actions and auto-resolutions. |
-| **Settings** | Calibre container path, sync/check intervals, backfill limits and delays, official-translation-only toggle, Discord/generic webhooks, **download engine selector + TorBox engine settings** (API key, enable, delete-after-download, strict selective volume fetch, delete-on-failure, concurrency/chunk/size limits, poll floor, max concurrent, timeout, local downloads folder), and maintenance tools. The qBittorrent connection settings live in the **Downloads** tab. |
+| **Logs** | Chronological audit trail of all background checks, sync runs, downloader actions, ignore/restore actions and auto-resolutions, with timestamps rendered in the configured timezone (raw UTC on hover). |
+| **Settings** | Calibre container path, sync/check intervals, backfill limits and delays, official-translation-only toggle, **display & logging** (timezone, log level, activity-log retention/max rows + prune now), Discord/generic webhooks, **download engine selector + TorBox engine settings** (API key, enable, delete-after-download, strict selective volume fetch, delete-on-failure, concurrency/chunk/size limits, poll floor, max concurrent, timeout, local downloads folder), **series identity & overrides** (per-series reset, global alias list, attribution audit), **storage & diagnostics** (storage health, network diagnostics, database backup, VACUUM) and maintenance tools. The qBittorrent connection settings live in the **Downloads** tab. |
 
 ---
 
@@ -271,6 +271,12 @@ services:
    - **Refresh AniList** on a Series row (`POST /api/series/{series_id}/refresh-metadata`) re-fetches the title/synonyms, attempts an automatic link when a match is found and reconciles the release statuses.
    - These behaviours are tuned in code (no Settings UI needed) by `series_anilist_sync_enabled` (default `true`: bounded AniList enrichment after each Calibre sync), `series_anilist_sync_limit` (default `15` series per sync), `series_anilist_match_enabled` (default `true`: alt-title retry during feed scans) and `series_anilist_match_budget` (default `10` extra lookups per scan).
 
+6b. **Re-bind a release / "Different Series" (per-release identity override)**:
+   - Every release row and every series-card release exposes a compact **Re-bind** action (`git-branch` icon, class `.release-rebind-btn`) that opens the shared **Re-bind series** modal (`#release-rebind-modal`). The modal offers three modes: **Bind to an existing series** (searchable picker across tracked series and Calibre series — `GET /api/series?search=` + `GET /api/calibre/series?search=`), **Re-index under a new title — not this series and not any previous series**, and **Detach as a new standalone series**.
+   - Choose **Only this release (pin)** (default: just this release) and the release is pinned per release: its stored series survives later feed re-ingestion, identity canonicalisation, AniList enrichment and series merges. Check the box to also remember the mapping as a global alias override for future releases of the old title. The apply call is `POST /api/releases/{release_id}/rebind` (`mode` = `bind`/`new_title`/`detach`, optional `target_name`, `calibre_series_id`, `remember`). A pinned release shows a cyan **Pinned** badge (`.release-pinned-badge`, "Series manually re-bound") next to its series name and can be un-pinned from the modal (`POST /api/releases/{release_id}/unpin`; automatic matching resumes).
+   - **Different series** creates a brand-new tracked series row with `identity_locked=1`, `match_source='manual-new'` and no alias back to the old spelling — the new title must be genuinely new (the server rejects a title that normalises to the current series or to any existing tracked series/display title/alias).
+   - **Per-series reset (Settings → Series identity & overrides)**: search any tracked series and press **Reset identity** (two-step confirm, `POST /api/series/{series_id}/reset-identity`) to forget manual/learned aliases, AniList display data, the manual lock and per-release pins for that series, after which automatic matching takes over again. Reset is per series only — there is no global destructive reset. The same card lists the global alias overrides (`GET /api/series/aliases`, delete via `DELETE /api/series/aliases/{override_id}`) and offers an **Attribution audit** (`GET /api/maintenance/series-attribution`) that flags releases whose stored series no longer matches the automatic parse and lets you Re-bind them directly. Release titles are never changed by a reset.
+
 ---
 
 ## 🧪 Testing Locally
@@ -312,7 +318,10 @@ $env:PYTHONIOENCODING="utf-8"; $env:TEMP="C:\Users\rasmu\Documents\AI-Workspace\
 & $py tests\run_tests.py torbox
 & $py tests\run_tests.py feed_catchup nyaa_backfill
 & $py tests\run_tests.py ui_wiring downloader
+& $py tests\run_tests.py rebind_settings_ui
 ```
+
+The re-bind / different-series port adds `tests/test_release_rebind_db.py` (pin, bind/new-title/detach, validation, per-series reset), `tests/test_release_rebind_scheduler.py` (status recompute, pin/lock enforcement across feed scans and reconciliation), `tests/test_settings_features_api.py` (settings-feature routes and validation) and `tests/test_rebind_settings_ui.py` (static modal/card/JS/README guards).
 
 ---
 
@@ -353,12 +362,21 @@ These qBittorrent environment variables only seed the database on first start; t
 | Nyaa backfill cursor | `POST /api/backfill/nyaa/reset` (Settings button) rewinds the resumable Nyaa page cursor to page 1 and clears its "complete" flag |
 | Backfill request delay | Polite delay between backfill network requests |
 | Track official translations only | When enabled, unofficial web-novel/fan-translation releases are excluded from wanted coverage |
+| Timezone (`app_timezone`) | IANA timezone name for the local-time Jinja filters (e.g. `Europe/Copenhagen`, `UTC`); an empty value follows the container `TZ`. Validated against `zoneinfo`, invalid names are rejected |
+| Log level (`log_level`) | Root log level: `DEBUG`, `INFO` (default), `WARNING` or `ERROR`. Read at app startup, so a restart applies the new level |
+| Activity log retention (`activity_retention_days`) | Prune activity-log rows older than N days (default `90`; `0` disables the age rule). Logs are pruned automatically every 6 hours; **Prune activity logs now** calls `POST /api/maintenance/logs/prune` |
+| Activity log max rows (`activity_max_rows`) | Keep at most N activity-log rows (default `50000`; `0` disables the row cap) |
+| Storage & diagnostics | **Refresh storage health** (`GET /api/storage/health`: Calibre mount, data/downloads writability + free space, DB/WAL sizes, row counts), **Run network diagnostics** (`GET /api/diagnostics/network`: AniList/Kitsu/Nyaa/J-Novels reachability + latency, copyable JSON), **Download database backup** (`GET /api/maintenance/backup`: consistent SQLite snapshot; keep the app behind an authenticating reverse proxy) and **Optimize database** (`POST /api/maintenance/database/vacuum`: `integrity_check` + `VACUUM` + `ANALYZE`, reports before/after sizes) |
+| Series identity & overrides | Per-series identity reset, the global alias-override list/delete (`GET /api/series/aliases`, `DELETE /api/series/aliases/{override_id}`) and the read-only **Attribution audit** (`GET /api/maintenance/series-attribution`) with direct Re-bind actions |
+| Unsaved changes | Any change inside the settings form shows an "Unsaved changes" badge and warns before leaving the page; a successful save clears it |
 | Download engine | `qBittorrent` or `TorBox`; dispatch engine for every release Download action |
 | TorBox API key | API key from [torbox.app](https://torbox.app); a saved key is masked and a blank field keeps it |
 | TorBox engine settings | Enable engine, delete-after-download, strict selective volume fetch, delete-on-failure, parallel file downloads, parallel chunks, max download size, poll floor, max concurrent downloads, timeout hours, local downloads folder |
 | Discord webhook URL | Optional rich-embed notifications, with a live test button |
 | Generic webhook / Apprise endpoint | Optional JSON event notifications (Gotify, Ntfy, Home Assistant, Apprise), with a live test button |
-| Maintenance tools | Clear descriptions, clear discovered series, clear image cache, purge PDF releases |
+| Webhook event toggles (`webhook_new_request_notifications`, `webhook_acquired_notifications`) | Both default `true`. Uncheck one to mute only that event (new request or acquired into Calibre) while keeping the endpoints and test buttons working |
+| Logs page timestamps | The Logs page renders each timestamp in the configured timezone through the `localtime` Jinja filter; hover a timestamp to see the raw UTC value |
+| Maintenance tools | Clear descriptions, clear discovered series, clear image cache, **Clear Metadata Cache** (AniList/Kitsu synopses, covers and titles — rebuilt on demand; releases/settings untouched), purge PDF releases |
 
 ### qBittorrent downloader settings (Downloads tab)
 
@@ -400,6 +418,10 @@ The second download engine is configured from the **Settings** tab (a "Test TorB
 | `downloads_dir` | `DOWNLOAD_DIR` or `/downloads` | Absolute local folder the engine writes fetched files into; must be writable |
 
 **Torrent releases only.** TorBox accepts Nyaa magnets and `.torrent` URLs, which it fetches on its own servers. Releases whose link is a direct web page (J-Novels, J-Novel Club, NovelUpdates) are rejected by the server with an explanatory message and logged as `TORBOX_SKIPPED`, because Cloudflare Turnstile blocks cloud fetching of those pages. The UI repeats this limitation next to the engine selector.
+
+### Deferred settings features (not in this change)
+
+The MangaTrax settings recon also catalogued options this change deliberately leaves out and documents as follow-ups: rotating file logs (`log_to_file` / `log_file_max_mb` / `log_file_backups` — Docker already handles container log rotation), environment gating of the destructive debug actions (kept for backward compatibility), scoped release/discovery purges, a configurable Nyaa base URL, and authentication modes (NovelTrax remains a single-user app behind an authenticating reverse proxy). No log-file rotation, authentication or scoped purge is added by this change.
 
 ### Prioritized release groups
 

@@ -6,10 +6,15 @@
 <div class="max-w-4xl space-y-8">
 
     <div>
-        <h1 class="text-2xl font-black text-white flex items-center gap-2.5">
-            <i data-lucide="settings" class="w-6 h-6 text-brand-400"></i>
-            System Settings & Integration
-        </h1>
+        <div class="flex items-center gap-2.5 flex-wrap">
+            <h1 class="text-2xl font-black text-white flex items-center gap-2.5">
+                <i data-lucide="settings" class="w-6 h-6 text-brand-400"></i>
+                System Settings & Integration
+            </h1>
+            <span id="settings-dirty-badge" class="hidden px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/15 text-amber-300 border border-amber-500/30">
+                Unsaved changes
+            </span>
+        </div>
         <p class="text-xs text-slate-400 mt-1">
             Configure your Calibre library connection, polling intervals, and notification webhooks.
         </p>
@@ -29,7 +34,7 @@
     </div>
 
     <!-- Settings Form -->
-    <form onsubmit="saveSettings(event)" class="bg-slate-900/90 border border-slate-800 rounded-2xl p-6 space-y-6 shadow-xl">
+    <form id="settings-form" onsubmit="saveSettings(event)" class="bg-slate-900/90 border border-slate-800 rounded-2xl p-6 space-y-6 shadow-xl">
         
         <!-- Section: Calibre Library -->
         <div>
@@ -141,6 +146,67 @@
                             <p class="text-[11px] text-slate-500">When enabled, unofficial web novel and fan translation releases (such as unlicenced volumes beyond official publishing) will be automatically ignored and excluded from wanted volume coverage.</p>
                         </div>
                     </label>
+                </div>
+            </div>
+        </div>
+
+        <!-- Section: Display & Logging -->
+        <div>
+            <h3 class="text-sm font-bold uppercase tracking-wider text-slate-300 border-b border-slate-800 pb-2 mb-4 flex items-center gap-2">
+                <i data-lucide="terminal" class="w-4 h-4 text-brand-400"></i>
+                Display &amp; Logging
+            </h3>
+
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                    <label for="setting-timezone" class="block text-xs font-semibold text-slate-300 mb-1">Timezone</label>
+                    <input type="text" id="setting-timezone" list="timezone-suggestions" value="{{ settings.app_timezone or '' }}" placeholder="Europe/Copenhagen" autocomplete="off" class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white font-mono focus:outline-none focus:border-brand-500">
+                    <datalist id="timezone-suggestions">
+                        <option value="Europe/Copenhagen"></option>
+                        <option value="Europe/London"></option>
+                        <option value="America/New_York"></option>
+                        <option value="America/Los_Angeles"></option>
+                        <option value="Asia/Tokyo"></option>
+                        <option value="UTC"></option>
+                    </datalist>
+                    <p class="text-[11px] text-slate-500 mt-1">IANA timezone name used for local timestamps. Leave empty to follow the container <code class="font-mono text-slate-400">TZ</code>.</p>
+                </div>
+
+                <div>
+                    {% set current_log_level = (settings.log_level or 'INFO')|upper %}
+                    <label for="setting-log-level" class="block text-xs font-semibold text-slate-300 mb-1">Log level</label>
+                    <select id="setting-log-level" class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-brand-500">
+                        <option value="DEBUG" {% if current_log_level == 'DEBUG' %}selected{% endif %}>DEBUG</option>
+                        <option value="INFO" {% if current_log_level == 'INFO' %}selected{% endif %}>INFO</option>
+                        <option value="WARNING" {% if current_log_level == 'WARNING' %}selected{% endif %}>WARNING</option>
+                        <option value="ERROR" {% if current_log_level == 'ERROR' %}selected{% endif %}>ERROR</option>
+                    </select>
+                    <p class="text-[11px] text-slate-500 mt-1">Root log level. A restart is required for the new level to take effect.</p>
+                </div>
+
+                <div>
+                    {% set activity_retention_value = settings.activity_retention_days if settings.activity_retention_days is defined and settings.activity_retention_days is not none else '90' %}
+                    <label for="setting-activity-retention" class="block text-xs font-semibold text-slate-300 mb-1">Activity log retention (days)</label>
+                    <input type="number" id="setting-activity-retention" min="0" max="3650" step="1" value="{{ activity_retention_value }}" class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-brand-500">
+                    <p class="text-[11px] text-slate-500 mt-1">Prune activity-log rows older than this many days. <strong>0 disables</strong> the age rule.</p>
+                </div>
+
+                <div>
+                    {% set activity_max_rows_value = settings.activity_max_rows if settings.activity_max_rows is defined and settings.activity_max_rows is not none else '50000' %}
+                    <label for="setting-activity-max-rows" class="block text-xs font-semibold text-slate-300 mb-1">Activity log max rows</label>
+                    <input type="number" id="setting-activity-max-rows" min="0" max="1000000" step="1" value="{{ activity_max_rows_value }}" class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-brand-500">
+                    <p class="text-[11px] text-slate-500 mt-1">Keep at most this many activity-log rows. <strong>0 disables</strong> the row cap.</p>
+                </div>
+
+                <div class="sm:col-span-2 pt-3 border-t border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                    <p class="text-[11px] text-slate-500">Activity logs are pruned automatically every 6 hours using these limits.</p>
+                    <div class="flex items-center gap-2">
+                        <button type="button" onclick="pruneActivityLogs()" id="btn-prune-logs" class="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-[11px] font-semibold flex items-center gap-1.5 transition-colors">
+                            <i data-lucide="eraser" class="w-3.5 h-3.5 text-amber-400"></i>
+                            Prune activity logs now
+                        </button>
+                        <span id="activity-prune-result" class="text-[11px] text-slate-400 font-mono"></span>
+                    </div>
                 </div>
             </div>
         </div>
@@ -318,6 +384,24 @@
                     <p class="text-[11px] text-slate-500 mt-1">Sends JSON event payloads for Gotify, Ntfy, Home Assistant, or Apprise.</p>
                 </div>
 
+                <div class="pt-3 border-t border-slate-800 space-y-2.5">
+                    <label class="flex items-start gap-3 cursor-pointer">
+                        <input type="checkbox" id="setting-webhook-new-request" {% if settings.webhook_new_request_notifications != 'false' %}checked{% endif %} class="mt-0.5 w-4 h-4 rounded bg-slate-950 border-slate-700 text-brand-600 focus:ring-0">
+                        <span class="min-w-0">
+                            <span class="block text-xs font-semibold text-slate-200">New-request notifications</span>
+                            <span class="block text-[11px] text-slate-500">Send a webhook when a new release is detected and requested. Disable to mute only this event.</span>
+                        </span>
+                    </label>
+                    <label class="flex items-start gap-3 cursor-pointer">
+                        <input type="checkbox" id="setting-webhook-acquired" {% if settings.webhook_acquired_notifications != 'false' %}checked{% endif %} class="mt-0.5 w-4 h-4 rounded bg-slate-950 border-slate-700 text-brand-600 focus:ring-0">
+                        <span class="min-w-0">
+                            <span class="block text-xs font-semibold text-slate-200">Acquired notifications</span>
+                            <span class="block text-[11px] text-slate-500">Send a webhook when a requested release is found in Calibre and marked acquired. Disable to mute only this event.</span>
+                        </span>
+                    </label>
+                    <p class="text-[11px] text-slate-500">Both webhook events are enabled by default; the test buttons above still send on demand.</p>
+                </div>
+
                 <div id="webhook-test-result" class="hidden p-3 rounded-xl text-xs font-mono"></div>
             </div>
         </div>
@@ -328,6 +412,142 @@
             </button>
         </div>
     </form>
+
+    <!-- Series Identity & Overrides (per-series reset) -->
+    <div class="bg-slate-900/90 border border-slate-800 rounded-2xl p-6 space-y-4 shadow-xl">
+        <div class="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
+            <div class="min-w-0">
+                <h3 class="text-sm font-bold uppercase tracking-wider text-slate-300 border-b border-slate-800 pb-2 flex items-center gap-2">
+                    <i data-lucide="git-branch" class="w-4 h-4 text-cyan-400"></i>
+                    Series identity &amp; overrides
+                </h3>
+                <p class="text-xs text-slate-400 mt-2 leading-relaxed">
+                    Reset forgets manual/learned aliases, AniList display data, manual locks and per-release pins for this series, then lets automatic matching take over again. Release titles are not changed.
+                </p>
+            </div>
+            <button type="button" onclick="loadSeriesIdentityOverview(document.getElementById('series-identity-search').value)" id="series-identity-refresh" class="px-3.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-slate-200 flex items-center gap-1.5 transition-colors flex-shrink-0">
+                <i data-lucide="refresh-cw" class="w-3.5 h-3.5 text-cyan-400"></i>
+                Refresh
+            </button>
+        </div>
+
+        <div>
+            <label for="series-identity-search" class="block text-xs font-semibold text-slate-300 mb-1">Search tracked series</label>
+            <input type="text" id="series-identity-search" autocomplete="off" placeholder="Search by series name, display title or author..." oninput="debounceSeriesIdentitySearch()" class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-brand-500">
+            <p class="text-[11px] text-slate-500 mt-1">Resets are per series. A global destructive reset is intentionally not offered.</p>
+        </div>
+
+        <div id="series-identity-results" class="space-y-2">
+            <p class="text-xs text-slate-500">Loading series identity overview...</p>
+        </div>
+
+        <!-- Global alias overrides -->
+        <div class="pt-4 border-t border-slate-800 space-y-2">
+            <div class="flex items-center justify-between gap-2">
+                <h4 class="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-2">
+                    <i data-lucide="tags" class="w-3.5 h-3.5 text-amber-400"></i>
+                    Global alias overrides
+                </h4>
+                <button type="button" onclick="loadSeriesAliasOverrides()" id="btn-refresh-series-aliases" class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-[11px] font-semibold flex items-center gap-1.5 transition-colors">
+                    <i data-lucide="refresh-cw" class="w-3 h-3 w-3 text-amber-400"></i>
+                    Refresh aliases
+                </button>
+            </div>
+            <p class="text-[11px] text-slate-500">
+                Manual and learned title mappings applied to every release. Deleting one lets automatic matching resolve that title spelling again.
+            </p>
+            <div id="series-alias-list" class="space-y-1.5">
+                <p class="text-xs text-slate-500">Loading alias overrides...</p>
+            </div>
+        </div>
+
+        <!-- Attribution audit -->
+        <div class="pt-4 border-t border-slate-800 space-y-2">
+            <div class="flex items-center justify-between gap-2">
+                <h4 class="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-2">
+                    <i data-lucide="search-check" class="w-3.5 h-3.5 text-emerald-400"></i>
+                    Attribution audit
+                </h4>
+                <button type="button" onclick="runSeriesAttributionAudit()" id="btn-series-attribution-audit" class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-[11px] font-semibold flex items-center gap-1.5 transition-colors">
+                    <i data-lucide="play" class="w-3 h-3 text-emerald-400"></i>
+                    Run attribution audit
+                </button>
+            </div>
+            <p class="text-[11px] text-slate-500">
+                Finds releases whose stored series no longer matches what automatic parsing suggests (read-only). Re-bind one directly from a row.
+            </p>
+            <div id="series-attribution-result" class="space-y-1.5"></div>
+        </div>
+    </div>
+
+    <!-- Storage & Diagnostics -->
+    <div class="bg-slate-900/90 border border-slate-800 rounded-2xl p-6 space-y-4 shadow-xl">
+        <div>
+            <h3 class="text-sm font-bold uppercase tracking-wider text-slate-300 border-b border-slate-800 pb-2 mb-2 flex items-center gap-2">
+                <i data-lucide="hard-drive" class="w-4 h-4 text-cyan-400"></i>
+                Storage &amp; Diagnostics
+            </h3>
+            <p class="text-xs text-slate-400">
+                Health checks for the Calibre mount, writable data/download folders and the SQLite database, provider reachability, a database backup download and a safe VACUUM.
+            </p>
+        </div>
+
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <div class="bg-slate-950/60 border border-slate-800 rounded-xl p-4 space-y-2">
+                <div class="flex items-center justify-between gap-2">
+                    <h4 class="text-xs font-bold text-white flex items-center gap-1.5">
+                        <i data-lucide="database" class="w-4 h-4 text-cyan-400"></i>
+                        Storage health
+                    </h4>
+                    <button type="button" onclick="loadStorageHealth()" id="btn-storage-health" class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-[11px] font-semibold flex items-center gap-1.5 transition-colors">
+                        <i data-lucide="refresh-cw" class="w-3 h-3 text-cyan-400"></i>
+                        Refresh storage health
+                    </button>
+                </div>
+                <div id="storage-health-result" class="space-y-1 text-[11px] text-slate-400">
+                    <p class="text-slate-500">Click "Refresh storage health" to run the checks.</p>
+                </div>
+            </div>
+
+            <div class="bg-slate-950/60 border border-slate-800 rounded-xl p-4 space-y-2">
+                <div class="flex items-center justify-between gap-2">
+                    <h4 class="text-xs font-bold text-white flex items-center gap-1.5">
+                        <i data-lucide="wifi" class="w-4 h-4 text-brand-400"></i>
+                        Network diagnostics
+                    </h4>
+                    <div class="flex items-center gap-1.5">
+                        <button type="button" onclick="runNetworkDiagnostics()" id="btn-network-diagnostics" class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-[11px] font-semibold flex items-center gap-1.5 transition-colors">
+                            <i data-lucide="activity" class="w-3 h-3 text-brand-400"></i>
+                            Run network diagnostics
+                        </button>
+                        <button type="button" onclick="copyNetworkDiagnostics()" id="btn-copy-diagnostics" class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-[11px] font-semibold flex items-center gap-1.5 transition-colors">
+                            <i data-lucide="copy" class="w-3 h-3 text-slate-300"></i>
+                            Copy JSON
+                        </button>
+                    </div>
+                </div>
+                <div id="network-diagnostics-result" class="space-y-1 text-[11px] text-slate-400">
+                    <p class="text-slate-500">Checks AniList, Kitsu, Nyaa and J-Novels reachability (max 5 s each).</p>
+                </div>
+            </div>
+        </div>
+
+        <div class="pt-3 border-t border-slate-800 grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div class="flex flex-col sm:flex-row sm:items-center gap-2.5">
+                <button type="button" onclick="downloadDatabaseBackup()" id="btn-download-backup" class="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors">
+                    <i data-lucide="download" class="w-3.5 h-3.5 text-cyan-400"></i>
+                    Download database backup
+                </button>
+                <button type="button" onclick="vacuumDatabase()" id="btn-vacuum-db" class="px-3 py-2 rounded-xl bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/30 text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors">
+                    <i data-lucide="wand-2" class="w-3.5 h-3.5"></i>
+                    Optimize database
+                </button>
+            </div>
+            <div id="database-maintenance-result" class="text-[11px] text-slate-400 font-mono break-words-anywhere">
+                <p class="text-slate-500 font-sans">A backup is a consistent SQLite snapshot (keep the app behind an authenticating reverse proxy). Optimize runs integrity_check, VACUUM and ANALYZE.</p>
+            </div>
+        </div>
+    </div>
 
     <!-- Maintenance & Debug Tools -->
     <div class="bg-slate-900/90 border border-slate-800 rounded-2xl p-6 space-y-4 shadow-xl">
@@ -407,6 +627,23 @@
                 <button type="button" onclick="debugAction('purge-pdf')" id="btn-purge-pdf" class="mt-4 w-full px-3 py-2 rounded-xl bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors active:scale-95">
                     <i data-lucide="shield-alert" class="w-3.5 h-3.5"></i>
                     <span>Purge PDF Releases</span>
+                </button>
+            </div>
+
+            <!-- Clear Metadata Cache -->
+            <div class="bg-slate-950/60 border border-slate-800 rounded-xl p-4 flex flex-col justify-between">
+                <div>
+                    <h4 class="text-xs font-bold text-white flex items-center gap-1.5">
+                        <i data-lucide="database" class="w-4 h-4 text-cyan-400"></i>
+                        Clear Metadata Cache
+                    </h4>
+                    <p class="text-[11px] text-slate-400 mt-1.5 leading-relaxed">
+                        Clears the cached AniList/Kitsu synopsis, cover and title metadata. Data is re-fetched on demand; releases, requests and settings are untouched.
+                    </p>
+                </div>
+                <button type="button" onclick="debugAction('clear-metadata')" id="btn-clear-metadata" class="mt-4 w-full px-3 py-2 rounded-xl bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors active:scale-95">
+                    <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
+                    <span>Clear Metadata Cache</span>
                 </button>
             </div>
         </div>
@@ -550,6 +787,8 @@
             feed_catchup_max_pages: document.getElementById('setting-feed-catchup-pages').value,
             discord_webhook_url: document.getElementById('setting-discord-url').value,
             apprise_url: document.getElementById('setting-apprise-url').value,
+            webhook_new_request_notifications: document.getElementById('setting-webhook-new-request').checked ? 'true' : 'false',
+            webhook_acquired_notifications: document.getElementById('setting-webhook-acquired').checked ? 'true' : 'false',
             downloader_engine: document.getElementById('setting-downloader-engine').value,
             torbox_enabled: document.getElementById('setting-torbox-enabled').checked ? 'true' : 'false',
             torbox_api_key: document.getElementById('setting-torbox-api-key').value,
@@ -562,7 +801,11 @@
             torbox_poll_seconds: document.getElementById('setting-torbox-poll-seconds').value,
             torbox_max_concurrent: document.getElementById('setting-torbox-max-concurrent').value,
             torbox_timeout_hours: document.getElementById('setting-torbox-timeout-hours').value,
-            downloads_dir: document.getElementById('setting-downloads-dir').value.trim()
+            downloads_dir: document.getElementById('setting-downloads-dir').value.trim(),
+            app_timezone: document.getElementById('setting-timezone').value.trim(),
+            log_level: document.getElementById('setting-log-level').value,
+            activity_retention_days: document.getElementById('setting-activity-retention').value,
+            activity_max_rows: document.getElementById('setting-activity-max-rows').value
         };
 
         try {
@@ -573,6 +816,7 @@
             });
             const data = await res.json();
             if (data.status === 'success') {
+                _clearSettingsDirty();
                 showToast('Settings saved successfully!');
             } else {
                 showToast(`Failed to save settings: ${data.message}`, 'error');
@@ -611,6 +855,8 @@
             msg = 'Are you sure you want to purge the cached cover image thumbnails from disk?\n\nImages will be safely re-downloaded when viewed.';
         } else if (action === 'purge-pdf') {
             msg = 'Are you sure you want to purge all PDF releases from the database? NovelTrax is dedicated to digital novel EPUBs only.';
+        } else if (action === 'clear-metadata') {
+            msg = 'Are you sure you want to clear the cached AniList/Kitsu metadata (synopses, covers and titles)?\n\nThe cache is rebuilt on demand; releases, requests and settings are untouched.';
         }
 
         if (!confirm(msg)) return;
@@ -631,5 +877,499 @@
             showToast(`Error: ${err}`, 'error');
         }
     }
+    // ------------------------------------------------------------------
+    // Series identity & overrides (per-series reset, aliases, attribution)
+    // ------------------------------------------------------------------
+    let _seriesIdentitySearchTimer = null;
+
+    function _identityBadge(text, classes) {
+        const badge = document.createElement('span');
+        badge.className = classes;
+        badge.textContent = String(text);
+        return badge;
+    }
+
+    function _identityMessage(container, text, classes) {
+        if (!container) return;
+        container.textContent = '';
+        const message = document.createElement('p');
+        message.className = classes || 'text-xs text-slate-500';
+        message.textContent = String(text);
+        container.appendChild(message);
+    }
+
+    function _seriesIdentityCurrentQuery() {
+        const input = document.getElementById('series-identity-search');
+        return input ? String(input.value || '').trim() : '';
+    }
+
+    async function loadSeriesIdentityOverview(query) {
+        const box = document.getElementById('series-identity-results');
+        if (!box) return;
+        const term = String(query === undefined ? _seriesIdentityCurrentQuery() : query || '').trim();
+        try {
+            const res = await fetch(`/api/series/identity?search=${encodeURIComponent(term)}&limit=100`);
+            const data = await res.json();
+            if (res.ok && data && data.status === 'success') {
+                renderSeriesIdentityResults(data.series || []);
+            } else {
+                _identityMessage(box, (data && (data.detail || data.message)) || 'Could not load the series identity overview.', 'text-xs text-rose-300');
+            }
+        } catch (err) {
+            _identityMessage(box, 'Could not load the series identity overview: ' + err, 'text-xs text-rose-300');
+        }
+    }
+
+    function renderSeriesIdentityResults(rows) {
+        const box = document.getElementById('series-identity-results');
+        if (!box) return;
+        box.textContent = '';
+        const list = Array.isArray(rows) ? rows : [];
+        if (list.length === 0) {
+            _identityMessage(box, 'No tracked series match this search.');
+            return;
+        }
+        list.forEach(function (row) {
+            const seriesId = Number(row.series_id || row.id) || 0;
+            const name = String(row.name || '');
+            const display = String(row.display_title || '');
+            const card = document.createElement('div');
+            card.className = 'p-3 rounded-xl border border-slate-800 bg-slate-950/60 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5';
+
+            const info = document.createElement('div');
+            info.className = 'min-w-0';
+            const title = document.createElement('p');
+            title.className = 'text-xs font-bold text-white break-words-anywhere';
+            title.textContent = display || name || ('Series #' + seriesId);
+            info.appendChild(title);
+            if (display && display !== name && name) {
+                const tracks = document.createElement('p');
+                tracks.className = 'text-[11px] text-slate-400 mt-0.5 break-words-anywhere';
+                tracks.textContent = 'Tracks: ' + name;
+                info.appendChild(tracks);
+            }
+            const badges = document.createElement('div');
+            badges.className = 'flex flex-wrap items-center gap-1.5 mt-1.5';
+            if (row.calibre_series_id) {
+                badges.appendChild(_identityBadge('Calibre #' + row.calibre_series_id, 'px-1.5 py-0.5 rounded text-[10px] font-semibold bg-cyan-500/10 text-cyan-300 border border-cyan-500/20'));
+            } else {
+                badges.appendChild(_identityBadge('Tracked', 'px-1.5 py-0.5 rounded text-[10px] font-semibold bg-slate-800 text-slate-300 border border-slate-700'));
+            }
+            if (row.identity_locked) {
+                badges.appendChild(_identityBadge('Locked', 'px-1.5 py-0.5 rounded text-[10px] font-semibold bg-rose-500/10 text-rose-300 border border-rose-500/20'));
+            }
+            const aliasesCount = Number(row.aliases_count || 0);
+            badges.appendChild(_identityBadge(aliasesCount + ' alias' + (aliasesCount === 1 ? '' : 'es'), 'px-1.5 py-0.5 rounded text-[10px] font-semibold bg-slate-800 text-slate-300 border border-slate-700'));
+            const pinnedCount = Number(row.pinned_releases || 0);
+            badges.appendChild(_identityBadge(pinnedCount + ' pinned', 'px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-500/10 text-amber-300 border border-amber-500/20'));
+            if (row.releases_count) {
+                badges.appendChild(_identityBadge(Number(row.releases_count) + ' release(s)', 'px-1.5 py-0.5 rounded text-[10px] font-semibold bg-slate-800 text-slate-400 border border-slate-700'));
+            }
+            info.appendChild(badges);
+            card.appendChild(info);
+
+            const resetBtn = document.createElement('button');
+            resetBtn.type = 'button';
+            resetBtn.className = 'series-identity-reset-btn px-2.5 py-1.5 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 border border-rose-500/30 text-[11px] font-semibold flex items-center justify-center gap-1.5 transition-colors flex-shrink-0';
+            resetBtn.setAttribute('data-series-id', String(seriesId));
+            resetBtn.setAttribute('data-series-name', name);
+            resetBtn.textContent = 'Reset identity';
+            resetBtn.addEventListener('click', function () {
+                resetSeriesIdentity(seriesId, name);
+            });
+            card.appendChild(resetBtn);
+            box.appendChild(card);
+        });
+    }
+
+    function debounceSeriesIdentitySearch() {
+        clearTimeout(_seriesIdentitySearchTimer);
+        _seriesIdentitySearchTimer = setTimeout(function () {
+            loadSeriesIdentityOverview(_seriesIdentityCurrentQuery());
+        }, 250);
+    }
+
+    async function resetSeriesIdentity(seriesId, seriesName) {
+        const id = Number(seriesId) || 0;
+        if (!id) return;
+        const label = seriesName || ('series #' + id);
+        if (!confirm('Reset the identity state for "' + label + '"?\n\nThis forgets manual/learned aliases, AniList display data, manual locks and per-release pins for this series, then lets automatic matching take over again. Release titles are not changed.')) return;
+        try {
+            const res = await fetch(`/api/series/${id}/reset-identity`, { method: 'POST' });
+            const data = await res.json();
+            if (res.ok && data && data.status === 'success') {
+                const summary = (data.aliases_removed || 0) + ' alias(es) removed, ' + (data.releases_unpinned || 0) + ' release(s) unpinned';
+                showToast('Identity reset for "' + label + '": ' + summary + '.', 'success');
+                loadSeriesIdentityOverview(_seriesIdentityCurrentQuery());
+                loadSeriesAliasOverrides();
+            } else {
+                showToast((data && (data.message || data.detail)) || 'Could not reset the series identity', 'error');
+            }
+        } catch (err) {
+            showToast('Error resetting series identity: ' + err, 'error');
+        }
+    }
+
+    async function loadSeriesAliasOverrides() {
+        const box = document.getElementById('series-alias-list');
+        if (!box) return;
+        try {
+            const res = await fetch('/api/series/aliases');
+            const data = await res.json();
+            const aliases = (data && (data.aliases || data.overrides)) || [];
+            box.textContent = '';
+            if (!Array.isArray(aliases) || aliases.length === 0) {
+                _identityMessage(box, 'No global alias overrides are stored.');
+                return;
+            }
+            aliases.forEach(function (alias) {
+                const overrideId = Number(alias.id || alias.override_id) || 0;
+                const source = String(alias.source_name || alias.source || '');
+                const target = String(alias.target_name || alias.target || '');
+                const row = document.createElement('div');
+                row.className = 'p-2 rounded-xl border border-slate-800 bg-slate-950/60 flex flex-col sm:flex-row sm:items-center justify-between gap-2';
+                const mapping = document.createElement('p');
+                mapping.className = 'text-[11px] text-slate-300 break-words-anywhere';
+                mapping.textContent = (source || '(unknown)') + '  →  ' + (target || '(unknown)');
+                const meta = document.createElement('p');
+                meta.className = 'text-[10px] text-slate-500';
+                meta.textContent = (alias.origin || alias.match_source || alias.source_type || 'manual') + (alias.created_at ? ' · ' + alias.created_at : '');
+                const textWrap = document.createElement('div');
+                textWrap.className = 'min-w-0';
+                textWrap.appendChild(mapping);
+                textWrap.appendChild(meta);
+                row.appendChild(textWrap);
+
+                const deleteBtn = document.createElement('button');
+                deleteBtn.type = 'button';
+                deleteBtn.className = 'series-alias-delete-btn px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-rose-500/20 text-rose-300 border border-slate-700 text-[11px] font-semibold flex items-center justify-center gap-1.5 transition-colors flex-shrink-0';
+                deleteBtn.setAttribute('data-override-id', String(overrideId));
+                deleteBtn.textContent = 'Delete alias';
+                deleteBtn.addEventListener('click', function () {
+                    deleteSeriesAlias(overrideId);
+                });
+                row.appendChild(deleteBtn);
+                box.appendChild(row);
+            });
+        } catch (err) {
+            _identityMessage(box, 'Could not load alias overrides: ' + err, 'text-xs text-rose-300');
+        }
+    }
+
+    async function deleteSeriesAlias(overrideId) {
+        const id = Number(overrideId) || 0;
+        if (!id) return;
+        if (!confirm('Delete this alias override? Releases with that title spelling will be matched automatically again.')) return;
+        try {
+            const res = await fetch(`/api/series/aliases/${id}`, { method: 'DELETE' });
+            const data = await res.json();
+            if (res.ok && data && data.status === 'success') {
+                showToast('Alias override deleted.', 'success');
+                loadSeriesAliasOverrides();
+                loadSeriesIdentityOverview(_seriesIdentityCurrentQuery());
+            } else {
+                showToast((data && (data.message || data.detail)) || 'Could not delete the alias override', 'error');
+            }
+        } catch (err) {
+            showToast('Error deleting alias override: ' + err, 'error');
+        }
+    }
+
+    async function runSeriesAttributionAudit() {
+        const box = document.getElementById('series-attribution-result');
+        const btn = document.getElementById('btn-series-attribution-audit');
+        if (btn) btn.disabled = true;
+        try {
+            const res = await fetch('/api/maintenance/series-attribution?limit=200');
+            const data = await res.json();
+            const items = (data && data.items) || [];
+            if (box) {
+                box.textContent = '';
+                if (!items.length) {
+                    _identityMessage(box, 'No attribution drift found: stored series match the automatic parse.');
+                }
+                items.forEach(function (item) {
+                    const row = document.createElement('div');
+                    row.className = 'p-2 rounded-xl border border-slate-800 bg-slate-950/60 flex flex-col sm:flex-row sm:items-center justify-between gap-2';
+                    const info = document.createElement('div');
+                    info.className = 'min-w-0';
+                    const title = document.createElement('p');
+                    title.className = 'text-[11px] font-semibold text-white break-words-anywhere';
+                    title.textContent = String(item.title || 'Release #' + (item.release_id || ''));
+                    const detail = document.createElement('p');
+                    detail.className = 'text-[10px] text-slate-400 mt-0.5 break-words-anywhere';
+                    detail.textContent = 'Stored: ' + String(item.series_name || '(none)') + ' · Suggested: ' + String(item.suggested_series || '(none)');
+                    info.appendChild(title);
+                    info.appendChild(detail);
+                    row.appendChild(info);
+
+                    const bindBtn = document.createElement('button');
+                    bindBtn.type = 'button';
+                    bindBtn.className = 'px-2.5 py-1 rounded-lg bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-300 border border-cyan-500/20 text-[11px] font-semibold flex items-center justify-center gap-1.5 transition-colors flex-shrink-0';
+                    bindBtn.textContent = 'Re-bind';
+                    bindBtn.addEventListener('click', function () {
+                        openReleaseRebindModal({
+                            releaseId: item.release_id,
+                            releaseTitle: item.title,
+                            seriesName: item.series_name
+                        });
+                    });
+                    row.appendChild(bindBtn);
+                    box.appendChild(row);
+                });
+            }
+            const checked = Number((data && data.checked) || 0);
+            const flagged = Number((data && data.count) || items.length);
+            showToast('Attribution audit: ' + checked + ' release(s) checked, ' + flagged + ' flagged.', 'info');
+        } catch (err) {
+            _identityMessage(box, 'Attribution audit failed: ' + err, 'text-xs text-rose-300');
+        } finally {
+            if (btn) btn.disabled = false;
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Display & logging helpers
+    // ------------------------------------------------------------------
+    async function pruneActivityLogs() {
+        const btn = document.getElementById('btn-prune-logs');
+        const out = document.getElementById('activity-prune-result');
+        if (btn) btn.disabled = true;
+        try {
+            const res = await fetch('/api/maintenance/logs/prune', { method: 'POST' });
+            const data = await res.json();
+            if (res.ok && data && data.status === 'success') {
+                const summary = 'Removed ' + (data.removed || 0) + ' row(s); ' + (data.remaining || 0) + ' remain.';
+                if (out) out.textContent = summary;
+                showToast('Activity logs pruned: ' + summary, 'success');
+            } else {
+                const message = (data && (data.message || data.detail)) || 'Could not prune activity logs';
+                if (out) out.textContent = message;
+                showToast(message, 'error');
+            }
+        } catch (err) {
+            if (out) out.textContent = 'Error: ' + err;
+            showToast('Error pruning activity logs: ' + err, 'error');
+        } finally {
+            if (btn) btn.disabled = false;
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Storage & diagnostics
+    // ------------------------------------------------------------------
+    function _diagnosticsLine(label, value) {
+        const row = document.createElement('p');
+        row.className = 'flex items-start justify-between gap-2';
+        const keyEl = document.createElement('span');
+        keyEl.className = 'text-slate-500';
+        keyEl.textContent = String(label);
+        const valueEl = document.createElement('span');
+        valueEl.className = 'text-slate-200 text-right break-words-anywhere';
+        let text;
+        if (value === null || value === undefined) {
+            text = '—';
+        } else if (typeof value === 'object') {
+            try {
+                text = JSON.stringify(value);
+            } catch (err) {
+                text = String(value);
+            }
+        } else {
+            text = String(value);
+        }
+        if (text.length > 300) text = text.slice(0, 297) + '...';
+        valueEl.textContent = text;
+        row.appendChild(keyEl);
+        row.appendChild(valueEl);
+        return row;
+    }
+
+    function _renderDiagnosticsPayload(containerId, payload) {
+        const box = document.getElementById(containerId);
+        if (!box) return;
+        box.textContent = '';
+        if (!payload || typeof payload !== 'object') {
+            _identityMessage(box, 'No diagnostics data returned.', 'text-xs text-slate-500');
+            return;
+        }
+        Object.keys(payload).forEach(function (key) {
+            if (key === 'status' || key === 'checked_at') return;
+            const value = payload[key];
+            if (value && typeof value === 'object' && !Array.isArray(value)) {
+                Object.keys(value).forEach(function (subKey) {
+                    box.appendChild(_diagnosticsLine(key + '.' + subKey, value[subKey]));
+                });
+            } else {
+                box.appendChild(_diagnosticsLine(key, value));
+            }
+        });
+        if (box.childElementCount === 0) {
+            _identityMessage(box, 'No diagnostics data returned.', 'text-xs text-slate-500');
+        }
+    }
+
+    async function loadStorageHealth() {
+        const btn = document.getElementById('btn-storage-health');
+        const box = document.getElementById('storage-health-result');
+        if (btn) btn.disabled = true;
+        try {
+            const res = await fetch('/api/storage/health');
+            const data = await res.json();
+            _renderDiagnosticsPayload('storage-health-result', data);
+            if (!res.ok) {
+                _identityMessage(box, (data && (data.detail || data.message)) || 'Storage health check failed.', 'text-xs text-rose-300');
+            }
+        } catch (err) {
+            _identityMessage(box, 'Storage health check failed: ' + err, 'text-xs text-rose-300');
+        } finally {
+            if (btn) btn.disabled = false;
+        }
+    }
+
+    let _networkDiagnosticsPayload = null;
+
+    async function runNetworkDiagnostics() {
+        const btn = document.getElementById('btn-network-diagnostics');
+        const box = document.getElementById('network-diagnostics-result');
+        if (btn) btn.disabled = true;
+        try {
+            const res = await fetch('/api/diagnostics/network');
+            const data = await res.json();
+            _networkDiagnosticsPayload = data;
+            if (box) {
+                box.textContent = '';
+                const results = (data && data.results) || [];
+                if (!results.length) {
+                    _identityMessage(box, 'No provider diagnostics were returned.', 'text-xs text-slate-500');
+                }
+                results.forEach(function (item) {
+                    const row = document.createElement('div');
+                    row.className = 'flex items-center justify-between gap-2';
+                    const nameEl = document.createElement('span');
+                    nameEl.className = 'text-slate-300';
+                    nameEl.textContent = String(item.name || item.url || 'provider');
+                    const resultEl = document.createElement('span');
+                    const ok = !!item.ok;
+                    resultEl.className = ok ? 'text-emerald-300 font-semibold' : 'text-rose-300 font-semibold';
+                    let resultText = ok ? 'OK' : 'FAIL';
+                    if (item.status_code !== undefined && item.status_code !== null) resultText = resultText + ' · HTTP ' + item.status_code;
+                    if (item.latency_ms !== undefined && item.latency_ms !== null) resultText = resultText + ' · ' + item.latency_ms + ' ms';
+                    if (!ok && item.error) resultText = resultText + ' · ' + item.error;
+                    resultEl.textContent = resultText;
+                    row.appendChild(nameEl);
+                    row.appendChild(resultEl);
+                    box.appendChild(row);
+                });
+            }
+            showToast('Network diagnostics finished.', 'success');
+        } catch (err) {
+            _identityMessage(box, 'Network diagnostics failed: ' + err, 'text-xs text-rose-300');
+        } finally {
+            if (btn) btn.disabled = false;
+        }
+    }
+
+    async function copyNetworkDiagnostics() {
+        if (!_networkDiagnosticsPayload) {
+            showToast('Run network diagnostics first.', 'info');
+            return;
+        }
+        const text = JSON.stringify(_networkDiagnosticsPayload, null, 2);
+        try {
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                await navigator.clipboard.writeText(text);
+            } else {
+                throw new Error('clipboard API unavailable');
+            }
+            showToast('Network diagnostics JSON copied.', 'success');
+        } catch (err) {
+            const area = document.createElement('textarea');
+            area.value = text;
+            area.style.position = 'fixed';
+            area.style.opacity = '0';
+            document.body.appendChild(area);
+            area.select();
+            try {
+                document.execCommand('copy');
+                showToast('Network diagnostics JSON copied.', 'success');
+            } catch (copyErr) {
+                showToast('Could not copy network diagnostics JSON.', 'error');
+            } finally {
+                area.remove();
+            }
+        }
+    }
+
+    function downloadDatabaseBackup() {
+        showToast('Preparing a consistent database backup download...', 'info');
+        window.location = '/api/maintenance/backup';
+    }
+
+    async function vacuumDatabase() {
+        if (!confirm('Optimize the database now? VACUUM/ANALYZE can take a moment and briefly locks SQLite writes.')) return;
+        const btn = document.getElementById('btn-vacuum-db');
+        const box = document.getElementById('database-maintenance-result');
+        if (btn) btn.disabled = true;
+        try {
+            const res = await fetch('/api/maintenance/database/vacuum', { method: 'POST' });
+            const data = await res.json();
+            if (box) {
+                box.textContent = '';
+                if (data && typeof data === 'object') {
+                    box.appendChild(_diagnosticsLine('integrity', data.integrity || (data.status === 'success' ? 'ok' : 'unknown')));
+                    if (data.before_bytes !== undefined) box.appendChild(_diagnosticsLine('before_bytes', data.before_bytes));
+                    if (data.after_bytes !== undefined) box.appendChild(_diagnosticsLine('after_bytes', data.after_bytes));
+                    if (data.message) box.appendChild(_diagnosticsLine('message', data.message));
+                } else {
+                    box.appendChild(_diagnosticsLine('result', data));
+                }
+            }
+            if (res.ok && data && data.status === 'success') {
+                showToast(data.message || 'Database optimized.', 'success');
+            } else {
+                showToast((data && (data.message || data.detail)) || 'Database optimization failed', 'error');
+            }
+        } catch (err) {
+            _identityMessage(box, 'Database optimization failed: ' + err, 'text-xs text-rose-300');
+            showToast('Database optimization failed: ' + err, 'error');
+        } finally {
+            if (btn) btn.disabled = false;
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Unsaved-changes guard (settings form only)
+    // ------------------------------------------------------------------
+    let _settingsDirty = false;
+
+    function _markSettingsDirty() {
+        _settingsDirty = true;
+        const badge = document.getElementById('settings-dirty-badge');
+        if (badge) badge.classList.remove('hidden');
+    }
+
+    function _clearSettingsDirty() {
+        _settingsDirty = false;
+        const badge = document.getElementById('settings-dirty-badge');
+        if (badge) badge.classList.add('hidden');
+    }
+
+    (function initSettingsDirtyGuard() {
+        const form = document.getElementById('settings-form');
+        if (!form) return;
+        form.addEventListener('input', _markSettingsDirty);
+        form.addEventListener('change', _markSettingsDirty);
+        window.addEventListener('beforeunload', function (event) {
+            if (!_settingsDirty) return undefined;
+            event.preventDefault();
+            event.returnValue = 'You have unsaved settings changes.';
+            return event.returnValue;
+        });
+    })();
+
+    // Initial loads for the live settings sections.
+    loadSeriesIdentityOverview('');
+    loadSeriesAliasOverrides();
 </script>
 {% endblock %}

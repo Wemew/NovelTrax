@@ -183,6 +183,90 @@
             </div>
         </div>
 
+        <!-- Release re-bind series modal (shared by Releases / Prioritized / Series pages) -->
+        <div id="release-rebind-modal" class="fixed inset-0 z-50 bg-black/85 backdrop-blur-md hidden items-center justify-center p-4 transition-all duration-200" onclick="closeReleaseRebindModal()">
+            <div class="relative w-full max-w-xl bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl p-5 sm:p-6 space-y-4 max-h-[90vh] overflow-y-auto custom-scrollbar" onclick="event.stopPropagation()">
+                <div class="flex items-start justify-between gap-3">
+                    <div class="min-w-0">
+                        <h3 class="text-sm font-bold text-white flex items-center gap-2">
+                            <i data-lucide="git-branch" class="w-4 h-4 text-cyan-400"></i>
+                            Re-bind series
+                        </h3>
+                        <p id="release-rebind-current" class="text-[11px] text-slate-400 mt-1 break-words-anywhere"></p>
+                    </div>
+                    <button type="button" onclick="closeReleaseRebindModal()" id="release-rebind-close" title="Close (Esc)" class="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition-colors">
+                        <i data-lucide="x" class="w-4 h-4"></i>
+                    </button>
+                </div>
+
+                <!-- Mode: bind / new title / detach -->
+                <div class="space-y-2">
+                    <label class="flex items-start gap-2.5 p-2.5 rounded-xl border border-slate-800 hover:border-slate-700 cursor-pointer transition-colors">
+                        <input type="radio" name="release-rebind-mode" value="bind" checked onchange="setReleaseRebindMode('bind')" class="mt-0.5 w-4 h-4 bg-slate-950 border-slate-700 text-brand-500 focus:ring-0">
+                        <span class="min-w-0">
+                            <span class="block text-xs font-semibold text-slate-200">Bind to an existing series</span>
+                            <span class="block text-[11px] text-slate-500">Move this release onto a tracked or Calibre series.</span>
+                        </span>
+                    </label>
+                    <label class="flex items-start gap-2.5 p-2.5 rounded-xl border border-slate-800 hover:border-slate-700 cursor-pointer transition-colors">
+                        <input type="radio" name="release-rebind-mode" value="new_title" onchange="setReleaseRebindMode('new_title')" class="mt-0.5 w-4 h-4 bg-slate-950 border-slate-700 text-brand-500 focus:ring-0">
+                        <span class="min-w-0">
+                            <span class="block text-xs font-semibold text-slate-200">Re-index under a new title &mdash; not this series and not any previous series</span>
+                            <span class="block text-[11px] text-slate-500">Creates a brand-new series identity for this release only.</span>
+                        </span>
+                    </label>
+                    <label class="flex items-start gap-2.5 p-2.5 rounded-xl border border-slate-800 hover:border-slate-700 cursor-pointer transition-colors">
+                        <input type="radio" name="release-rebind-mode" value="detach" onchange="setReleaseRebindMode('detach')" class="mt-0.5 w-4 h-4 bg-slate-950 border-slate-700 text-brand-500 focus:ring-0">
+                        <span class="min-w-0">
+                            <span class="block text-xs font-semibold text-slate-200">Detach as a new standalone series</span>
+                            <span class="block text-[11px] text-slate-500">Derives a new title from the release title and locks it as standalone.</span>
+                        </span>
+                    </label>
+                </div>
+
+                <!-- Bind mode: search tracked + Calibre series -->
+                <div id="release-rebind-bind-panel" class="space-y-2">
+                    <label for="release-rebind-search" class="block text-xs font-semibold text-slate-300">Search tracked and Calibre series</label>
+                    <input type="text" id="release-rebind-search" autocomplete="off" placeholder="Type a series name, display title or author..." oninput="searchReleaseRebindSeries(this.value)" class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-brand-500">
+                    <div id="release-rebind-results" class="max-h-44 overflow-y-auto custom-scrollbar divide-y divide-slate-800/70 border border-slate-800 rounded-xl"></div>
+                    <p id="release-rebind-selected" class="text-[11px] text-emerald-300 font-semibold"></p>
+                    <label class="flex items-start gap-2.5 cursor-pointer pt-1">
+                        <input type="checkbox" id="release-rebind-remember" class="mt-0.5 w-4 h-4 rounded bg-slate-950 border-slate-700 text-brand-600 focus:ring-0">
+                        <span class="min-w-0">
+                            <span class="block text-xs font-semibold text-slate-200">Only this release (pin)</span>
+                            <span class="block text-[11px] text-slate-500">Default: pin just this release. Check to also remember this mapping as an alias for future releases of the old title.</span>
+                        </span>
+                    </label>
+                </div>
+
+                <!-- New title / detach mode -->
+                <div id="release-rebind-new-title-panel" class="hidden space-y-1.5">
+                    <label for="release-rebind-new-title" class="block text-xs font-semibold text-slate-300">New series title</label>
+                    <input type="text" id="release-rebind-new-title" maxlength="300" autocomplete="off" placeholder="A genuinely new series title" class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-brand-500">
+                    <p class="text-[11px] text-slate-500">Creates a brand-new series. It will not be linked to the current series or any previous one.</p>
+                </div>
+
+                <div id="release-rebind-pin-row" class="hidden">
+                    <button type="button" onclick="unpinReleaseRebind()" id="release-rebind-unpin" class="text-[11px] text-amber-300 hover:text-amber-200 font-semibold flex items-center gap-1.5 transition-colors">
+                        <i data-lucide="pin-off" class="w-3.5 h-3.5"></i>
+                        Unpin this release (let automatic matching take over again)
+                    </button>
+                </div>
+
+                <p id="release-rebind-error" class="hidden text-[11px] text-rose-300 font-semibold break-words-anywhere"></p>
+
+                <div class="flex items-center justify-end gap-2 pt-3 border-t border-slate-800">
+                    <button type="button" onclick="closeReleaseRebindModal()" id="release-rebind-cancel" class="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold transition-colors">
+                        Cancel
+                    </button>
+                    <button type="button" onclick="applyReleaseRebind()" id="release-rebind-apply" class="px-4 py-2 rounded-xl bg-brand-600 hover:bg-brand-500 text-white text-xs font-bold transition-all shadow-lg shadow-brand-600/30 active:scale-95">
+                        <i data-lucide="git-branch" class="w-3.5 h-3.5 inline-block"></i>
+                        Apply re-bind
+                    </button>
+                </div>
+            </div>
+        </div>
+
         <!-- Toast Notification Container -->
         <div id="toast" class="fixed bottom-5 right-5 z-50 transform transition-all duration-300 translate-y-20 opacity-0 pointer-events-none flex items-center gap-3 px-4 py-3 rounded-xl shadow-2xl border text-sm">
             <i id="toast-icon" data-lucide="info" class="w-5 h-5 flex-shrink-0"></i>
@@ -444,7 +528,10 @@
         }
 
         document.addEventListener('keydown', (e) => {
-            if (e.key === 'Escape') closeImageModal();
+            if (e.key === 'Escape') {
+                closeImageModal();
+                closeReleaseRebindModal();
+            }
         });
 
         // Global Navigation Progress Bar & Instant Click Feedback
@@ -590,6 +677,332 @@
                     if (icon) icon.classList.remove('animate-spin');
                     btn.disabled = false;
                 }
+            }
+        }
+
+        // --- Release re-bind series modal (shared by every release list) ---
+        const _releaseRebind = {
+            releaseId: 0,
+            title: '',
+            seriesName: '',
+            mode: 'bind',
+            selectedTarget: null,
+            pinned: false
+        };
+        let _releaseRebindSearchTimer = null;
+        let _releaseRebindFocus = null;
+        let _releaseRebindResults = [];
+        let _releaseRebindResultEls = [];
+
+        function _releaseRebindError(message) {
+            const box = document.getElementById('release-rebind-error');
+            if (!box) return;
+            if (!message) {
+                box.textContent = '';
+                box.classList.add('hidden');
+                return;
+            }
+            box.textContent = String(message);
+            box.classList.remove('hidden');
+        }
+
+        // Accepts either a .release-rebind-btn element (data-* attributes) or a plain
+        // object {releaseId, releaseTitle, seriesName} (e.g. from the Settings attribution audit).
+        function openReleaseRebindModal(source) {
+            if (!source) return;
+            let releaseId = 0;
+            let releaseTitle = '';
+            let seriesName = '';
+            if (source.dataset) {
+                releaseId = Number(source.dataset.releaseId) || 0;
+                releaseTitle = source.dataset.releaseTitle || '';
+                seriesName = source.dataset.seriesName || '';
+            } else if (typeof source === 'object') {
+                releaseId = Number(source.releaseId || source.release_id) || 0;
+                releaseTitle = source.releaseTitle || source.title || '';
+                seriesName = source.seriesName || source.series_name || '';
+            }
+            if (!releaseId) return;
+            _releaseRebind.releaseId = releaseId;
+            _releaseRebind.title = releaseTitle;
+            _releaseRebind.seriesName = seriesName;
+            _releaseRebind.selectedTarget = null;
+            _releaseRebind.pinned = false;
+            _releaseRebindFocus = document.activeElement;
+            const modal = document.getElementById('release-rebind-modal');
+            const current = document.getElementById('release-rebind-current');
+            const search = document.getElementById('release-rebind-search');
+            const newTitle = document.getElementById('release-rebind-new-title');
+            const remember = document.getElementById('release-rebind-remember');
+            const results = document.getElementById('release-rebind-results');
+            const selected = document.getElementById('release-rebind-selected');
+            const pinRow = document.getElementById('release-rebind-pin-row');
+            if (current) {
+                current.textContent = _releaseRebind.title + ' — currently under: ' + (_releaseRebind.seriesName || 'unknown series');
+            }
+            if (search) search.value = '';
+            if (newTitle) newTitle.value = '';
+            if (remember) remember.checked = false;
+            if (results) results.textContent = '';
+            if (selected) selected.textContent = '';
+            if (pinRow) pinRow.classList.add('hidden');
+            _releaseRebindResults = [];
+            _releaseRebindResultEls = [];
+            _releaseRebindError('');
+            setReleaseRebindMode('bind');
+            if (modal) {
+                modal.classList.remove('hidden');
+                modal.classList.add('flex');
+            }
+            document.body.style.overflow = 'hidden';
+            if (window.lucide) lucide.createIcons();
+            if (search) search.focus();
+            refreshReleaseRebindState(releaseId);
+        }
+
+        function closeReleaseRebindModal() {
+            const modal = document.getElementById('release-rebind-modal');
+            if (modal) {
+                modal.classList.add('hidden');
+                modal.classList.remove('flex');
+            }
+            document.body.style.overflow = '';
+            clearTimeout(_releaseRebindSearchTimer);
+            _releaseRebindSearchTimer = null;
+            _releaseRebind.releaseId = 0;
+            _releaseRebind.selectedTarget = null;
+            if (_releaseRebindFocus && typeof _releaseRebindFocus.focus === 'function') {
+                try {
+                    _releaseRebindFocus.focus();
+                } catch (focusErr) {}
+            }
+            _releaseRebindFocus = null;
+        }
+
+        function setReleaseRebindMode(mode) {
+            const modes = ['bind', 'new_title', 'detach'];
+            const next = modes.indexOf(mode) !== -1 ? mode : 'bind';
+            _releaseRebind.mode = next;
+            document.querySelectorAll('input[name="release-rebind-mode"]').forEach(function (input) {
+                input.checked = input.value === next;
+            });
+            const bindPanel = document.getElementById('release-rebind-bind-panel');
+            const newPanel = document.getElementById('release-rebind-new-title-panel');
+            if (bindPanel) bindPanel.classList.toggle('hidden', next !== 'bind');
+            if (newPanel) newPanel.classList.toggle('hidden', next === 'bind');
+            _releaseRebindError('');
+            if (next === 'bind' && _releaseRebindResults.length === 0) {
+                searchReleaseRebindSeries('');
+            } else if (next !== 'bind') {
+                const input = document.getElementById('release-rebind-new-title');
+                if (input) input.focus();
+            }
+        }
+
+        function searchReleaseRebindSeries(query) {
+            clearTimeout(_releaseRebindSearchTimer);
+            _releaseRebindSearchTimer = setTimeout(async function () {
+                const term = String(query || '').trim();
+                try {
+                    const responses = await Promise.all([
+                        fetch(`/api/series?search=${encodeURIComponent(term)}&limit=50`),
+                        fetch(`/api/calibre/series?search=${encodeURIComponent(term)}&limit=50`)
+                    ]);
+                    const trackedData = responses[0] && responses[0].ok ? await responses[0].json() : {};
+                    const calibreData = responses[1] && responses[1].ok ? await responses[1].json() : {};
+                    const merged = [];
+                    (trackedData.series || []).forEach(function (row) {
+                        merged.push({
+                            name: String(row.name || ''),
+                            display_title: String(row.display_title || ''),
+                            calibre_series_id: row.calibre_series_id || null,
+                            book_count: row.book_count || row.owned_volumes && row.owned_volumes.length || 0,
+                            tracked: true,
+                            source: 'tracked'
+                        });
+                    });
+                    (calibreData.series || []).forEach(function (row) {
+                        merged.push({
+                            name: String(row.name || ''),
+                            display_title: String(row.display_title || ''),
+                            calibre_series_id: row.calibre_series_id || row.id || null,
+                            book_count: row.book_count || 0,
+                            tracked: false,
+                            source: 'calibre'
+                        });
+                    });
+                    renderReleaseRebindResults(merged);
+                } catch (err) {
+                    renderReleaseRebindResults([]);
+                    _releaseRebindError('Could not search series: ' + err);
+                }
+            }, 250);
+        }
+
+        function renderReleaseRebindResults(list) {
+            const box = document.getElementById('release-rebind-results');
+            if (!box) return;
+            box.textContent = '';
+            _releaseRebindResults = Array.isArray(list) ? list.slice(0, 80) : [];
+            _releaseRebindResultEls = [];
+            if (_releaseRebindResults.length === 0) {
+                const empty = document.createElement('p');
+                empty.className = 'p-3 text-center text-[11px] text-slate-500';
+                empty.textContent = 'No tracked or Calibre series match this search. Try a different name.';
+                box.appendChild(empty);
+                return;
+            }
+            _releaseRebindResults.forEach(function (row, index) {
+                const item = document.createElement('button');
+                item.type = 'button';
+                item.className = 'release-rebind-result w-full text-left p-2.5 hover:bg-slate-800/70 transition-colors block';
+                const line = document.createElement('span');
+                line.className = 'block text-xs font-semibold text-white break-words-anywhere';
+                line.textContent = row.display_title || row.name || 'Unnamed series';
+                item.appendChild(line);
+                const meta = document.createElement('span');
+                meta.className = 'block text-[11px] text-slate-500 mt-0.5';
+                let metaText = row.source === 'calibre' ? 'Calibre' : 'Tracked';
+                if (row.display_title && row.display_title !== row.name && row.name) {
+                    metaText = metaText + ' · Tracks: ' + row.name;
+                }
+                if (row.calibre_series_id) {
+                    metaText = metaText + ' · Calibre #' + row.calibre_series_id;
+                }
+                if (row.book_count) {
+                    metaText = metaText + ' · ' + row.book_count + ' book(s)';
+                }
+                meta.textContent = metaText;
+                item.appendChild(meta);
+                item.addEventListener('click', function () {
+                    selectReleaseRebindTarget(_releaseRebindResults[index]);
+                });
+                _releaseRebindResultEls.push(item);
+                box.appendChild(item);
+            });
+        }
+
+        function selectReleaseRebindTarget(row) {
+            if (!row) return;
+            const label = row.display_title || row.name || '';
+            _releaseRebind.selectedTarget = {
+                series_name: row.name || label,
+                calibre_series_id: row.calibre_series_id || null,
+                label: label
+            };
+            _releaseRebindResultEls.forEach(function (item) {
+                item.classList.remove('bg-slate-800/80', 'ring-1', 'ring-brand-500/40');
+            });
+            const index = _releaseRebindResults.indexOf(row);
+            if (index !== -1 && _releaseRebindResultEls[index]) {
+                _releaseRebindResultEls[index].classList.add('bg-slate-800/80', 'ring-1', 'ring-brand-500/40');
+            }
+            const selected = document.getElementById('release-rebind-selected');
+            if (selected) {
+                selected.textContent = 'Selected: ' + label + (row.calibre_series_id ? ' (Calibre #' + row.calibre_series_id + ')' : '');
+            }
+            _releaseRebindError('');
+        }
+
+        async function applyReleaseRebind() {
+            const releaseId = _releaseRebind.releaseId;
+            if (!releaseId) return;
+            const mode = _releaseRebind.mode || 'bind';
+            const payload = { mode: mode };
+            if (mode === 'bind') {
+                if (!_releaseRebind.selectedTarget) {
+                    _releaseRebindError('Pick a series to bind this release to.');
+                    return;
+                }
+                payload.target_name = _releaseRebind.selectedTarget.series_name || null;
+                payload.calibre_series_id = _releaseRebind.selectedTarget.calibre_series_id || null;
+            } else {
+                const input = document.getElementById('release-rebind-new-title');
+                const value = input ? String(input.value || '').trim() : '';
+                if (!value) {
+                    _releaseRebindError('Enter a genuinely new series title first.');
+                    return;
+                }
+                payload.target_name = value;
+            }
+            const remember = document.getElementById('release-rebind-remember');
+            payload.remember = !!(remember && remember.checked && mode === 'bind');
+            const apply = document.getElementById('release-rebind-apply');
+            if (apply) apply.disabled = true;
+            try {
+                const res = await fetch(`/api/releases/${releaseId}/rebind`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                let data = {};
+                try {
+                    data = await res.json();
+                } catch (parseErr) {
+                    data = {};
+                }
+                if (res.ok && data.status === 'success') {
+                    showToast(data.message || 'Release series re-bound', 'success');
+                    closeReleaseRebindModal();
+                    setTimeout(function () { location.reload(); }, 500);
+                } else {
+                    _releaseRebindError(data.detail || data.message || 'Could not re-bind this release');
+                }
+            } catch (err) {
+                _releaseRebindError('Error: ' + err);
+            } finally {
+                if (apply) apply.disabled = false;
+            }
+        }
+
+        async function refreshReleaseRebindState(releaseId) {
+            if (!releaseId) return;
+            try {
+                const res = await fetch(`/api/releases/${releaseId}/series-identity`);
+                if (!res.ok) return;
+                const data = await res.json();
+                if (!data || data.status !== 'success') return;
+                _releaseRebind.pinned = !!data.series_pinned;
+                if (data.series_name) _releaseRebind.seriesName = String(data.series_name);
+                if (data.title) _releaseRebind.title = String(data.title);
+                const current = document.getElementById('release-rebind-current');
+                if (current) {
+                    current.textContent = _releaseRebind.title + ' — currently under: ' + (_releaseRebind.seriesName || 'unknown series') + (data.series_pinned ? ' (manually pinned)' : '');
+                }
+                const pinRow = document.getElementById('release-rebind-pin-row');
+                if (pinRow) pinRow.classList.toggle('hidden', !data.series_pinned);
+                const tracking = data.tracking_series || null;
+                if (tracking && tracking.name) {
+                    const selected = document.getElementById('release-rebind-selected');
+                    if (selected) {
+                        selected.textContent = 'Tracks: ' + String(tracking.name) + (tracking.calibre_series_id ? ' · Calibre #' + tracking.calibre_series_id : '') + (tracking.identity_locked ? ' · identity locked' : '');
+                    }
+                }
+            } catch (err) {
+                // The modal still works from the button's data attributes.
+            }
+        }
+
+        async function unpinReleaseRebind() {
+            const releaseId = _releaseRebind.releaseId;
+            if (!releaseId) return;
+            try {
+                const res = await fetch(`/api/releases/${releaseId}/unpin`, { method: 'POST' });
+                let data = {};
+                try {
+                    data = await res.json();
+                } catch (parseErr) {
+                    data = {};
+                }
+                if (res.ok && data.status === 'success') {
+                    showToast('Release unpinned; automatic series matching resumes', 'success');
+                    closeReleaseRebindModal();
+                    setTimeout(function () { location.reload(); }, 500);
+                } else {
+                    _releaseRebindError(data.detail || data.message || 'Could not unpin this release');
+                }
+            } catch (err) {
+                _releaseRebindError('Error: ' + err);
             }
         }
     </script>

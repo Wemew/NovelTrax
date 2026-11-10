@@ -5,15 +5,19 @@ import time
 import difflib
 import logging
 import asyncio
+import sqlite3
+import tempfile
+import zoneinfo
 from typing import Dict, Any, List, Optional
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request, Query, HTTPException
+from fastapi import FastAPI, Request, Query, HTTPException, BackgroundTask
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 
 from app.database import Database
+from app import diagnostics
 from app.calibre.scanner import CalibreScanner
 from app.providers.registry import create_provider
 from app.scheduler import TaskManager
@@ -186,6 +190,33 @@ def _prepare_settings_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         if engine not in DOWNLOADER_ENGINES:
             raise HTTPException(status_code=400, detail="downloader_engine must be 'qbit' or 'torbox'")
         clean["downloader_engine"] = engine
+
+    if "app_timezone" in clean:
+        timezone_value = str(clean.get("app_timezone") or "").strip()
+        if timezone_value:
+            try:
+                zoneinfo.ZoneInfo(timezone_value)
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "app_timezone must be a valid IANA timezone name "
+                        "(e.g. Europe/Copenhagen) or empty"
+                    ),
+                ) from exc
+        clean["app_timezone"] = timezone_value
+
+    if "log_level" in clean:
+        level = str(clean.get("log_level") or "").strip().upper()
+        if level not in ("DEBUG", "INFO", "WARNING", "ERROR"):
+            raise HTTPException(
+                status_code=400,
+                detail="log_level must be one of DEBUG, INFO, WARNING, ERROR",
+            )
+        clean["log_level"] = level
+
+    _clamp_numeric_setting(clean, "activity_retention_days", 0, 3650, integer=True)
+    _clamp_numeric_setting(clean, "activity_max_rows", 0, 1000000, integer=True)
 
     for key, low, high in (
         ("torbox_poll_seconds", 5, 3600),
@@ -392,12 +423,115 @@ def _series_match_payload(result: Any) -> Dict[str, Any]:
     return payload
 
 
+# --- Release re-bind / series identity reset helpers (CONTRACT_V2_REBIND §4) ---
+
+def _coerce_bool(value: Any, default: bool = False) -> bool:
+    """Parses JSON booleans plus the usual 'true'/'1'/'yes' string spellings."""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in ("1", "true", "yes", "on"):
+        return True
+    if text in ("0", "false", "no", "off", ""):
+        return False
+    return default
+
+
+def _coerce_volume_list(value: Any) -> List[Any]:
+    """Parses a tracked row's owned volumes (list or JSON string) without raising."""
+    if isinstance(value, list):
+        return list(value)
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value or "[]")
+        except (TypeError, ValueError):
+            return []
+        return parsed if isinstance(parsed, list) else []
+    return []
+
+
+def _release_row(release_id: int) -> Optional[Dict[str, Any]]:
+    """Reads a release row for existence checks; never raises."""
+    try:
+        row = db.get_release_by_id(release_id)
+    except Exception as exc:
+        logger.warning(f"Could not read release #{release_id}: {exc}")
+        return None
+    return dict(row) if row else None
+
+
+def _tracked_series_by_name(name: str) -> Optional[Dict[str, Any]]:
+    """Exact (normalized) tracked-series lookup used by re-bind target resolution."""
+    target_norm = _series_match_normalize(name)
+    if not target_norm:
+        return None
+    try:
+        for row in db.get_all_series() or []:
+            if _series_match_normalize(row.get("name")) == target_norm:
+                return dict(row)
+    except Exception as exc:
+        logger.warning(f"Tracked series lookup failed for '{name}': {exc}")
+    return None
+
+
+# --- Diagnostics / maintenance helpers (CONTRACT_V2_REBIND §6) ---
+
+def _utc_iso_now() -> str:
+    """UTC ISO-8601 timestamp for diagnostics/maintenance payloads."""
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _apply_configured_log_level() -> None:
+    """Applies the persisted log_level setting to the root logger at startup."""
+    try:
+        level_name = str(db.get_setting("log_level", "INFO") or "INFO").strip().upper()
+        level = getattr(logging, level_name, None)
+        if isinstance(level, int):
+            logging.getLogger().setLevel(level)
+            logger.info(f"Root log level set to {level_name}.")
+    except Exception as exc:
+        logger.warning(f"Could not apply the configured log level: {exc}")
+
+
+def _create_database_backup(db_path: str) -> tuple:
+    """Creates a consistent SQLite snapshot inside DATA_DIR; returns (path, timestamp)."""
+    stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime())
+    fd, backup_path = tempfile.mkstemp(prefix=".noveltrax-backup-", suffix=".db", dir=DATA_DIR)
+    os.close(fd)
+    try:
+        os.remove(backup_path)
+        # Prefer the database layer's tested online-backup helper; fall back to the
+        # sqlite3 backup API directly on the configured database path.
+        backup_fn = getattr(db, "backup_database", None)
+        if callable(backup_fn):
+            backup_fn(backup_path)
+        else:
+            source = sqlite3.connect(db_path, timeout=10.0)
+            destination = sqlite3.connect(backup_path)
+            try:
+                source.backup(destination)
+                destination.commit()
+            finally:
+                destination.close()
+                source.close()
+    except Exception:
+        try:
+            os.remove(backup_path)
+        except OSError:
+            pass
+        raise
+    return backup_path, stamp
+
+
 from app.providers.metadata import NovelMetadataProvider
 NovelMetadataProvider.set_db(db)
 
 # Lifespan Context Manager
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    _apply_configured_log_level()
     logger.info("Starting NovelTrax application...")
     task_manager.start()
     torbox_manager.start()
@@ -1348,6 +1482,361 @@ async def api_delete_series_alias(override_id: int):
         raise HTTPException(status_code=404, detail="Alias override not found")
     return JSONResponse({"status": "success"})
 
+# --- Release re-bind / per-series identity reset ---
+
+@app.get("/api/series")
+async def api_tracked_series_picker(
+    search: Optional[str] = Query(None),
+    limit: int = Query(25, ge=1, le=500)
+):
+    """Searchable tracked-series picker for the release re-bind modal; never raises."""
+    try:
+        rows = await asyncio.to_thread(db.get_all_series)
+    except Exception as exc:
+        logger.warning(f"Tracked series picker could not load series: {exc}")
+        return JSONResponse({"status": "success", "series": [], "count": 0})
+
+    try:
+        search_norm = _series_match_normalize(search)
+        entries: List[Dict[str, Any]] = []
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            series_id = _coerce_int(row.get("id"))
+            name = str(row.get("name") or "").strip()
+            if series_id is None or not name:
+                continue
+            display_title = str(row.get("display_title") or "").strip()
+            authors = str(row.get("authors") or "").strip()
+            if search_norm:
+                haystack = " ".join(
+                    _series_match_normalize(part) for part in (name, display_title, authors)
+                )
+                if search_norm not in haystack:
+                    continue
+            name_norm = _series_match_normalize(name)
+            entries.append({
+                "id": series_id,
+                "name": name,
+                "display_title": display_title,
+                "authors": authors,
+                "calibre_series_id": _coerce_int(row.get("calibre_series_id")),
+                "identity_locked": _coerce_bool(row.get("identity_locked"), False),
+                "book_count": _coerce_int(row.get("book_count")) or 0,
+                "owned_volumes": _coerce_volume_list(row.get("owned_volumes_json")),
+                "tracked": True,
+                "_exact": 1 if search_norm and name_norm == search_norm else 0,
+                "_prefix": 1 if search_norm and name_norm.startswith(search_norm) else 0,
+            })
+        entries.sort(key=lambda item: (-item["_exact"], -item["_prefix"], item["name"].lower()))
+        for entry in entries:
+            entry.pop("_exact", None)
+            entry.pop("_prefix", None)
+        payload = entries[:limit]
+        return JSONResponse({"status": "success", "series": payload, "count": len(payload)})
+    except Exception as exc:
+        logger.warning(f"Tracked series picker failed: {exc}")
+        return JSONResponse({"status": "success", "series": [], "count": 0})
+
+@app.get("/api/series/identity")
+async def api_series_identity_overview(
+    search: Optional[str] = Query(None),
+    limit: int = Query(100, ge=1, le=500)
+):
+    """Tracked-series identity overview (display/lock/alias/pin state) for Settings."""
+    try:
+        series = await asyncio.to_thread(db.get_series_identity_overview, search=search, limit=limit)
+    except Exception as exc:
+        logger.warning(f"Series identity overview failed: {exc}")
+        series = []
+    rows = [dict(row) for row in series or [] if isinstance(row, dict)]
+    return JSONResponse({"status": "success", "series": rows, "count": len(rows)})
+
+@app.post("/api/releases/{release_id}/rebind")
+async def api_rebind_release(release_id: int, payload: Optional[Dict[str, Any]] = None):
+    """Re-binds a release to an existing series or re-indexes it under a new title."""
+    release = await asyncio.to_thread(_release_row, release_id)
+    if not release:
+        raise HTTPException(status_code=404, detail="Release not found")
+
+    p = payload or {}
+    mode = str(p.get("mode") or "").strip().lower()
+    if mode == "different_series":
+        mode = "new_title"
+    if mode not in ("bind", "new_title", "detach"):
+        raise HTTPException(status_code=400, detail="mode must be one of: bind, new_title, detach")
+
+    target_name = str(p.get("target_name") or "").strip() or None
+    calibre_series_id = _coerce_int(p.get("calibre_series_id"))
+    remember = _coerce_bool(p.get("remember"), False)
+
+    if mode == "bind":
+        if calibre_series_id is not None:
+            calibre_row = await asyncio.to_thread(_calibre_series_by_id, calibre_series_id)
+            if not calibre_row:
+                raise HTTPException(status_code=400, detail=f"Unknown Calibre series id: {calibre_series_id}")
+            resolved_name = str(calibre_row.get("series_name") or calibre_row.get("name") or "").strip()
+            if resolved_name:
+                target_name = resolved_name
+        elif target_name:
+            tracked = await asyncio.to_thread(_tracked_series_by_name, target_name)
+            if tracked:
+                target_name = str(tracked.get("name") or target_name).strip()
+                tracked_calibre_id = _coerce_int(tracked.get("calibre_series_id"))
+                if tracked_calibre_id is not None:
+                    calibre_series_id = tracked_calibre_id
+        else:
+            raise HTTPException(status_code=400, detail="mode=bind requires calibre_series_id or target_name")
+
+    try:
+        result = await asyncio.to_thread(
+            task_manager.rebind_release,
+            release_id,
+            mode,
+            target_name=target_name,
+            calibre_series_id=calibre_series_id,
+            remember=remember,
+            actor="user",
+        )
+    except (ValueError, KeyError, LookupError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc) or "Invalid re-bind request") from exc
+    except Exception as exc:
+        logger.warning(f"Release re-bind failed for #{release_id}: {type(exc).__name__}: {exc}")
+        raise HTTPException(status_code=500, detail=f"Could not re-bind release: {exc}") from exc
+
+    summary = dict(result) if isinstance(result, dict) else {}
+    summary.setdefault("status", "success")
+    return JSONResponse(summary)
+
+@app.get("/api/releases/{release_id}/series-identity")
+async def api_release_series_identity(release_id: int):
+    """Release identity payload (current series/pin state) used by the re-bind modal."""
+    try:
+        identity = await asyncio.to_thread(db.get_release_series_identity, release_id)
+    except Exception as exc:
+        logger.warning(f"Could not read series identity for release #{release_id}: {exc}")
+        raise HTTPException(status_code=500, detail="Could not load the release identity") from exc
+    if not identity:
+        raise HTTPException(status_code=404, detail="Release not found")
+    payload = dict(identity)
+    # The identity row's own "status" is the release status; the API envelope status
+    # must stay "success" so the modal's success check works. Keep both.
+    payload["release_status"] = payload.pop("status", "")
+    payload["status"] = "success"
+    return JSONResponse(payload)
+
+@app.post("/api/releases/{release_id}/unpin")
+async def api_unpin_release_series(release_id: int):
+    """Removes the manual re-bind pin from one release so automatic matching may move it again."""
+    release = await asyncio.to_thread(_release_row, release_id)
+    if not release:
+        raise HTTPException(status_code=404, detail="Release not found")
+    try:
+        unpinned = await asyncio.to_thread(db.unpin_release_series, release_id)
+    except Exception as exc:
+        logger.warning(f"Could not unpin release #{release_id}: {exc}")
+        raise HTTPException(status_code=500, detail="Could not unpin the release") from exc
+    if not unpinned:
+        raise HTTPException(status_code=404, detail="Release is not pinned")
+    return JSONResponse({"status": "success", "unpinned": True})
+
+@app.post("/api/series/{series_id}/reset-identity")
+async def api_reset_series_identity(series_id: int):
+    """Forgets manual/learned identity state for one series so auto-matching can resume."""
+    series_row = await asyncio.to_thread(_find_series_row, series_id)
+    if not series_row:
+        raise HTTPException(status_code=404, detail="Series not found")
+    try:
+        result = await asyncio.to_thread(task_manager.reset_series_identity, series_id)
+    except (KeyError, LookupError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc) or "Series not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc) or "Invalid reset request") from exc
+    except Exception as exc:
+        logger.warning(f"Series identity reset failed for #{series_id}: {type(exc).__name__}: {exc}")
+        raise HTTPException(status_code=500, detail=f"Could not reset series identity: {exc}") from exc
+
+    summary = dict(result) if isinstance(result, dict) else {}
+    payload = {
+        "status": summary.get("status") or "success",
+        "series_id": summary.get("series_id", series_id),
+        "series_name": summary.get("series_name", series_row.get("name") or ""),
+        "aliases_removed": summary.get("aliases_removed", 0),
+        "releases_unpinned": summary.get("releases_unpinned", 0),
+        "display_cleared": summary.get("display_cleared", False),
+        "locked_cleared": summary.get("locked_cleared", False),
+        "reconciled": summary.get("reconciled") or {},
+        "linked": summary.get("linked"),
+        "message": summary.get("message", ""),
+    }
+    return JSONResponse(payload)
+
+# --- Storage / network / maintenance diagnostics (CONTRACT_V2_REBIND §6.3) ---
+
+@app.get("/api/storage/health")
+async def api_storage_health():
+    """Calibre, data/downloads directory and database health; never raises."""
+    try:
+        calibre_path = db.get_setting("calibre_path", CALIBRE_DIR)
+        downloads_dir = db.get_setting("downloads_dir", os.getenv("DOWNLOAD_DIR", "/downloads"))
+        health = await asyncio.to_thread(
+            diagnostics.storage_health, db, calibre_path, DATA_DIR, downloads_dir
+        )
+        payload = dict(health) if isinstance(health, dict) else {}
+        payload.setdefault("status", "success")
+        payload.setdefault("checked_at", _utc_iso_now())
+        payload.setdefault("overall_ok", False)
+        return JSONResponse(payload)
+    except Exception as exc:
+        logger.warning(f"Storage health check failed: {type(exc).__name__}: {exc}")
+        return JSONResponse({
+            "status": "degraded",
+            "checked_at": _utc_iso_now(),
+            "overall_ok": False,
+            "error": str(exc)[:300],
+        })
+
+@app.get("/api/diagnostics/network")
+async def api_network_diagnostics():
+    """Provider reachability diagnostics (AniList/Kitsu/Nyaa/J-Novels); never raises."""
+    try:
+        result = await asyncio.to_thread(diagnostics.network_diagnostics, 5.0)
+        payload = dict(result) if isinstance(result, dict) else {}
+        payload.setdefault("checked_at", _utc_iso_now())
+        payload.setdefault("results", [])
+        payload.setdefault("ok", False)
+        payload.setdefault("status", "success")
+        return JSONResponse(payload)
+    except Exception as exc:
+        logger.warning(f"Network diagnostics failed: {type(exc).__name__}: {exc}")
+        return JSONResponse({
+            "status": "degraded",
+            "checked_at": _utc_iso_now(),
+            "results": [],
+            "ok": False,
+            "error": str(exc)[:300],
+        })
+
+@app.post("/api/maintenance/logs/prune")
+async def api_prune_activity_logs():
+    """Prunes activity_logs using the retention settings (age and/or row cap)."""
+    days = _coerce_int(db.get_setting("activity_retention_days", "90")) or 0
+    max_rows = _coerce_int(db.get_setting("activity_max_rows", "50000")) or 0
+    days = max(0, min(3650, days))
+    max_rows = max(0, min(1000000, max_rows))
+    try:
+        result = await asyncio.to_thread(db.prune_activity_logs, days, max_rows)
+    except Exception as exc:
+        logger.warning(f"Activity log prune failed: {type(exc).__name__}: {exc}")
+        raise HTTPException(status_code=500, detail=f"Could not prune activity logs: {exc}") from exc
+
+    summary = dict(result) if isinstance(result, dict) else {}
+    removed = int(summary.get("removed") or 0)
+    payload = {
+        "status": "success",
+        "removed_by_age": int(summary.get("removed_by_age") or 0),
+        "removed_by_rows": int(summary.get("removed_by_rows") or 0),
+        "removed": removed,
+        "remaining": summary.get("remaining"),
+        "retention_days": days,
+        "max_rows": max_rows,
+    }
+    if removed > 0:
+        try:
+            await asyncio.to_thread(
+                db.log_activity,
+                "LOGS_PRUNED",
+                f"Pruned {removed} activity log row(s)",
+                json.dumps({"removed": removed, "retention_days": days, "max_rows": max_rows}),
+            )
+        except Exception:
+            pass
+    return JSONResponse(payload)
+
+@app.get("/api/maintenance/database/stats")
+async def api_database_stats():
+    """Database file/WAL sizes, row counts and a guarded PRAGMA quick_check."""
+    try:
+        stats = await asyncio.to_thread(db.database_stats)
+    except Exception as exc:
+        logger.warning(f"Database stats failed: {type(exc).__name__}: {exc}")
+        raise HTTPException(status_code=500, detail=f"Could not read database stats: {exc}") from exc
+
+    payload = dict(stats) if isinstance(stats, dict) else {}
+
+    def _quick_check():
+        with db.get_connection() as conn:
+            return conn.execute("PRAGMA quick_check;").fetchone()[0]
+
+    integrity = None
+    try:
+        integrity = await asyncio.to_thread(_quick_check)
+    except Exception as exc:
+        integrity = f"error: {exc}"
+    payload.setdefault("status", "success")
+    payload["integrity"] = integrity
+    return JSONResponse(payload)
+
+@app.get("/api/maintenance/backup")
+async def api_database_backup():
+    """Downloads a consistent SQLite snapshot and deletes the temp copy afterwards."""
+    db_path = str(getattr(db, "db_path", "") or "")
+    if not db_path or not os.path.isfile(db_path):
+        raise HTTPException(status_code=500, detail="Database file not found")
+    try:
+        backup_path, stamp = await asyncio.to_thread(_create_database_backup, db_path)
+    except Exception as exc:
+        logger.warning(f"Database backup failed: {type(exc).__name__}: {exc}")
+        raise HTTPException(status_code=500, detail="Could not create the database backup") from exc
+    filename = f"noveltrax-backup-{stamp}.db"
+    return FileResponse(
+        backup_path,
+        media_type="application/octet-stream",
+        filename=filename,
+        background=BackgroundTask(os.remove, backup_path),
+    )
+
+@app.post("/api/maintenance/database/vacuum")
+async def api_vacuum_database():
+    """Runs integrity_check + VACUUM + ANALYZE on the SQLite database."""
+    try:
+        result = await asyncio.to_thread(db.vacuum_database)
+    except Exception as exc:
+        logger.warning(f"Database vacuum failed: {type(exc).__name__}: {exc}")
+        raise HTTPException(status_code=500, detail=f"Could not optimize the database: {exc}") from exc
+    payload = dict(result) if isinstance(result, dict) else {}
+    payload.setdefault("status", "success")
+    payload.setdefault("before_bytes", 0)
+    payload.setdefault("after_bytes", 0)
+    payload.setdefault("integrity", "ok")
+    payload.setdefault("message", "")
+    payload["before_human"] = diagnostics.format_bytes(payload.get("before_bytes") or 0)
+    payload["after_human"] = diagnostics.format_bytes(payload.get("after_bytes") or 0)
+    return JSONResponse(payload)
+
+@app.get("/api/maintenance/series-attribution")
+async def api_series_attribution_audit(limit: int = Query(200, ge=1, le=1000)):
+    """Read-only audit of releases whose stored series disagrees with the resolver."""
+    try:
+        result = await asyncio.to_thread(
+            diagnostics.series_attribution_audit, db, limit=limit, scan_limit=50000
+        )
+        payload = dict(result) if isinstance(result, dict) else {}
+        payload.setdefault("checked", 0)
+        payload.setdefault("count", 0)
+        payload.setdefault("items", [])
+        payload.setdefault("status", "success")
+        return JSONResponse(payload)
+    except Exception as exc:
+        logger.warning(f"Series attribution audit failed: {type(exc).__name__}: {exc}")
+        return JSONResponse({
+            "status": "degraded",
+            "checked": 0,
+            "count": 0,
+            "items": [],
+            "error": str(exc)[:300],
+        })
+
 @app.post("/api/settings")
 async def api_save_settings(payload: Dict[str, Any]):
     """Save application settings and dynamically reschedule background jobs."""
@@ -1747,7 +2236,7 @@ async def api_backfill_nyaa_reset():
 
 @app.post("/api/debug/action")
 async def api_debug_action(payload: Dict[str, Any]):
-    """Debug maintenance operations: clear descriptions, discovery, or cover cache."""
+    """Debug maintenance operations: clear descriptions, discovery, cover cache or metadata cache."""
     action = payload.get("action")
     if action == "clear-descriptions":
         count = db.clear_all_descriptions()
@@ -1762,6 +2251,9 @@ async def api_debug_action(payload: Dict[str, Any]):
         count = db.purge_pdf_releases()
         db.deduplicate_and_clean_discovery()
         return JSONResponse({"status": "success", "message": f"Purged {count} PDF release(s) and deduplicated discovery series."})
+    elif action == "clear-metadata":
+        count = db.clear_novel_metadata_cache()
+        return JSONResponse({"status": "success", "message": f"Cleared {count} cached metadata entr{'y' if count == 1 else 'ies'}."})
     else:
         return JSONResponse({"status": "error", "message": f"Unknown action: {action}"}, status_code=400)
 
