@@ -20,6 +20,13 @@ import feedparser
 from bs4 import BeautifulSoup
 
 from app.providers.base import BaseFeedProvider, BaseProvider, ReleaseItem
+from app.providers.catchup import (
+    clamp_max_pages,
+    dedupe_by_identity,
+    latest_meta,
+    parse_timestamp,
+    truncate_newest_first,
+)
 from app.parser import extract_series_and_volume, is_pdf_release, extract_release_group
 from app.security import safe_http_get, is_safe_public_url
 
@@ -280,6 +287,110 @@ class NyaaNovelProvider(BaseFeedProvider):
 
         return all_results
 
+    def fetch_releases_since(
+        self,
+        *,
+        cutoff_iso: Optional[str] = None,
+        stop_guid: Optional[str] = None,
+        max_pages: Optional[int] = None,
+    ) -> List[ReleaseItem]:
+        """Catch-up scan: RSS first, then keep crawling backwards to the cutoff.
+
+        Nyaa RSS entries are timestamped and every HTML table row carries a
+        ``data-timestamp`` used by :meth:`crawl_pages`' existing ``date_cutoff``
+        support, so the scan stops as soon as a release older than the previous
+        scan is reached.  ``max_pages`` bounds the total work.
+        """
+        page_limit = clamp_max_pages(max_pages)
+        cutoff_dt = parse_timestamp(cutoff_iso)
+
+        if self.query:
+            # Query crawls have no RSS window; page with the same cutoff logic.
+            items = self.crawl_pages(
+                max_pages=page_limit, query=self.query, date_cutoff=cutoff_dt
+            )
+            return self._finish_catchup(items, cutoff_iso, stop_guid, page_limit)
+
+        feed_url = self.url if "page=rss" in self.url else f"{NYAA_BASE_URL}/?page=rss&c={self.category}"
+        rss_items: List[ReleaseItem] = []
+        try:
+            rss_items = self._fetch_rss(feed_url)
+        except Exception as exc:
+            logger.warning(f"Error fetching Nyaa RSS feed during catch-up ({exc}); crawling HTML instead.")
+
+        if not rss_items:
+            # RSS unavailable or empty: crawl like fetch_releases does, but with
+            # the previous scan's cutoff as the stopping point.
+            items = self.crawl_pages(max_pages=page_limit, date_cutoff=cutoff_dt)
+            return self._finish_catchup(items, cutoff_iso, stop_guid, page_limit)
+
+        # The RSS window is the newest page.  If it already contains the
+        # previous scan's boundary no HTML crawl is needed at all.
+        kept, boundary = truncate_newest_first(rss_items, cutoff_iso=cutoff_iso, stop_guid=stop_guid)
+        if boundary is not None:
+            self.last_crawl_meta = {"pages_scanned": 0, "stop_reason": None, "items": 0}
+            self.last_scan_meta = latest_meta(
+                reached_boundary=True,
+                pages=1,
+                stop_reason=boundary,
+                max_pages=page_limit,
+                extra_pages=0,
+                extra_items=0,
+                candidates=len(rss_items),
+            )
+            return kept
+
+        remaining_pages = page_limit - 1
+        if remaining_pages <= 0:
+            # A one-page catch-up budget cannot look past the RSS window.
+            self.last_scan_meta = latest_meta(
+                reached_boundary=False,
+                pages=1,
+                stop_reason="page_cap",
+                max_pages=page_limit,
+                extra_pages=0,
+                extra_items=0,
+                candidates=len(rss_items),
+            )
+            return rss_items
+
+        # Every RSS item is still newer than the cutoff: page further back.
+        # Crawl from page 1 (the RSS entry count does not match the HTML page
+        # size exactly) and de-duplicate against the RSS window.
+        crawl_items = self.crawl_pages(
+            max_pages=remaining_pages, start_page=1, date_cutoff=cutoff_dt
+        )
+        merged = dedupe_by_identity(list(rss_items) + list(crawl_items))
+        return self._finish_catchup(
+            merged, cutoff_iso, stop_guid, page_limit, base_pages=1
+        )
+
+    def _finish_catchup(
+        self,
+        items: List[ReleaseItem],
+        cutoff_iso: Optional[str],
+        stop_guid: Optional[str],
+        page_limit: int,
+        base_pages: int = 0,
+    ) -> List[ReleaseItem]:
+        """Truncates a catch-up window and records the scan diagnostics."""
+        crawl_meta = dict(getattr(self, "last_crawl_meta", None) or {})
+        crawl_pages = int(crawl_meta.get("pages_scanned") or 0)
+        total_pages = crawl_pages + max(0, int(base_pages))
+        kept, boundary = truncate_newest_first(items, cutoff_iso=cutoff_iso, stop_guid=stop_guid)
+        reason = boundary or crawl_meta.get("stop_reason")
+        reached = boundary is not None or reason in ("cutoff", "end_of_feed")
+        self.last_scan_meta = latest_meta(
+            reached_boundary=reached,
+            pages=total_pages,
+            stop_reason=reason,
+            max_pages=page_limit,
+            extra_pages=max(0, total_pages - self.max_pages),
+            extra_items=max(0, len(items) - len(kept)),
+            candidates=len(items),
+        )
+        return kept
+
     def crawl_pages(
         self,
         max_pages: int = 1,
@@ -297,10 +408,14 @@ class NyaaNovelProvider(BaseFeedProvider):
         delay_sec = delay if delay is not None else self.delay_seconds
         results: List[ReleaseItem] = []
         seen_links = set()
+        pages_scanned = 0
+        stop_reason: Optional[str] = None
+        self.last_crawl_meta = {"pages_scanned": 0, "stop_reason": None, "items": 0}
 
         for page in range(start_page, start_page + max_pages):
             if stop_check and stop_check():
                 logger.info("Nyaa crawl stop requested by caller.")
+                stop_reason = "stop_requested"
                 break
 
             params = {
@@ -321,16 +436,20 @@ class NyaaNovelProvider(BaseFeedProvider):
                 resp = safe_http_get(page_url, timeout=15.0, headers=DEFAULT_HEADERS)
                 if resp.status_code == 404:
                     logger.info(f"Nyaa reached end of results at page {page}.")
+                    stop_reason = "end_of_feed"
                     break
                 html = resp.text
             except Exception as e:
                 logger.warning(f"Error fetching Nyaa page {page} ({page_url}): {e}")
+                stop_reason = "error"
                 break
 
+            pages_scanned += 1
             soup = BeautifulSoup(html, "html.parser")
             rows = soup.select("table.torrent-list tbody tr")
             if not rows:
                 logger.info(f"No torrent rows found on Nyaa page {page}. End of search.")
+                stop_reason = "end_of_feed"
                 break
 
             reached_date_cutoff = False
@@ -439,9 +558,17 @@ class NyaaNovelProvider(BaseFeedProvider):
                 ))
 
             if reached_date_cutoff:
+                stop_reason = "cutoff"
                 break
 
             if page < (start_page + max_pages - 1) and delay_sec > 0:
                 time.sleep(delay_sec)
 
+        if stop_reason is None:
+            stop_reason = "page_cap"
+        self.last_crawl_meta = {
+            "pages_scanned": pages_scanned,
+            "stop_reason": stop_reason,
+            "items": len(results),
+        }
         return results

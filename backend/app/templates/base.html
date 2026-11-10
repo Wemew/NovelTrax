@@ -291,30 +291,123 @@
             }
         }
 
-        // Shared 1-Click: send a release to the configured qBittorrent downloader
+        // --- Release download state helpers (engine-agnostic chips + in-place polling) ---
+        const _releaseStatePollers = {};
+
+        const _releaseStateClasses = {
+            not_downloaded: 'bg-slate-800 text-slate-300 border border-slate-700',
+            downloading: 'bg-cyan-500/15 text-cyan-300 border border-cyan-500/30',
+            downloaded: 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30',
+            failed: 'bg-rose-500/15 text-rose-300 border border-rose-500/30',
+            in_calibre: 'bg-brand-500/15 text-brand-300 border border-brand-500/30'
+        };
+
+        function _releaseChipClasses(state) {
+            return _releaseStateClasses[state] || _releaseStateClasses.not_downloaded;
+        }
+
+        function _findReleaseChip(btn, releaseId) {
+            if (btn) {
+                const scope = btn.closest('tr, .release-row, .series-card, [data-release-id]');
+                if (scope) {
+                    const found = scope.querySelector('.release-state-chip');
+                    if (found) return found;
+                }
+            }
+            if (releaseId) {
+                return document.querySelector('.release-state-chip[data-release-id="' + releaseId + '"]');
+            }
+            return null;
+        }
+
+        function _applyReleaseState(state, btn) {
+            if (!state) return;
+            const chip = _findReleaseChip(btn, state.release_id);
+            if (chip) {
+                let label = state.label || '';
+                if (state.state === 'downloading' && state.progress_pct) {
+                    label = label + ' ' + Math.round(Number(state.progress_pct)) + '%';
+                }
+                chip.dataset.state = state.state || '';
+                chip.setAttribute('data-state', state.state || '');
+                chip.textContent = label;
+                chip.title = state.error ? (state.label || '') + ': ' + state.error : (state.label || '');
+                chip.className = 'release-state-chip inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold ' + _releaseChipClasses(state.state);
+            }
+            if (btn && state.can_download !== undefined && state.can_download !== null) {
+                btn.disabled = !state.can_download;
+            }
+        }
+
+        function _releaseStatePollStop(releaseId) {
+            const timer = _releaseStatePollers[releaseId];
+            if (timer) {
+                clearTimeout(timer);
+                delete _releaseStatePollers[releaseId];
+            }
+        }
+
+        function _pollReleaseState(releaseId, btn) {
+            _releaseStatePollStop(releaseId);
+            _releaseStatePollers[releaseId] = setTimeout(async () => {
+                if (!releaseId) return;
+                if (document.hidden) {
+                    // Skip the network call while the tab is hidden; resume when visible.
+                    _pollReleaseState(releaseId, btn);
+                    return;
+                }
+                try {
+                    const res = await fetch(`/api/releases/${releaseId}/state`);
+                    if (res.ok) {
+                        const data = await res.json();
+                        if (data && data.status === 'success') {
+                            _applyReleaseState(data, btn);
+                            if (data.state === 'downloading') {
+                                _pollReleaseState(releaseId, btn);
+                                return;
+                            }
+                            if (data.state === 'downloaded') {
+                                showToast('Download completed for this release', 'success');
+                            }
+                        }
+                    }
+                } catch (err) {
+                    // Stop polling on repeated errors rather than hammering the endpoint.
+                }
+            }, 1500);
+        }
+
+        // Shared 1-Click: send a release to the downloader selected in Settings
         async function downloadRelease(releaseId, btn = null) {
             if (!releaseId) return;
             const icon = btn ? btn.querySelector('i') : null;
             if (btn) btn.disabled = true;
             if (icon) icon.classList.add('animate-spin');
+            let data = {};
             try {
                 const res = await fetch(`/api/releases/${releaseId}/download`, { method: 'POST' });
-                let data = {};
                 try {
                     data = await res.json();
                 } catch (parseErr) {
                     data = {};
                 }
-                if (res.ok && data.status === 'success') {
-                    showToast(data.message || 'Sent to downloader successfully', 'success');
+                if ((res.ok && data.status === 'success') || data.status === 'skipped') {
+                    showToast(data.message || 'Sent to downloader successfully', data.status === 'skipped' ? 'info' : 'success');
                 } else {
                     showToast(data.message || data.detail || `Download failed (HTTP ${res.status})`, 'error');
+                }
+                if (data && data.state) {
+                    _applyReleaseState(data.state, btn);
+                    if (data.state.state === 'downloading') {
+                        _pollReleaseState(releaseId, btn);
+                    }
                 }
             } catch (err) {
                 showToast('Error: ' + err, 'error');
             } finally {
                 if (icon) icon.classList.remove('animate-spin');
                 if (btn) btn.disabled = false;
+                if (btn && data && data.state && data.state.can_download === false) btn.disabled = true;
             }
         }
 

@@ -33,6 +33,11 @@ services:
       - CALIBRE_DIR=/calibre
       - DATA_DIR=/app/data
       - TZ=Etc/UTC  # Set to your timezone, e.g. Europe/Copenhagen, America/New_York
+      # Local folder where the TorBox debrid engine fetches finished novel files.
+      - DOWNLOAD_DIR=/downloads
+      # Optional: seed the TorBox engine on first start.
+      # - TORBOX_API_KEY=your-torbox-api-key
+      # - TORBOX_ENABLED=true
 
     volumes:
       # 1. Mount your Calibre library dataset or folder (READ-ONLY)
@@ -42,3 +47,7 @@ services:
       # 2. Mount persistent storage for NovelTrax database, cached covers, and logs
       # Replace '/mnt/pool/apps/noveltrax/data' with your app dataset:
       - /mnt/tank/apps/noveltrax/data:/app/data
+
+      # 3. TorBox download target. This is where fetched novel files are written;
+      # it must be writable by the container's UID/GID (568:568 on TrueNAS SCALE).
+      - /mnt/tank/apps/noveltrax/downloads:/downloads

@@ -3,6 +3,88 @@
 {% block title %}Downloader & Queue - NovelTrax{% endblock %}
 
 {% block content %}
+{% set engine = (engine if engine is defined and engine else (settings.downloader_engine if settings is defined and settings.downloader_engine else 'qbit'))|lower %}
+{% set qstatus = qbit_status if qbit_status is defined else {} %}
+{% set tstatus = torbox_status if torbox_status is defined else {} %}
+{% set dl_dir = download_dir if download_dir is defined and download_dir else (settings.downloads_dir if settings is defined and settings.downloads_dir else '/downloads') %}
+{% set torbox_torrents = torrents if torrents is defined and torrents else [] %}
+
+{% macro torbox_progress_cell(t) %}
+    {% set phase = (t.phase or '')|lower %}
+    {% set pct_raw = t.progress_pct if (t.progress_pct is defined and t.progress_pct is not none) else ((t.progress or 0) * 100) %}
+    {% set pct = pct_raw|round(0)|int %}
+    {% if phase == 'fetching' %}
+    <div class="flex items-center justify-between text-[11px] text-slate-400 mb-1 font-mono">
+        <span>Fetching {{ pct }}%</span>
+        <span>{{ ((t.downloaded_bytes or 0) / 1024 / 1024)|round(1) }} MB / {{ ((t.total_bytes or 0) / 1024 / 1024)|round(1) }} MB</span>
+    </div>
+    <div class="w-full bg-slate-800 rounded-full h-1.5 overflow-hidden mb-1">
+        <div class="bg-brand-500 h-1.5 rounded-full" style="width: {{ pct }}%"></div>
+    </div>
+    <span class="text-[10px] text-cyan-400 font-mono">Fetching &middot; {{ ((t.speed_bps or 0) / 1024 / 1024)|round(1) }} MB/s</span>
+    {% elif phase == 'ready' %}
+    <span class="text-[11px] text-emerald-300 font-semibold">Ready &mdash; fetch queued</span>
+    {% elif phase == 'routing' %}
+    <span class="text-[11px] text-cyan-300 font-semibold">Processing&hellip;</span>
+    {% elif phase == 'processing' %}
+    <span class="text-[11px] text-amber-300 font-semibold">Processing on TorBox&hellip;</span>
+    {% elif t.failed or (t.state or '')|lower == 'failed' %}
+    <span class="text-[11px] text-rose-300 font-semibold">Failed</span>
+    {% elif pct > 0 %}
+    <div class="flex items-center justify-between text-[11px] text-slate-400 mb-1 font-mono">
+        <span>{{ pct }}%</span>
+        <span>ETA: {{ t.eta_seconds or 0 }}s</span>
+    </div>
+    <div class="w-full bg-slate-800 rounded-full h-1.5 overflow-hidden">
+        <div class="bg-cyan-500 h-1.5 rounded-full" style="width: {{ pct }}%"></div>
+    </div>
+    {% else %}
+    <span class="text-[11px] text-slate-500">&mdash;</span>
+    {% endif %}
+{% endmacro %}
+
+{% macro torbox_state_cell(t) %}
+    {% set phase = (t.phase or '')|lower %}
+    {% set state = (t.state or '')|lower %}
+    {% if t.failed or state == 'failed' %}
+    <span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-rose-500/15 text-rose-300 border border-rose-500/30">Failed</span>
+    {% if t.error %}<p class="text-[10px] text-rose-300/90 mt-1 max-w-xs break-words-anywhere" title="{{ t.error }}">{{ t.error }}</p>{% endif %}
+    {% elif phase == 'fetching' %}
+    <span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-cyan-500/10 text-cyan-300 border border-cyan-500/20">Fetching</span>
+    {% elif phase == 'ready' %}
+    <span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/10 text-emerald-300 border border-emerald-500/20">Ready</span>
+    {% elif phase == 'routing' %}
+    <span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-cyan-500/10 text-cyan-300 border border-cyan-500/20">Processing</span>
+    {% elif phase == 'processing' %}
+    <span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/10 text-amber-300 border border-amber-500/20">Processing on TorBox</span>
+    {% elif state == 'downloading' %}
+    <span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-cyan-500/10 text-cyan-300 border border-cyan-500/20">Downloading</span>
+    {% elif state == 'queued' or state == 'queued_slot' %}
+    <span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-800 text-slate-300 border border-slate-700">Queued</span>
+    {% elif state == 'stalled' %}
+    <span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/10 text-amber-300 border border-amber-500/20">Stalled</span>
+    {% elif state == 'ready' %}
+    <span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/10 text-emerald-300 border border-emerald-500/20">Ready</span>
+    {% elif state == 'uploaded' or state == 'completed' %}
+    <span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">Completed</span>
+    {% else %}
+    <span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-800 text-slate-300 border border-slate-700">{{ t.state or t.download_status or 'Unknown' }}</span>
+    {% endif %}
+{% endmacro %}
+
+{% macro torbox_controls_cell(t) %}
+<div class="flex items-center justify-end gap-1.5">
+    {% if t.can_retry or t.failed %}
+    <button type="button" onclick="retryTorbox({{ t.release_id }})" title="Retry TorBox download" class="btn-retry p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-amber-400 border border-slate-700 transition-colors">
+        <i data-lucide="rotate-ccw" class="w-3.5 h-3.5"></i>
+    </button>
+    {% endif %}
+    <button type="button" onclick="removeTorbox({{ t.release_id }})" title="Remove from TorBox queue" class="btn-remove p-1.5 rounded-lg bg-slate-800 hover:bg-rose-900/30 text-rose-400 border border-slate-700 transition-colors">
+        <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
+    </button>
+</div>
+{% endmacro %}
+
 <div class="space-y-8">
 
     <!-- Header & Action Row -->
@@ -13,7 +95,11 @@
                 Downloader & Queue Management
             </h1>
             <p class="text-xs text-slate-400 mt-1">
+                {% if engine == 'torbox' %}
+                Monitors the TorBox debrid engine, displays the live TorBox queue, and manages novel acquisition tasks fetched into the local downloads folder.
+                {% else %}
                 Monitors active qBittorrent downloads, displays live torrent queue progress, and manages novel acquisition tasks.
+                {% endif %}
             </p>
         </div>
 
@@ -33,18 +119,44 @@
     <div class="bg-slate-900/90 border border-slate-800 rounded-2xl p-5 sm:p-6 shadow-xl space-y-4">
         <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
             <div class="flex items-center gap-3.5">
-                <div class="w-11 h-11 rounded-xl {% if qbit_status.success %}bg-emerald-500/10 text-emerald-400 border border-emerald-500/20{% else %}bg-amber-500/10 text-amber-400 border border-amber-500/20{% endif %} flex items-center justify-center flex-shrink-0">
-                    <i data-lucide="{% if qbit_status.success %}check-circle{% else %}plug-zap{% endif %}" class="w-6 h-6"></i>
+                {% if engine == 'torbox' %}
+                <div class="w-11 h-11 rounded-xl {% if tstatus.connected %}bg-emerald-500/10 text-emerald-400 border border-emerald-500/20{% else %}bg-amber-500/10 text-amber-400 border border-amber-500/20{% endif %} flex items-center justify-center flex-shrink-0">
+                    <i data-lucide="{% if tstatus.connected %}check-circle{% else %}plug-zap{% endif %}" class="w-6 h-6"></i>
                 </div>
                 <div>
                     <div class="flex items-center gap-2 flex-wrap">
-                        <h3 class="text-sm font-bold text-white">Downloader Status: {{ 'Connected' if qbit_status.success else 'Needs In-App Setup' }}</h3>
-                        <span class="px-2.5 py-0.5 rounded-full text-[10px] font-semibold {% if qbit_status.success %}bg-emerald-500/10 text-emerald-400 border border-emerald-500/20{% else %}bg-amber-500/10 text-amber-400 border border-amber-500/20{% endif %}">
-                            {{ 'Online' if qbit_status.success else 'Disconnected' }}
+                        <h3 class="text-sm font-bold text-white">Downloader Status: {{ 'Connected' if tstatus.connected else 'Needs In-App Setup' }}</h3>
+                        <span class="px-2.5 py-0.5 rounded-full text-[10px] font-semibold {% if tstatus.connected %}bg-emerald-500/10 text-emerald-400 border border-emerald-500/20{% else %}bg-amber-500/10 text-amber-400 border border-amber-500/20{% endif %}">
+                            {{ 'Online' if tstatus.connected else 'Disconnected' }}
+                        </span>
+                        <span class="px-2.5 py-0.5 rounded-full text-[10px] font-semibold bg-cyan-500/10 text-cyan-300 border border-cyan-500/20">
+                            Engine: TorBox
                         </span>
                     </div>
-                    <p class="text-xs text-slate-400 mt-0.5 font-mono">{{ qbit_status.message }}</p>
+                    <p id="torbox-engine-status" class="text-xs text-slate-400 mt-0.5 font-mono">{{ tstatus.message or 'TorBox engine selected' }}</p>
+                    <p class="text-[11px] text-slate-500 mt-0.5">
+                        {% if tstatus.plan %}<span class="font-mono">Plan: {{ tstatus.plan }}</span> &bull; {% endif %}
+                        {% if tstatus.active_slots is defined and tstatus.active_slots is not none %}<span class="font-mono">Active slots: {{ tstatus.active_slots }}</span> &bull; {% endif %}
+                        Local folder: <span class="font-mono text-slate-300">{{ dl_dir }}</span>
+                    </p>
                 </div>
+                {% else %}
+                <div class="w-11 h-11 rounded-xl {% if qstatus.success %}bg-emerald-500/10 text-emerald-400 border border-emerald-500/20{% else %}bg-amber-500/10 text-amber-400 border border-amber-500/20{% endif %} flex items-center justify-center flex-shrink-0">
+                    <i data-lucide="{% if qstatus.success %}check-circle{% else %}plug-zap{% endif %}" class="w-6 h-6"></i>
+                </div>
+                <div>
+                    <div class="flex items-center gap-2 flex-wrap">
+                        <h3 class="text-sm font-bold text-white">Downloader Status: {{ 'Connected' if qstatus.success else 'Needs In-App Setup' }}</h3>
+                        <span class="px-2.5 py-0.5 rounded-full text-[10px] font-semibold {% if qstatus.success %}bg-emerald-500/10 text-emerald-400 border border-emerald-500/20{% else %}bg-amber-500/10 text-amber-400 border border-amber-500/20{% endif %}">
+                            {{ 'Online' if qstatus.success else 'Disconnected' }}
+                        </span>
+                        <span class="px-2.5 py-0.5 rounded-full text-[10px] font-semibold bg-slate-800 text-slate-300 border border-slate-700">
+                            Engine: qBittorrent
+                        </span>
+                    </div>
+                    <p class="text-xs text-slate-400 mt-0.5 font-mono">{{ qstatus.message }}</p>
+                </div>
+                {% endif %}
             </div>
             <div class="flex items-center gap-2">
                 <button type="button" onclick="location.reload()" class="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 text-xs font-semibold flex items-center gap-1.5 transition-colors">
@@ -55,7 +167,21 @@
         </div>
 
         <!-- Inline In-App Configuration Panel (Shown when disconnected or expanded) -->
-        <div id="downloader-config-panel" class="{% if qbit_status.success %}hidden{% endif %} pt-4 border-t border-slate-800/80 space-y-4">
+        <div id="downloader-config-panel" class="{% if qstatus.success or tstatus.connected %}hidden{% endif %} pt-4 border-t border-slate-800/80 space-y-4">
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                    <label class="block text-xs font-semibold text-slate-400 mb-1" for="downloader-engine">Download Engine</label>
+                    <select id="downloader-engine" name="downloader_engine" onchange="saveDownloaderEngine(this.value)" class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-brand-500">
+                        <option value="qbit" {% if engine != 'torbox' %}selected{% endif %}>qBittorrent (local torrent client)</option>
+                        <option value="torbox" {% if engine == 'torbox' %}selected{% endif %}>TorBox (debrid cloud + local fetch)</option>
+                    </select>
+                </div>
+                <div class="text-[11px] text-slate-500 leading-relaxed self-end">
+                    <strong class="text-slate-300">TorBox handles torrent releases only</strong> (Nyaa magnets and <code class="font-mono text-slate-400">.torrent</code> URLs).
+                    J-Novels / direct web-page links are <strong>not</strong> supported by TorBox and are skipped with a clear message.
+                </div>
+            </div>
+
             <div class="text-xs text-slate-300">
                 Configure your BitTorrent downloader (qBittorrent, Flood, Torbox, or Real-Debrid qBit emulator) directly in NovelTrax:
             </div>
@@ -115,6 +241,80 @@
         </div>
     </div>
 
+    {% if engine == 'torbox' %}
+    <!-- Active TorBox Queue Section -->
+    <div class="space-y-4">
+        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <h2 class="text-lg font-bold text-white tracking-tight flex items-center gap-2">
+                <i data-lucide="list-ordered" class="w-5 h-5 text-slate-400"></i>
+                Active TorBox Queue
+                <span class="text-xs text-slate-500 font-mono font-normal">{{ torbox_torrents|length }} item(s)</span>
+            </h2>
+            <div class="flex flex-wrap items-center gap-2.5">
+                <span id="torbox-last-checked" class="text-xs text-slate-500 font-mono">
+                    {% if torbox_last_checked_seconds_ago is defined and torbox_last_checked_seconds_ago is not none %}
+                    Last checked: {{ torbox_last_checked_seconds_ago }}s ago
+                    {% else %}
+                    Not checked yet
+                    {% endif %}
+                </span>
+                <button type="button" onclick="checkTorboxNow()" id="btn-torbox-check-now" class="px-3.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-slate-200 flex items-center gap-1.5 transition-colors shadow-sm active:scale-95">
+                    <i data-lucide="refresh-cw" class="w-3.5 h-3.5 text-cyan-400"></i>
+                    Check now
+                </button>
+                <button type="button" onclick="clearFailedTorbox()" id="btn-torbox-clear-failed" class="px-3.5 py-1.5 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/30 text-xs font-semibold text-rose-300 flex items-center gap-1.5 transition-colors active:scale-95">
+                    <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
+                    Clear failed
+                </button>
+            </div>
+        </div>
+
+        <div class="bg-slate-900/90 border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
+            <div class="overflow-x-auto">
+                <table class="w-full text-left border-collapse text-xs">
+                    <thead>
+                        <tr class="bg-slate-950/80 border-b border-slate-800 text-slate-400 font-semibold uppercase tracking-wider text-[11px]">
+                            <th class="py-3 px-4">Torrent Name</th>
+                            <th class="py-3 px-4">Size</th>
+                            <th class="py-3 px-4 w-48">Progress</th>
+                            <th class="py-3 px-4">Speed</th>
+                            <th class="py-3 px-4">State</th>
+                            <th class="py-3 px-4 text-right">Controls</th>
+                        </tr>
+                    </thead>
+                    <tbody id="torbox-queue-body" class="divide-y divide-slate-800/60">
+                        {% for t in torbox_torrents %}
+                        <tr class="torbox-row hover:bg-slate-850/50 transition-colors" id="torbox-row-{{ t.release_id }}" data-release-id="{{ t.release_id }}">
+                            <td class="py-3 px-4 max-w-xs font-semibold text-white truncate break-words-anywhere" title="{{ t.name }}">{{ t.name }}</td>
+                            <td class="py-3 px-4 text-slate-300 font-mono">{{ ((t.size_bytes or t.size or 0) / 1024 / 1024)|round(1) }} MB</td>
+                            <td class="py-3 px-4">{{ torbox_progress_cell(t) }}</td>
+                            <td class="py-3 px-4 font-mono text-cyan-400">
+                                {% if (t.speed_bps or t.download_speed or t.dlspeed or 0) > 0 %}
+                                {{ ((t.speed_bps or t.download_speed or t.dlspeed) / 1024 / 1024)|round(2) }} MB/s
+                                {% else %}
+                                &mdash;
+                                {% endif %}
+                            </td>
+                            <td class="py-3 px-4">{{ torbox_state_cell(t) }}</td>
+                            <td class="py-3 px-4 text-right">{{ torbox_controls_cell(t) }}</td>
+                        </tr>
+                        {% endfor %}
+                        {% if not torbox_torrents %}
+                        <tr id="torbox-empty-row">
+                            <td colspan="6" class="py-12 text-center text-slate-500">
+                                <div class="flex flex-col items-center justify-center gap-2">
+                                    <i data-lucide="inbox" class="w-8 h-8 text-slate-600"></i>
+                                    <span>No active TorBox downloads. Send a Nyaa torrent or magnet release from the Releases page.</span>
+                                </div>
+                            </td>
+                        </tr>
+                        {% endif %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+    {% else %}
     <!-- Active Downloader Queue Section -->
     <div class="space-y-4">
         <div class="flex items-center justify-between">
@@ -196,6 +396,7 @@
             </div>
         </div>
     </div>
+    {% endif %}
 
 </div>
 
@@ -203,6 +404,25 @@
 function toggleDownloaderConfig() {
     const p = document.getElementById('downloader-config-panel');
     if (p) p.classList.toggle('hidden');
+}
+
+async function saveDownloaderEngine(value) {
+    try {
+        const res = await fetch('/api/settings', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ downloader_engine: value })
+        });
+        const data = await res.json();
+        if (data.status === 'success') {
+            showToast('Download engine switched to ' + (value === 'torbox' ? 'TorBox' : 'qBittorrent'), 'success');
+            setTimeout(() => location.reload(), 700);
+        } else {
+            showToast(data.message || 'Could not switch the download engine', 'error');
+        }
+    } catch (err) {
+        showToast('Error: ' + err, 'error');
+    }
 }
 
 async function saveDownloaderConfig() {
@@ -299,4 +519,319 @@ async function deleteTorrent(hash) {
     }
 }
 </script>
+
+{% if engine == 'torbox' %}
+<script>
+    // TorBox queue: server-rendered rows above; the poller only updates them in place.
+    const TORBOX_POLL_ACTIVE_MS = 1000;   // 1 s while any row is active / ready / fetching / routing
+    const TORBOX_POLL_IDLE_MS = 5000;     // 5 s when the queue is idle or only queued/failed
+    let _torboxPollTimer = null;
+    let _torboxTorrents = [];
+    const _torboxConfirmState = {};
+
+    function _esc(value) {
+        return String(value === undefined || value === null ? '' : value)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+    }
+
+    function _fmtMb(n) {
+        const v = Number(n) || 0;
+        if (v <= 0) return '0 MB';
+        const mb = v / (1024 * 1024);
+        if (mb >= 1024) return (mb / 1024).toFixed(2) + ' GB';
+        return (mb >= 100 ? mb.toFixed(0) : mb.toFixed(1)) + ' MB';
+    }
+
+    function _fmtEta(s) {
+        const v = Math.max(0, Math.round(Number(s) || 0));
+        if (!v) return '—';
+        if (v < 60) return v + 's';
+        const m = Math.floor(v / 60);
+        const sec = v % 60;
+        if (m < 60) return sec ? m + 'm ' + sec + 's' : m + 'm';
+        const h = Math.floor(m / 60);
+        const mm = m % 60;
+        return mm ? h + 'h ' + mm + 'm' : h + 'h';
+    }
+
+    function _queueConfirm(key, text) {
+        const now = Date.now();
+        const armedAt = _torboxConfirmState[key];
+        if (armedAt && (now - armedAt) < 4000) {
+            delete _torboxConfirmState[key];
+            return true;
+        }
+        _torboxConfirmState[key] = now;
+        showToast(text || 'Click again within 4 seconds to confirm', 'warning');
+        return false;
+    }
+
+    function _torboxProgressHtml(t) {
+        const phase = String(t.phase || '').toLowerCase();
+        const pctRaw = (t.progress_pct !== undefined && t.progress_pct !== null)
+            ? Number(t.progress_pct)
+            : Number(t.progress || 0) * 100;
+        const pct = Math.max(0, Math.min(100, pctRaw || 0));
+        const done = Number(t.downloaded_bytes || 0);
+        const total = Number(t.total_bytes || t.size_bytes || t.size || 0);
+        const speed = Number(t.speed_bps || t.download_speed || t.dlspeed || 0);
+        const bar = '<div class="w-full bg-slate-800 rounded-full h-1.5 overflow-hidden"><div class="bg-brand-500 h-1.5 rounded-full" style="width: ' + pct.toFixed(0) + '%"></div></div>';
+        if (phase === 'fetching') {
+            return '<div class="flex items-center justify-between text-[11px] text-slate-400 mb-1 font-mono"><span>Fetching ' + pct.toFixed(0) + '%</span><span>' + _fmtMb(done) + ' / ' + _fmtMb(total) + '</span></div>'
+                + bar
+                + '<span class="text-[10px] text-cyan-400 font-mono">Fetching · ' + _fmtMb(speed) + '/s</span>';
+        }
+        if (phase === 'ready') return '<span class="text-[11px] text-emerald-300 font-semibold">Ready — fetch queued</span>';
+        if (phase === 'routing') return '<span class="text-[11px] text-cyan-300 font-semibold">Processing…</span>';
+        if (phase === 'processing') return '<span class="text-[11px] text-amber-300 font-semibold">Processing on TorBox…</span>';
+        if (t.failed || String(t.state || '').toLowerCase() === 'failed') {
+            return '<span class="text-[11px] text-rose-300 font-semibold">Failed</span>';
+        }
+        if (pct > 0) {
+            return '<div class="flex items-center justify-between text-[11px] text-slate-400 mb-1 font-mono"><span>' + pct.toFixed(0) + '%</span><span>ETA: ' + _fmtEta(t.eta_seconds) + '</span></div>' + bar;
+        }
+        return '<span class="text-[11px] text-slate-500">—</span>';
+    }
+
+    function _torboxStateHtml(t) {
+        const phase = String(t.phase || '').toLowerCase();
+        const state = String(t.state || '').toLowerCase();
+        const badge = (text, classes) => '<span class="px-2 py-0.5 rounded-full text-[10px] font-bold ' + classes + '">' + text + '</span>';
+        if (t.failed || state === 'failed') {
+            let html = badge('Failed', 'bg-rose-500/15 text-rose-300 border border-rose-500/30');
+            if (t.error) {
+                html += '<p class="text-[10px] text-rose-300/90 mt-1 max-w-xs break-words-anywhere" title="' + _esc(t.error) + '">' + _esc(t.error) + '</p>';
+            }
+            return html;
+        }
+        if (phase === 'fetching') return badge('Fetching', 'bg-cyan-500/10 text-cyan-300 border border-cyan-500/20');
+        if (phase === 'ready') return badge('Ready', 'bg-emerald-500/10 text-emerald-300 border border-emerald-500/20');
+        if (phase === 'routing') return badge('Processing', 'bg-cyan-500/10 text-cyan-300 border border-cyan-500/20');
+        if (phase === 'processing') return badge('Processing on TorBox', 'bg-amber-500/10 text-amber-300 border border-amber-500/20');
+        if (state === 'downloading') return badge('Downloading', 'bg-cyan-500/10 text-cyan-300 border border-cyan-500/20');
+        if (state === 'queued' || state === 'queued_slot') return badge('Queued', 'bg-slate-800 text-slate-300 border border-slate-700');
+        if (state === 'stalled') return badge('Stalled', 'bg-amber-500/10 text-amber-300 border border-amber-500/20');
+        if (state === 'ready') return badge('Ready', 'bg-emerald-500/10 text-emerald-300 border border-emerald-500/20');
+        if (state === 'uploaded' || state === 'completed') return badge('Completed', 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30');
+        return badge(_esc(t.state || t.download_status || 'Unknown'), 'bg-slate-800 text-slate-300 border border-slate-700');
+    }
+
+    function _torboxControlsHtml(t) {
+        const id = Number(t.release_id) || 0;
+        let html = '';
+        if (t.can_retry || t.failed || String(t.state || '').toLowerCase() === 'failed') {
+            html += '<button type="button" onclick="retryTorbox(' + id + ')" title="Retry TorBox download" class="btn-retry p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-amber-400 border border-slate-700 transition-colors"><i data-lucide="rotate-ccw" class="w-3.5 h-3.5"></i></button>';
+        }
+        html += '<button type="button" onclick="removeTorbox(' + id + ')" title="Remove from TorBox queue" class="btn-remove p-1.5 rounded-lg bg-slate-800 hover:bg-rose-900/30 text-rose-400 border border-slate-700 transition-colors"><i data-lucide="trash-2" class="w-3.5 h-3.5"></i></button>';
+        return '<div class="flex items-center justify-end gap-1.5">' + html + '</div>';
+    }
+
+    function _torboxRowHtml(t) {
+        const id = Number(t.release_id) || 0;
+        const name = _esc(t.name || t.title || 'Unknown torrent');
+        const size = _fmtMb(t.size_bytes || t.size || 0);
+        const speed = Number(t.speed_bps || t.download_speed || t.dlspeed || 0);
+        return '<tr class="torbox-row hover:bg-slate-850/50 transition-colors" id="torbox-row-' + id + '" data-release-id="' + id + '">'
+            + '<td class="py-3 px-4 max-w-xs font-semibold text-white truncate break-words-anywhere" title="' + name + '">' + name + '</td>'
+            + '<td class="py-3 px-4 text-slate-300 font-mono">' + size + '</td>'
+            + '<td class="py-3 px-4">' + _torboxProgressHtml(t) + '</td>'
+            + '<td class="py-3 px-4 font-mono text-cyan-400">' + (speed > 0 ? _fmtMb(speed) + '/s' : '—') + '</td>'
+            + '<td class="py-3 px-4">' + _torboxStateHtml(t) + '</td>'
+            + '<td class="py-3 px-4 text-right">' + _torboxControlsHtml(t) + '</td>'
+            + '</tr>';
+    }
+
+    function _torboxEmptyRow() {
+        return '<tr id="torbox-empty-row"><td colspan="6" class="py-12 text-center text-slate-500"><div class="flex flex-col items-center justify-center gap-2"><i data-lucide="inbox" class="w-8 h-8 text-slate-600"></i><span>No active TorBox downloads. Send a Nyaa torrent or magnet release from the Releases page.</span></div></td></tr>';
+    }
+
+    function _ensureTorboxEmptyState() {
+        const body = document.getElementById('torbox-queue-body');
+        if (!body) return;
+        const rows = body.querySelectorAll('tr[data-release-id]');
+        const empty = document.getElementById('torbox-empty-row');
+        if (rows.length === 0) {
+            if (!empty) body.insertAdjacentHTML('beforeend', _torboxEmptyRow());
+        } else if (empty) {
+            empty.remove();
+        }
+    }
+
+    function _dropTorboxRow(releaseId) {
+        const id = Number(releaseId) || 0;
+        const row = document.getElementById('torbox-row-' + id);
+        if (row) row.remove();
+        _torboxTorrents = _torboxTorrents.filter(function (t) { return Number(t.release_id) !== id; });
+        _ensureTorboxEmptyState();
+    }
+
+    function _visibleFailedTorboxIds() {
+        return _torboxTorrents
+            .filter(function (t) { return t.failed || String(t.state || '').toLowerCase() === 'failed'; })
+            .map(function (t) { return Number(t.release_id) || 0; });
+    }
+
+    function renderTorboxQueue(torrents) {
+        const body = document.getElementById('torbox-queue-body');
+        if (!body) return;
+        const list = Array.isArray(torrents) ? torrents : [];
+        _torboxTorrents = list;
+        const seen = {};
+        list.forEach(function (t) {
+            const id = Number(t.release_id) || 0;
+            seen[String(id)] = true;
+            const existing = document.getElementById('torbox-row-' + id);
+            if (existing) {
+                existing.outerHTML = _torboxRowHtml(t);
+            } else {
+                body.insertAdjacentHTML('beforeend', _torboxRowHtml(t));
+            }
+        });
+        Array.prototype.slice.call(body.querySelectorAll('tr[data-release-id]')).forEach(function (row) {
+            const id = String(Number(row.getAttribute('data-release-id')) || 0);
+            if (!seen[id]) row.remove();
+        });
+        _ensureTorboxEmptyState();
+        if (window.lucide) lucide.createIcons();
+    }
+
+    function _torboxIsActive(t) {
+        const state = String(t.state || '').toLowerCase();
+        const phase = String(t.phase || '').toLowerCase();
+        if (['downloading', 'ready', 'processing', 'fetching', 'routing', 'queued_slot'].indexOf(state) !== -1) return true;
+        return ['fetching', 'routing', 'processing', 'ready'].indexOf(phase) !== -1;
+    }
+
+    function _scheduleTorboxPoll() {
+        clearTimeout(_torboxPollTimer);
+        const active = _torboxTorrents.some(_torboxIsActive);
+        _torboxPollTimer = setTimeout(refreshDownloadsNow, active ? TORBOX_POLL_ACTIVE_MS : TORBOX_POLL_IDLE_MS);
+    }
+
+    function _setTorboxEngineStatus(downloader) {
+        const el = document.getElementById('torbox-engine-status');
+        if (!el || !downloader) return;
+        const parts = [];
+        if (downloader.message) parts.push(downloader.message);
+        if (downloader.plan) parts.push('Plan: ' + downloader.plan);
+        if (downloader.active_slots !== undefined && downloader.active_slots !== null) parts.push('Active slots: ' + downloader.active_slots);
+        if (parts.length) el.textContent = parts.join(' · ');
+    }
+
+    async function refreshDownloadsNow() {
+        try {
+            const res = await fetch('/api/downloads/status', { headers: { 'Accept': 'application/json' } });
+            if (res.ok) {
+                const data = await res.json();
+                if (data && (data.status === 'success' || data.status === 'degraded')) {
+                    renderTorboxQueue(data.torrents || []);
+                    const lastEl = document.getElementById('torbox-last-checked');
+                    if (lastEl) {
+                        if (data.last_checked_at) {
+                            lastEl.textContent = 'Last checked: ' + new Date(data.last_checked_at).toLocaleTimeString();
+                        } else if (data.last_poll_at) {
+                            lastEl.textContent = 'Last checked: ' + new Date(Number(data.last_poll_at) * 1000).toLocaleTimeString();
+                        } else {
+                            lastEl.textContent = 'Last checked: just now';
+                        }
+                    }
+                    _setTorboxEngineStatus(data.downloader);
+                }
+            }
+        } catch (err) {
+            // Keep the last server-rendered rows on transient network errors.
+        } finally {
+            _scheduleTorboxPoll();
+        }
+    }
+
+    async function checkTorboxNow() {
+        const btn = document.getElementById('btn-torbox-check-now');
+        if (btn) btn.disabled = true;
+        try {
+            const res = await fetch('/api/downloads/torbox/poll', { method: 'POST' });
+            const data = await res.json();
+            if (res.ok && data.status === 'success') {
+                showToast('TorBox queue checked: ' + (data.processed || 0) + ' processed, ' + (data.completed || 0) + ' completed.', 'success');
+            } else {
+                showToast(data.detail || data.message || 'TorBox poll failed', 'error');
+            }
+        } catch (err) {
+            showToast('Error: ' + err, 'error');
+        } finally {
+            if (btn) btn.disabled = false;
+            refreshDownloadsNow();
+        }
+    }
+
+    async function retryTorbox(releaseId) {
+        const id = Number(releaseId) || 0;
+        if (!id) return;
+        try {
+            const res = await fetch(`/api/downloads/torbox/${id}/retry`, { method: 'POST' });
+            const data = await res.json();
+            if (res.ok && data.status === 'success') {
+                showToast(data.message || 'Retry submitted to TorBox', 'success');
+            } else if (data.status === 'skipped') {
+                showToast(data.message || 'Release skipped: TorBox handles torrents only', 'info');
+            } else {
+                showToast(data.message || data.detail || 'Retry failed', 'error');
+            }
+        } catch (err) {
+            showToast('Error: ' + err, 'error');
+        }
+        refreshDownloadsNow();
+    }
+
+    async function removeTorbox(releaseId) {
+        const id = Number(releaseId) || 0;
+        if (!id) return;
+        if (!_queueConfirm('torbox-remove-' + id, 'Remove this TorBox entry from the queue? Click again to confirm.')) return;
+        try {
+            const res = await fetch(`/api/downloads/torbox/${id}/remove`, { method: 'POST' });
+            const data = await res.json();
+            if (res.ok && data.status === 'success') {
+                _dropTorboxRow(id);
+                showToast(data.message || 'Removed from the TorBox queue', 'success');
+            } else {
+                showToast(data.message || data.detail || 'Remove failed', 'error');
+            }
+        } catch (err) {
+            showToast('Error: ' + err, 'error');
+        }
+        refreshDownloadsNow();
+    }
+
+    async function clearFailedTorbox() {
+        const failedIds = _visibleFailedTorboxIds();
+        if (failedIds.length === 0) {
+            showToast('No failed TorBox entries to clear.', 'info');
+            return;
+        }
+        if (!_queueConfirm('torbox-clear-failed', 'Clear ' + failedIds.length + ' failed TorBox entr' + (failedIds.length === 1 ? 'y' : 'ies') + '? Click again to confirm.')) return;
+        try {
+            const res = await fetch('/api/downloads/torbox/clear-failed', { method: 'POST' });
+            const data = await res.json();
+            if (res.ok && data.status === 'success') {
+                showToast('Cleared ' + (data.removed || 0) + ' failed TorBox entr' + ((data.removed || 0) === 1 ? 'y' : 'ies') + '.', 'success');
+            } else {
+                showToast(data.message || data.detail || 'Could not clear failed TorBox entries', 'error');
+            }
+        } catch (err) {
+            showToast('Error: ' + err, 'error');
+        }
+        refreshDownloadsNow();
+    }
+
+    // Start the TorBox queue poller (1 s active / 5 s idle, in-place DOM updates only).
+    refreshDownloadsNow();
+    document.addEventListener('visibilitychange', function () {
+        if (!document.hidden) refreshDownloadsNow();
+    });
+</script>
+{% endif %}
 {% endblock %}

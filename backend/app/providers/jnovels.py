@@ -9,6 +9,12 @@ except ImportError:
     httpx = None
 from bs4 import BeautifulSoup
 from app.providers.base import BaseFeedProvider, ReleaseItem
+from app.providers.catchup import (
+    clamp_max_pages,
+    latest_meta,
+    parse_timestamp,
+    truncate_newest_first,
+)
 from app.parser import extract_series_and_volume, is_pdf_release
 from app.security import safe_client_get
 
@@ -459,13 +465,105 @@ class JNovelsProvider(BaseFeedProvider):
         logger.info(f"Fetched {len(results)} series from J-Novels Master Index ({index_url}).")
         return results
 
-    def _fetch_via_html(self) -> List[ReleaseItem]:
-        results = []
+    def fetch_releases_since(
+        self,
+        *,
+        cutoff_iso: Optional[str] = None,
+        stop_guid: Optional[str] = None,
+        max_pages: Optional[int] = None,
+    ) -> List[ReleaseItem]:
+        """Catch-up scan: page further back until the previous scan's boundary.
+
+        J-Novels articles usually expose a ``<time datetime>`` on recent pages,
+        but older/theme variants may omit it, so the anchor GUID/link of the
+        previous scan's newest item is the primary fallback stopping point.
+        ``max_pages`` bounds the total work.
+        """
+        page_limit = clamp_max_pages(max_pages)
+        items: List[ReleaseItem] = []
+        meta: Dict[str, Any] = {}
+        try:
+            items = self._fetch_via_html(
+                max_pages=page_limit, cutoff_iso=cutoff_iso, stop_guid=stop_guid
+            )
+            meta = dict(getattr(self, "last_html_meta", None) or {})
+        except Exception as exc:
+            logger.warning(f"JNovels catch-up HTML scan failed: {exc}")
+
+        if not items and not meta.get("pages_scanned"):
+            # HTML scraper unavailable or empty: best-effort RSS fallback with
+            # the same truncation rules.  (Plain fetch_releases also falls back
+            # to RSS, so this keeps parity.)
+            rss_items: List[ReleaseItem] = []
+            try:
+                rss_items = self._fetch_via_rss()
+            except Exception as exc:
+                logger.error(f"JNovels catch-up RSS fallback failed: {exc}")
+            kept, boundary = truncate_newest_first(
+                rss_items, cutoff_iso=cutoff_iso, stop_guid=stop_guid
+            )
+            pages = 1 if rss_items else 0
+            self.last_scan_meta = latest_meta(
+                reached_boundary=boundary is not None,
+                pages=pages,
+                stop_reason=boundary or ("end_of_feed" if rss_items else "error"),
+                max_pages=page_limit,
+                extra_pages=max(0, pages - self.max_pages),
+                extra_items=0,
+                candidates=len(rss_items),
+            )
+            return kept
+
+        pages = int(meta.get("pages_scanned") or 0)
+        reason = meta.get("stop_reason")
+        reached = bool(meta.get("reached_boundary")) or reason in (
+            "cutoff",
+            "anchor",
+            "end_of_feed",
+        )
+        self.last_scan_meta = latest_meta(
+            reached_boundary=reached,
+            pages=pages,
+            stop_reason=reason,
+            max_pages=page_limit,
+            extra_pages=max(0, pages - self.max_pages),
+            extra_items=int(meta.get("extra_items") or 0),
+            candidates=int(meta.get("items_seen") or len(items)),
+        )
+        return items
+
+    def _fetch_via_html(
+        self,
+        max_pages: Optional[int] = None,
+        cutoff_iso: Optional[str] = None,
+        stop_guid: Optional[str] = None,
+    ) -> List[ReleaseItem]:
+        """Scrapes WordPress search-result pages newest first.
+
+        Called without arguments it behaves exactly like before (the configured
+        ``self.max_pages`` window).  The catch-up scan passes a larger page
+        budget plus the previous scan's ``cutoff``/``stop_guid`` so pagination
+        stops as soon as an already-covered release is reached.
+        """
+        page_limit = int(max_pages) if max_pages is not None else self.max_pages
+        cutoff_dt = parse_timestamp(cutoff_iso)
+        results: List[ReleaseItem] = []
         seen_links = set()
         current_url = self.url
         page_num = 1
+        pages_scanned = 0
+        stop_reason: Optional[str] = None
+        extra_items = 0
+        items_seen = 0
+        self.last_html_meta = {
+            "pages_scanned": 0,
+            "stop_reason": None,
+            "reached_boundary": False,
+            "extra_items": 0,
+            "items_seen": 0,
+        }
 
-        while current_url and page_num <= self.max_pages:
+        while current_url and page_num <= page_limit:
             logger.debug(f"JNovels fetching page {page_num}: {current_url}")
             html_text = None
             if httpx is not None:
@@ -474,11 +572,13 @@ class JNovelsProvider(BaseFeedProvider):
                         resp = safe_client_get(client, current_url)
                         if resp.status_code == 404:
                             logger.info(f"Reached end of pagination at page {page_num} (HTTP 404).")
+                            stop_reason = "end_of_feed"
                             break
                         resp.raise_for_status()
                         html_text = resp.text
                 except Exception as e:
                     logger.warning(f"Error fetching page {page_num} ({current_url}) with httpx: {e}")
+                    stop_reason = "error"
                     break
             else:
                 try:
@@ -487,11 +587,14 @@ class JNovelsProvider(BaseFeedProvider):
                         html_text = resp.read().decode('utf-8', errors='ignore')
                 except Exception as e:
                     logger.warning(f"Error fetching page {page_num} ({current_url}) with urllib: {e}")
+                    stop_reason = "error"
                     break
 
             if not html_text:
+                stop_reason = "error"
                 break
 
+            pages_scanned += 1
             soup = BeautifulSoup(html_text, "html.parser")
 
             # Typical WordPress themes enclose search results in <article> elements
@@ -501,6 +604,7 @@ class JNovelsProvider(BaseFeedProvider):
 
             if not articles:
                 logger.info(f"No more articles found on page {page_num}. Ending pagination.")
+                stop_reason = "end_of_feed"
                 break
 
             page_new_count = 0
@@ -555,7 +659,7 @@ class JNovelsProvider(BaseFeedProvider):
                     from urllib.parse import quote_plus
                     series_link = f"https://jnovels.com/?s={quote_plus(series_name)}"
 
-                results.append(ReleaseItem(
+                item = ReleaseItem(
                     title=raw_title,
                     link=link,
                     series_name=series_name,
@@ -565,7 +669,25 @@ class JNovelsProvider(BaseFeedProvider):
                     description=desc,
                     series_link=series_link,
                     raw_data={"confidence": parsed["confidence"], "subtitle": parsed["subtitle"]}
-                ))
+                )
+
+                # Previous-scan boundary: stop before re-covering known items.
+                if stop_guid and (item.guid == stop_guid or item.link == stop_guid):
+                    stop_reason = "anchor"
+                    break
+                if cutoff_dt is not None:
+                    item_dt = parse_timestamp(item.pub_date)
+                    if item_dt is not None and item_dt <= cutoff_dt:
+                        stop_reason = "cutoff"
+                        break
+
+                results.append(item)
+                items_seen += 1
+                if page_num > self.max_pages:
+                    extra_items += 1
+
+            if stop_reason:
+                break
 
             # Find link to the next page
             next_tag = soup.select_one("a.next, a.next.page-numbers, link[rel='next'], .nav-previous a")
@@ -578,6 +700,15 @@ class JNovelsProvider(BaseFeedProvider):
 
             page_num += 1
 
+        if stop_reason is None:
+            stop_reason = "page_cap"
+        self.last_html_meta = {
+            "pages_scanned": pages_scanned,
+            "stop_reason": stop_reason,
+            "reached_boundary": stop_reason in ("cutoff", "anchor", "end_of_feed"),
+            "extra_items": extra_items,
+            "items_seen": items_seen,
+        }
         return results
 
     def _fetch_via_rss(self) -> List[ReleaseItem]:

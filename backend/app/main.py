@@ -1,6 +1,7 @@
 import os
 import json
 import math
+import time
 import logging
 import asyncio
 from typing import Dict, Any, Optional
@@ -18,6 +19,8 @@ from app.scheduler import TaskManager
 from app.covers import CoverCache
 from app.security import is_safe_public_url, sanitize_calibre_path
 from app.downloader.qbit import QBitClient
+from app.download_state import release_download_state
+from app.torbox_manager import TorBoxManager
 
 # Setup Logging
 logging.basicConfig(
@@ -33,10 +36,15 @@ os.makedirs(DATA_DIR, exist_ok=True)
 DB_PATH = os.path.join(DATA_DIR, "noveltrax.db")
 CALIBRE_DIR = os.getenv("CALIBRE_DIR", "/calibre")
 
+# TorBox debrid download engine (see .agents/torbox_port/CONTRACT.md)
+TORBOX_API_KEY_MASK = "••••••••••••"
+DOWNLOADER_ENGINES = ("qbit", "torbox")
+
 # Initialize Database, Cache & Task Manager
 db = Database(DB_PATH)
 cover_cache = CoverCache(DATA_DIR)
 task_manager = TaskManager(db, CALIBRE_DIR)
+torbox_manager = TorBoxManager(db)
 
 def get_qbit_client() -> QBitClient:
     """Instantiates QBitClient configured from current app_settings in database."""
@@ -72,6 +80,139 @@ def get_qbit_client() -> QBitClient:
         savepath=settings.get("qbit_savepath", os.getenv("DOWNLOAD_DIR", "/downloads"))
     )
 
+def _active_downloader_engine() -> str:
+    """Resolves the configured download engine, falling back to qBittorrent."""
+    engine = str(db.get_setting("downloader_engine", "qbit") or "qbit").strip().lower()
+    if engine not in DOWNLOADER_ENGINES:
+        logger.warning(f"Unknown downloader_engine '{engine}'; falling back to qbit.")
+        return "qbit"
+    return engine
+
+
+def _masked_settings() -> Dict[str, Any]:
+    """Returns a copy of the settings with the TorBox API key replaced by the mask token."""
+    settings = db.get_all_settings()
+    api_key = str(settings.get("torbox_api_key") or "").strip()
+    settings["torbox_api_key"] = TORBOX_API_KEY_MASK if api_key else ""
+    return settings
+
+
+def _torbox_api_key_is_set() -> bool:
+    return bool(str(db.get_setting("torbox_api_key", "") or "").strip())
+
+
+def _torbox_last_poll_seconds_ago() -> Optional[int]:
+    raw = str(db.get_setting("torbox_last_poll_at", "") or "").strip()
+    if not raw:
+        return None
+    try:
+        stamp = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if stamp <= 0:
+        return None
+    return max(0, int(time.time() - stamp))
+
+
+def _torbox_downloads_dir() -> str:
+    """Resolves the TorBox fetch directory without failing page rendering."""
+    try:
+        return torbox_manager.downloads_dir()
+    except Exception as exc:
+        logger.warning(f"Could not resolve downloads_dir: {exc}")
+        return str(db.get_setting("downloads_dir", os.getenv("DOWNLOAD_DIR", "/downloads")) or "/downloads")
+
+
+def _coerce_int(value: Any) -> Optional[int]:
+    try:
+        return int(float(str(value).strip()))
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_float(value: Any) -> Optional[float]:
+    try:
+        number = float(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(number) or math.isinf(number):
+        return None
+    return number
+
+
+def _clamp_numeric_setting(payload: Dict[str, Any], key: str, low: float, high: float, integer: bool = False) -> None:
+    """Clamps one numeric setting in place; unparsable values are dropped (saved value kept)."""
+    if key not in payload:
+        return
+    number = _coerce_int(payload.get(key)) if integer else _coerce_float(payload.get(key))
+    if number is None:
+        payload.pop(key, None)
+        return
+    number = max(float(low), min(float(high), float(number)))
+    payload[key] = str(int(number)) if number.is_integer() else str(number)
+
+
+def _validated_downloads_dir(raw_value: Any) -> str:
+    """Validates, creates when missing and normalises the local downloads directory."""
+    candidate = str(raw_value if raw_value is not None else "").strip()
+    if not candidate:
+        raise HTTPException(status_code=400, detail="downloads_dir must be an absolute path (received an empty value)")
+    if "\x00" in candidate or ".." in candidate:
+        raise HTTPException(status_code=400, detail="downloads_dir must not contain NUL bytes or '..' path segments")
+    if not os.path.isabs(candidate):
+        raise HTTPException(status_code=400, detail=f"downloads_dir must be an absolute path, got '{candidate}'")
+    normalized = os.path.normpath(candidate)
+    try:
+        os.makedirs(normalized, exist_ok=True)
+    except OSError as exc:
+        raise HTTPException(status_code=400, detail=f"downloads_dir '{normalized}' is not usable: {exc}") from exc
+    return normalized
+
+
+def _prepare_settings_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Applies TorBox key masking, engine validation and numeric clamping before persistence."""
+    clean = dict(payload or {})
+
+    # A blank or masked API key means "keep the saved key" (never clear it from the UI).
+    if "torbox_api_key" in clean:
+        supplied = clean.get("torbox_api_key")
+        supplied_text = "" if supplied is None else str(supplied).strip()
+        if not supplied_text or supplied_text == TORBOX_API_KEY_MASK:
+            clean.pop("torbox_api_key", None)
+
+    if "downloader_engine" in clean:
+        engine = str(clean.get("downloader_engine") or "").strip().lower()
+        if engine not in DOWNLOADER_ENGINES:
+            raise HTTPException(status_code=400, detail="downloader_engine must be 'qbit' or 'torbox'")
+        clean["downloader_engine"] = engine
+
+    for key, low, high in (
+        ("torbox_poll_seconds", 5, 3600),
+        ("torbox_max_concurrent", 1, 20),
+        ("torbox_download_concurrency", 1, 16),
+        ("torbox_parallel_chunks", 1, 8),
+    ):
+        _clamp_numeric_setting(clean, key, low, high, integer=True)
+
+    _clamp_numeric_setting(clean, "torbox_max_download_gb", 1, 10240)
+    _clamp_numeric_setting(clean, "torbox_timeout_hours", 0, 168)
+
+    if "downloads_dir" in clean:
+        clean["downloads_dir"] = _validated_downloads_dir(clean.get("downloads_dir"))
+
+    return clean
+
+
+def _result_error_code(result: Any) -> int:
+    """Extracts the numeric error code from a TorBox manager result dict (0 when absent)."""
+    if not isinstance(result, dict):
+        return 0
+    try:
+        return int(result.get("code") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 from app.providers.metadata import NovelMetadataProvider
 NovelMetadataProvider.set_db(db)
 
@@ -80,6 +221,7 @@ NovelMetadataProvider.set_db(db)
 async def lifespan(app: FastAPI):
     logger.info("Starting NovelTrax application...")
     task_manager.start()
+    torbox_manager.start()
     # Trigger initial database cleanup (PDF purge and discovery deduplication)
     try:
         db.ensure_prioritized_groups_table()
@@ -97,6 +239,7 @@ async def lifespan(app: FastAPI):
         logger.info(f"Calibre library metadata.db not yet found at {scanner.db_path}. Will re-check periodically.")
     yield
     logger.info("Shutting down NovelTrax application...")
+    torbox_manager.stop()
     task_manager.stop()
 
 app = FastAPI(title="NovelTrax", lifespan=lifespan)
@@ -480,29 +623,53 @@ async def discovery_view(
 
 @app.get("/settings", response_class=HTMLResponse)
 async def settings_view(request: Request):
-    settings = db.get_all_settings()
+    settings = _masked_settings()
     return templates.TemplateResponse(
         request=request,
         name="settings.html",
         context={
             "active_page": "settings",
-            "settings": settings
+            "settings": settings,
+            "downloader_engine": _active_downloader_engine(),
+            "torbox_api_key_set": _torbox_api_key_is_set()
         }
     )
 
 @app.get("/downloads", response_class=HTMLResponse)
 async def downloads_view(request: Request):
     """Renders Downloader & Queue Management page with live status and active torrents."""
+    engine = _active_downloader_engine()
+    settings = _masked_settings()
+
+    if engine == "torbox":
+        status_payload = await asyncio.to_thread(torbox_manager.build_status, 1.2)
+        torrents = status_payload.get("torrents") or []
+        return templates.TemplateResponse(
+            request=request,
+            name="downloads.html",
+            context={
+                "active_page": "downloads",
+                "engine": engine,
+                "downloader_engine": engine,
+                "torrents": torrents,
+                "torbox_status": status_payload.get("downloader") or {},
+                "torbox_last_checked_seconds_ago": _torbox_last_poll_seconds_ago(),
+                "settings": settings,
+                "download_dir": _torbox_downloads_dir()
+            }
+        )
+
     qbit = get_qbit_client()
     status = await asyncio.to_thread(qbit.test_connection, timeout=2.0)
     torrents = await asyncio.to_thread(qbit.get_torrents, category=qbit.category) if status.get("success") else []
-    settings = db.get_all_settings()
 
     return templates.TemplateResponse(
         request=request,
         name="downloads.html",
         context={
             "active_page": "downloads",
+            "engine": engine,
+            "downloader_engine": engine,
             "qbit_status": status,
             "torrents": torrents,
             "settings": settings,
@@ -853,6 +1020,8 @@ async def api_discovery_blacklist(payload: Dict[str, Any]):
 @app.post("/api/settings")
 async def api_save_settings(payload: Dict[str, Any]):
     """Save application settings and dynamically reschedule background jobs."""
+    payload = _prepare_settings_payload(payload)
+
     for k, v in payload.items():
         db.set_setting(k, str(v))
 
@@ -914,22 +1083,35 @@ async def api_test_webhook(payload: Optional[Dict[str, Any]] = None):
 @app.get("/api/downloads")
 @app.get("/api/downloads/queue")
 async def api_downloader_queue():
-    """Retrieves list of active torrents from qBittorrent."""
+    """Retrieves list of active torrents from the active downloader engine."""
+    if _active_downloader_engine() == "torbox":
+        payload = await asyncio.to_thread(torbox_manager.build_status)
+        return JSONResponse({
+            "status": "success",
+            "engine": "torbox",
+            "torrents": payload.get("torrents") or []
+        })
+
     qbit = get_qbit_client()
     torrents = await asyncio.to_thread(qbit.get_torrents, category=qbit.category)
     return JSONResponse({"status": "success", "torrents": torrents})
 
 @app.get("/api/downloads/status")
 async def api_downloads_status():
-    """Returns connectivity and version status of the in-app downloader."""
+    """Returns connectivity and version status of the active downloader engine."""
+    if _active_downloader_engine() == "torbox":
+        payload = await asyncio.to_thread(torbox_manager.build_status)
+        return JSONResponse(payload, headers={"Cache-Control": "no-store"})
+
     qbit = get_qbit_client()
     status = await asyncio.to_thread(qbit.test_connection, timeout=3.0)
     return JSONResponse({
         "status": "success",
+        "engine": "qbit",
         "connected": bool(status.get("success")),
         "version": status.get("version", ""),
         "message": status.get("message", "")
-    })
+    }, headers={"Cache-Control": "no-store"})
 
 @app.post("/api/downloader/test")
 @app.post("/api/settings/downloader/test")
@@ -964,6 +1146,19 @@ async def api_downloader_test(payload: Optional[Dict[str, Any]] = None):
         client = get_qbit_client()
 
     res = await asyncio.to_thread(client.test_connection, timeout=3.0, force=True)
+    return JSONResponse(res)
+
+@app.post("/api/downloader/torbox/test")
+async def api_torbox_test(payload: Optional[Dict[str, Any]] = None):
+    """Tests the TorBox API connection; blank/masked keys fall back to the saved API key."""
+    p = payload or {}
+    supplied_key = p.get("torbox_api_key")
+    api_key = None
+    if isinstance(supplied_key, str):
+        candidate = supplied_key.strip()
+        if candidate and candidate != TORBOX_API_KEY_MASK:
+            api_key = candidate
+    res = await asyncio.to_thread(torbox_manager.test_connection, api_key)
     return JSONResponse(res)
 
 @app.post("/api/downloader/configure")
@@ -1063,12 +1258,80 @@ async def api_downloads_selective(torrent_hash: str, payload: Optional[Dict[str,
     )
     return JSONResponse(res)
 
+@app.post("/api/downloads/torbox/poll")
+async def api_torbox_poll():
+    """Runs one synchronous TorBox poll pass (Check now)."""
+    if _active_downloader_engine() != "torbox":
+        raise HTTPException(status_code=409, detail="TorBox is not the active downloader engine")
+    result = dict((await asyncio.to_thread(torbox_manager.poll_now)) or {})
+    # The UI treats a 200 as success; keep the pass diagnostics under poll_status.
+    result["poll_status"] = result.get("status", "")
+    result["status"] = "success"
+    return JSONResponse(result)
+
+@app.post("/api/downloads/torbox/{release_id}/retry")
+async def api_torbox_retry(release_id: int):
+    """Retries a failed TorBox download for a release."""
+    result = await asyncio.to_thread(torbox_manager.retry_release, release_id)
+    error_code = _result_error_code(result)
+    if error_code:
+        raise HTTPException(status_code=error_code, detail=result.get("message") or "TorBox retry failed")
+    return JSONResponse(result)
+
+@app.post("/api/downloads/torbox/{release_id}/remove")
+async def api_torbox_remove(release_id: int):
+    """Removes a saved TorBox download submission and its remote torrent best-effort."""
+    result = await asyncio.to_thread(torbox_manager.remove_release, release_id)
+    error_code = _result_error_code(result)
+    if error_code:
+        raise HTTPException(status_code=error_code, detail=result.get("message") or "TorBox removal failed")
+    return JSONResponse(result)
+
+@app.post("/api/downloads/torbox/clear-failed")
+async def api_torbox_clear_failed():
+    """Clears every failed TorBox download locally."""
+    result = await asyncio.to_thread(torbox_manager.clear_failed)
+    return JSONResponse(result)
+
+@app.get("/api/releases/{release_id}/state")
+async def api_release_download_state(release_id: int):
+    """Returns the download state chip payload for a release."""
+    release = db.get_release_by_id(release_id)
+    if not release:
+        raise HTTPException(status_code=404, detail="Release not found")
+    return JSONResponse({"status": "success", **release_download_state(release)})
+
 @app.post("/api/releases/{release_id}/download")
 async def api_release_download(release_id: int):
-    """Triggers manual download of a release via qBittorrent, with selective volume filtering if bundle."""
+    """Triggers manual download of a release via the active downloader engine."""
     target = db.get_release_by_id(release_id)
     if not target:
         raise HTTPException(status_code=404, detail="Release not found")
+
+    if _active_downloader_engine() == "torbox":
+        result = await asyncio.to_thread(torbox_manager.submit_release, target, source="manual")
+        state = release_download_state(db.get_release_by_id(release_id) or target)
+        if result.get("skipped"):
+            return JSONResponse({
+                "status": "skipped",
+                "engine": "torbox",
+                "message": result.get("message") or "TorBox downloads torrent/magnet releases only.",
+                "state": state
+            })
+        if result.get("success"):
+            return JSONResponse({
+                "status": "success",
+                "engine": "torbox",
+                "cached": bool(result.get("cached")),
+                "message": "Sent to Torbox successfully",
+                "state": state
+            })
+        return JSONResponse({
+            "status": "error",
+            "engine": "torbox",
+            "message": result.get("message") or "Failed to add release to TorBox",
+            "state": state
+        }, status_code=500)
 
     download_url = target.get("download_url") or target.get("link")
     if not download_url:
@@ -1102,9 +1365,9 @@ async def api_release_download(release_id: int):
             )
             db.log_activity("SELECTIVE_DOWNLOAD", f"Selective download applied for '{target['title']}': skipped {int(sel_count)} owned volume files.")
 
-        return JSONResponse({"status": "success", "message": "Sent to downloader successfully"})
+        return JSONResponse({"status": "success", "engine": "qbit", "message": "Sent to downloader successfully"})
     else:
-        return JSONResponse({"status": "error", "message": "Failed to add release to downloader"}, status_code=500)
+        return JSONResponse({"status": "error", "engine": "qbit", "message": "Failed to add release to downloader"}, status_code=500)
 
 # --- Historical Backfill & Synopsis Endpoints ---
 
@@ -1117,7 +1380,7 @@ async def api_backfill_index():
 
 @app.post("/api/backfill/start")
 async def api_backfill_start(payload: Optional[Dict[str, Any]] = None):
-    """Starts the polite historical backfill (Master index + synopses + pagination)."""
+    """Starts the polite historical backfill (Master index + synopses + J-Novels/Nyaa pagination)."""
     if task_manager.is_backfilling:
         return JSONResponse({"status": "in_progress", "message": "Backfill already running"})
 
@@ -1130,12 +1393,26 @@ async def api_backfill_start(payload: Optional[Dict[str, Any]] = None):
         delay = float(delay)
     enrich = bool(p.get("enrich_synopses", True))
 
+    # Optional per-run override of the backfill_include_nyaa setting.
+    include_nyaa = p.get("include_nyaa")
+    if include_nyaa is not None and not isinstance(include_nyaa, bool):
+        include_nyaa = str(include_nyaa).strip().lower() not in ("false", "0", "no", "off")
+
+    if bool(p.get("reset_nyaa", False)):
+        task_manager.reset_nyaa_backfill_cursor()
+
     asyncio.create_task(task_manager.run_polite_backfill(
         max_pages=max_pages,
         enrich_synopses=enrich,
-        delay_seconds=delay
+        delay_seconds=delay,
+        include_nyaa=include_nyaa
     ))
     return JSONResponse({"status": "started", "message": "Polite backfill started in background"})
+
+@app.post("/api/backfill/nyaa/reset")
+async def api_backfill_nyaa_reset():
+    """Resets the resumable Nyaa historical-backfill cursor back to page 1."""
+    return JSONResponse(task_manager.reset_nyaa_backfill_cursor())
 
 @app.post("/api/debug/action")
 async def api_debug_action(payload: Dict[str, Any]):

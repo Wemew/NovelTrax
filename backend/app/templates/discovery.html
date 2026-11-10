@@ -438,7 +438,15 @@
 
             if (data.running) {
                 banner.classList.remove('hidden');
-                statusText.innerText = data.progress || 'Running polite backfill...';
+                let progressText = data.progress || 'Running polite backfill...';
+                if (data.include_nyaa === false) {
+                    progressText += ' (Nyaa historical pages disabled in Settings)';
+                } else if (data.nyaa_done) {
+                    progressText += ' (Nyaa historical pages: complete)';
+                } else if (data.nyaa_next_page) {
+                    progressText += ` (Nyaa resume page: ${data.nyaa_next_page})`;
+                }
+                statusText.innerText = progressText;
                 btnText.innerText = 'Backfilling...';
                 const rateBadge = document.getElementById('backfill-rate-badge');
                 if (rateBadge && data.delay_seconds !== undefined) {
@@ -466,7 +474,7 @@
             if (data.running) {
                 stopBackfill();
             } else {
-                const confirmed = confirm('Start Gentle Historical Backfill?\n\nThis will ingest the Master Index, slowly enrich novel synopses/covers with polite rate-limiting, and deep-scan historical pages based on your configured Settings.\n\nYou can stop or pause it anytime.');
+                const confirmed = confirm('Start Gentle Historical Backfill?\n\nThis will ingest the Master Index, slowly enrich novel synopses/covers with polite rate-limiting, and deep-scan historical J-Novels and Nyaa category 3_1 pages based on your configured Settings.\n\nNyaa historical pages are included when enabled in Settings (Include Nyaa historical pages) and resume from the last scanned page if a run is stopped or hits its page budget.\n\nYou can stop or pause it anytime.');
                 if (!confirmed) return;
 
                 const startRes = await fetch('/api/backfill/start', {

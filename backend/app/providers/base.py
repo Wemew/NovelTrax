@@ -3,6 +3,8 @@ from typing import List, Optional, Dict, Any
 from datetime import datetime
 import hashlib
 
+from app.providers.catchup import clamp_max_pages, latest_meta, truncate_newest_first
+
 class ReleaseItem:
     def __init__(
         self,
@@ -76,11 +78,47 @@ class BaseFeedProvider(ABC):
         self.name = name
         self.url = url
         self.config = config or {}
+        #: Additive diagnostics for the most recent :meth:`fetch_releases_since`
+        #: call.  ``TaskManager`` uses ``reached_boundary`` to decide whether the
+        #: scan watermark may advance and logs the rest (pages/extra items).
+        self.last_scan_meta: Dict[str, Any] = {}
 
     @abstractmethod
     def fetch_releases(self) -> List[ReleaseItem]:
         """Fetch and return list of ReleaseItem instances from the source feed."""
         pass
+
+    def fetch_releases_since(
+        self,
+        *,
+        cutoff_iso: Optional[str] = None,
+        stop_guid: Optional[str] = None,
+        max_pages: Optional[int] = None,
+    ) -> List[ReleaseItem]:
+        """Best-effort catch-up scan for feeds that cannot paginate.
+
+        The default implementation fetches the provider's normal window and
+        then keeps only the newest-first run of items that are still newer than
+        *cutoff_iso* and above *stop_guid*.  Providers that can page further
+        backwards (Nyaa, J-Novels) override this to close the gap instead of
+        merely trimming the visible window.
+
+        ``fetch_releases()`` and every other existing method keep their old
+        behaviour; this is purely additive.
+        """
+        items = list(self.fetch_releases() or [])
+        kept, boundary = truncate_newest_first(items, cutoff_iso=cutoff_iso, stop_guid=stop_guid)
+        self.last_scan_meta = latest_meta(
+            reached_boundary=boundary is not None,
+            pages=1,
+            stop_reason=boundary or "single_window",
+            max_pages=clamp_max_pages(max_pages),
+            extra_pages=0,
+            extra_items=0,
+            candidates=len(items),
+        )
+        return kept
+
 
 # Alias for compatibility with BaseProvider references
 BaseProvider = BaseFeedProvider

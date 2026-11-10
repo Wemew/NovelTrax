@@ -3,6 +3,7 @@ import json
 import logging
 import threading
 import concurrent.futures
+from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
 
 try:
@@ -25,10 +26,22 @@ from app.database import Database
 from app.calibre.scanner import CalibreScanner
 from app.calibre.matcher import CalibreMatcher
 from app.providers.registry import create_provider
+from app.providers.catchup import (
+    DEFAULT_CATCHUP_MAX_PAGES,
+    clamp_max_pages,
+    compute_scan_watermarks,
+)
 from app.notifier.webhook import NotificationService
 from app.covers import CoverCache
 
 logger = logging.getLogger("noveltrax.scheduler")
+
+#: Settings keys for the time-aware catch-up scan.  Read with hard-coded
+#: defaults (nothing is seeded into app_settings) so existing databases get the
+#: feature immediately; an invalid value falls back to the default.
+FEED_CATCHUP_ENABLED_KEY = "feed_catchup_enabled"
+FEED_CATCHUP_MAX_PAGES_KEY = "feed_catchup_max_pages"
+
 
 class TaskManager:
     def __init__(self, db: Database, calibre_path: str, data_dir: Optional[str] = None):
@@ -385,6 +398,61 @@ class TaskManager:
         finally:
             self.is_syncing_calibre = False
 
+    # --- Time-aware (catch-up) feed scanning helpers ---
+
+    def feed_catchup_enabled(self) -> bool:
+        """Whether automatic catch-up scanning is enabled (default: yes)."""
+        try:
+            value = self.db.get_setting(FEED_CATCHUP_ENABLED_KEY, "true")
+        except Exception as exc:
+            logger.debug(f"Could not read {FEED_CATCHUP_ENABLED_KEY}: {exc}")
+            return True
+        return (value or "true").strip().lower() != "false"
+
+    def feed_catchup_max_pages(self) -> int:
+        """Global page budget for one catch-up scan (clamped to 1..50)."""
+        try:
+            value = self.db.get_setting(FEED_CATCHUP_MAX_PAGES_KEY, str(DEFAULT_CATCHUP_MAX_PAGES))
+        except Exception as exc:
+            logger.debug(f"Could not read {FEED_CATCHUP_MAX_PAGES_KEY}: {exc}")
+            value = str(DEFAULT_CATCHUP_MAX_PAGES)
+        return clamp_max_pages(value, default=DEFAULT_CATCHUP_MAX_PAGES)
+
+    def _persist_feed_watermarks(
+        self,
+        feed: Dict[str, Any],
+        config: Dict[str, Any],
+        cutoff: Optional[str],
+        anchor: Optional[str],
+        scan_started_at: str,
+    ) -> None:
+        """Merges the new scan watermarks into ``feeds.config_json``.
+
+        ``database.py`` has no config-only update helper and is out of scope for
+        this feature, so the feed row's own values are passed back to the
+        existing ``update_feed`` unchanged apart from the merged config.
+        """
+        merged = dict(config or {})
+        if cutoff:
+            merged["last_scan_oldest_pub_date"] = cutoff
+        if anchor:
+            merged["last_scan_anchor_guid"] = anchor
+        merged["last_scan_started_at"] = scan_started_at
+        try:
+            interval = int(feed.get("check_interval_minutes") or 60)
+        except (TypeError, ValueError):
+            interval = 60
+        self.db.update_feed(
+            feed["id"],
+            feed["name"],
+            feed["feed_type"],
+            feed["url"],
+            json.dumps(merged),
+            bool(feed.get("enabled", True)),
+            bool(feed.get("auto_request", True)),
+            interval,
+        )
+
     def check_feeds(self) -> Dict[str, Any]:
         """
         Polls all enabled feeds, checks releases against Calibre,
@@ -398,6 +466,14 @@ class TaskManager:
         total_requested = 0
         skipped_manga = 0
         skipped_audiobooks = 0
+
+        # Time-aware catch-up scan (additive counters, old return keys kept).
+        catchup_enabled = self.feed_catchup_enabled()
+        catchup_max_pages_setting = self.feed_catchup_max_pages()
+        scan_started_at = datetime.now(timezone.utc).isoformat()
+        feeds_catchup = 0
+        catchup_extra_items = 0
+        max_pages_reached = 0
 
         # Refresh the per-scan verification budget so a large backlog of
         # unverified releases drains over successive scans.
@@ -429,7 +505,45 @@ class TaskManager:
 
                 try:
                     provider = create_provider(feed_type, feed_name, url, config)
-                    releases = self.filter_chapter_releases(provider.fetch_releases(), self.chapter_context())
+
+                    # --- Time-aware scan (catch-up backwards to the previous
+                    # scan) ---------------------------------------------------
+                    # Watermarks live in config_json; no schema change.  The
+                    # per-feed override wins over the global page budget.
+                    previous_cutoff = config.get("last_scan_oldest_pub_date") if isinstance(config, dict) else None
+                    previous_anchor = config.get("last_scan_anchor_guid") if isinstance(config, dict) else None
+                    effective_max_pages = clamp_max_pages(
+                        config.get("catchup_max_pages") if isinstance(config, dict) else None,
+                        default=catchup_max_pages_setting,
+                    )
+                    catchup_active = bool(
+                        catchup_enabled and (previous_cutoff or previous_anchor)
+                    )
+                    catchup_meta: Dict[str, Any] = {}
+                    if catchup_active:
+                        raw_releases = list(provider.fetch_releases_since(
+                            cutoff_iso=previous_cutoff,
+                            stop_guid=previous_anchor,
+                            max_pages=effective_max_pages,
+                        ) or [])
+                        catchup_meta = dict(getattr(provider, "last_scan_meta", None) or {})
+                    else:
+                        raw_releases = list(provider.fetch_releases() or [])
+
+                    # Compute the watermarks before filtering so chapter drops
+                    # still count as "seen" for coverage purposes.
+                    new_cutoff, new_anchor = compute_scan_watermarks(
+                        previous_cutoff,
+                        previous_anchor,
+                        raw_releases,
+                        reached_boundary=(
+                            True if not catchup_active
+                            else bool(catchup_meta.get("reached_boundary"))
+                        ),
+                        scan_started_at=scan_started_at,
+                    )
+
+                    releases = self.filter_chapter_releases(raw_releases, self.chapter_context())
                     total_found += len(releases)
 
                     new_requests_for_feed = 0
@@ -506,6 +620,35 @@ class TaskManager:
                             notifier.notify_new_request(rel_dict)
 
                     self.db.update_feed_status(feed_id, status="OK")
+                    # Persist the time-aware watermarks only after a fully
+                    # successful scan, so a failed scan is simply retried.
+                    self._persist_feed_watermarks(
+                        feed, config if isinstance(config, dict) else {},
+                        new_cutoff, new_anchor, scan_started_at,
+                    )
+
+                    if catchup_active:
+                        feeds_catchup += 1
+                        extra_pages = int(catchup_meta.get("extra_pages") or 0)
+                        extra_items = int(catchup_meta.get("extra_items") or 0)
+                        catchup_extra_items += extra_items
+                        hit_page_cap = bool(
+                            catchup_meta.get("max_pages_reached")
+                            or catchup_meta.get("stop_reason") == "page_cap"
+                        )
+                        if hit_page_cap:
+                            max_pages_reached += 1
+                        # One summary entry per extended scan; never per item.
+                        if extra_pages > 0 or hit_page_cap:
+                            self.db.log_activity(
+                                "FEED_CATCHUP",
+                                f"Feed catch-up scan extended: {feed_name}",
+                                (
+                                    f"extra_pages={extra_pages}, extra_items={extra_items}, "
+                                    f"stop_reason={catchup_meta.get('stop_reason') or 'unknown'}, "
+                                    f"max_pages={effective_max_pages}"
+                                ),
+                            )
                     logger.info(f"Checked feed '{feed_name}': {len(releases)} items parsed, {new_requests_for_feed} new requests.")
 
                 except Exception as feed_err:
@@ -519,7 +662,11 @@ class TaskManager:
                 "total_found": total_found,
                 "total_requested": total_requested,
                 "skipped_manga": skipped_manga,
-                "skipped_audiobooks": skipped_audiobooks
+                "skipped_audiobooks": skipped_audiobooks,
+                # Additive catch-up diagnostics (old callers keep every key).
+                "feeds_catchup": feeds_catchup,
+                "catchup_extra_items": catchup_extra_items,
+                "max_pages_reached": max_pages_reached,
             }
         except Exception as e:
             logger.error(f"Error checking feeds: {e}", exc_info=True)
@@ -598,6 +745,22 @@ class TaskManager:
         self.db.set_setting("backfill_status", "stopping")
         self.db.set_setting("backfill_progress", "Stop requested, finishing current item...")
 
+    @staticmethod
+    def _setting_flag(raw: Optional[str], default: bool = True) -> bool:
+        """Normalises a boolean-as-text app_setting ("false"/"0"/"no"/"off" are off)."""
+        text = str(raw or "").strip().lower()
+        if not text:
+            return default
+        return text not in ("false", "0", "no", "off")
+
+    def reset_nyaa_backfill_cursor(self) -> Dict[str, Any]:
+        """Resets the resumable Nyaa historical-backfill cursor to page 1."""
+        self.db.set_setting("backfill_nyaa_next_page", "1")
+        self.db.set_setting("backfill_nyaa_done", "false")
+        message = "Nyaa historical backfill cursor reset: the next backfill run re-scans from page 1."
+        self.db.log_activity("NYAA_BACKFILL_RESET", "Nyaa historical backfill cursor reset", message)
+        return {"status": "success", "message": message}
+
     def get_backfill_status(self) -> Dict[str, Any]:
         try:
             delay = float(self.db.get_setting("backfill_delay_seconds", "2.0"))
@@ -607,21 +770,116 @@ class TaskManager:
             max_p = int(self.db.get_setting("backfill_max_pages", "30"))
         except ValueError:
             max_p = 30
+        try:
+            nyaa_next_page = max(1, int(self.db.get_setting("backfill_nyaa_next_page", "1")))
+        except (TypeError, ValueError):
+            nyaa_next_page = 1
 
         return {
             "running": self.is_backfilling,
             "status": self.db.get_setting("backfill_status", "idle"),
             "progress": self.db.get_setting("backfill_progress", "Idle"),
             "delay_seconds": delay,
-            "max_pages": max_p
+            "max_pages": max_p,
+            # Additive keys for the resumable Nyaa historical-pagination phase.
+            "include_nyaa": self._setting_flag(self.db.get_setting("backfill_include_nyaa", "true"), default=True),
+            "nyaa_next_page": nyaa_next_page,
+            "nyaa_done": self._setting_flag(self.db.get_setting("backfill_nyaa_done", "false"), default=False),
         }
 
-    async def run_polite_backfill(self, max_pages: Optional[int] = None, enrich_synopses: bool = True, delay_seconds: Optional[float] = None):
+    def _ingest_backfill_releases(self, releases: List[Any], matcher: CalibreMatcher,
+                                  monitored: Dict[str, Any], blacklisted: set) -> Dict[str, int]:
+        """
+        Persists one historical-backfill page with the shared ingestion policy.
+
+        Called by BOTH the J-Novels and the Nyaa deep-pagination phases, so the
+        monitored/unmonitored decision logic exists exactly once:
+        * empty series names, blacklisted series and manga are rejected;
+        * monitored series -> matcher.check_release(auto_request_monitored=True);
+        * unmonitored -> IN_CALIBRE upsert, or a NEW discovery row for volume
+          None / 1.0; every other unowned volume is rejected (not persisted).
+
+        Returns counters ``{"upserted", "rejected", "new"}`` so the caller can
+        report how much the phase actually changed.
+        """
+        from app.media_type import MANGA, UNKNOWN
+
+        counts = {"upserted": 0, "rejected": 0, "new": 0}
+        for r in releases:
+            s_name = r.series_name or ""
+            if not s_name:
+                counts["rejected"] += 1
+                continue
+            if s_name.lower() in blacklisted:
+                counts["rejected"] += 1
+                continue
+
+            media_type = self.classify_media(r)
+            if media_type == MANGA:
+                counts["rejected"] += 1
+                continue
+
+            if s_name.lower() in monitored:
+                m_res = matcher.check_release(r.to_dict(), auto_request_monitored=True)
+                eff_vol = m_res.get("effective_volume") or r.volume or 1.0
+                rel_dict = r.to_dict()
+                rel_dict.update({
+                    "status": m_res["status"],
+                    "volume": r.volume if r.volume is not None else eff_vol,
+                    "calibre_matched_book_id": m_res.get("matched_book_id"),
+                    "media_type": media_type or UNKNOWN
+                })
+                is_new, _ = self._upsert(rel_dict)
+                counts["upserted"] += 1
+                if is_new:
+                    counts["new"] += 1
+                if r.cover_url:
+                    self.cover_cache.cache_sync(r.cover_url)
+            else:
+                # Evaluate unmonitored releases against Calibre
+                m_res = matcher.check_release(r.to_dict(), auto_request_monitored=False)
+                if m_res["status"] == "IN_CALIBRE":
+                    eff_vol = m_res.get("effective_volume") or r.volume or 1.0
+                    rel_dict = r.to_dict()
+                    rel_dict.update({
+                        "status": "IN_CALIBRE",
+                        "volume": r.volume if r.volume is not None else eff_vol,
+                        "calibre_matched_book_id": m_res.get("matched_book_id"),
+                        "media_type": media_type or UNKNOWN
+                    })
+                    is_new, _ = self._upsert(rel_dict)
+                    counts["upserted"] += 1
+                    if is_new:
+                        counts["new"] += 1
+                elif r.volume is None or r.volume == 1.0:
+                    # Vol 1 or standalone unmonitored series -> Add to Discovery!
+                    rel_dict = r.to_dict()
+                    rel_dict.update({
+                        "status": "NEW",
+                        "calibre_matched_book_id": None,
+                        "media_type": media_type or UNKNOWN
+                    })
+                    is_new, _ = self._upsert(rel_dict)
+                    counts["upserted"] += 1
+                    if is_new:
+                        counts["new"] += 1
+                    if r.cover_url:
+                        self.cover_cache.cache_sync(r.cover_url)
+                else:
+                    counts["rejected"] += 1
+        return counts
+
+    async def run_polite_backfill(self, max_pages: Optional[int] = None, enrich_synopses: bool = True,
+                                  delay_seconds: Optional[float] = None,
+                                  include_nyaa: Optional[bool] = None):
         """
         Runs the polite historical backfill:
         1. Ingests Master Index.
         2. Slowly enriches discovery synopses & covers with polite rate-limiting.
         3. Paginates backwards through J-Novels for older volume releases.
+        4. Deep-paginates Nyaa category 3_1 with a resumable page cursor
+           (``backfill_include_nyaa``; the ``include_nyaa`` kwarg overrides it
+           for this run). ``include_nyaa=None`` reads the setting.
         """
         import asyncio
         if self.is_backfilling:
@@ -638,6 +896,19 @@ class TaskManager:
                 delay_seconds = float(self.db.get_setting("backfill_delay_seconds", "2.0"))
             except ValueError:
                 delay_seconds = 2.0
+
+        if include_nyaa is None:
+            include_nyaa = self._setting_flag(
+                self.db.get_setting("backfill_include_nyaa", "true"), default=True
+            )
+
+        # Per-phase ingestion counters, reported in the final BACKFILL_FINISHED
+        # progress line and activity log.
+        jnovels_upserted = 0
+        jnovels_rejected = 0
+        nyaa_upserted = 0
+        nyaa_rejected = 0
+        nyaa_summary = ""
 
         self.is_backfilling = True
         self.stop_backfill_requested = False
@@ -728,62 +999,169 @@ class TaskManager:
                         logger.info(f"Historical backfill reached end of available feed pages at page {page_num}.")
                         break
 
-                    for r in releases:
-                        s_name = r.series_name or ""
-                        if not s_name:
-                            continue
-                        if s_name.lower() in blacklisted_series:
-                            continue
-
-                        from app.media_type import MANGA, UNKNOWN
-                        media_type = self.classify_media(r)
-                        if media_type == MANGA:
-                            continue
-
-                        if s_name.lower() in monitored:
-                            m_res = matcher.check_release(r.to_dict(), auto_request_monitored=True)
-                            eff_vol = m_res.get("effective_volume") or r.volume or 1.0
-                            rel_dict = r.to_dict()
-                            rel_dict.update({
-                                "status": m_res["status"],
-                                "volume": r.volume if r.volume is not None else eff_vol,
-                                "calibre_matched_book_id": m_res.get("matched_book_id"),
-                                "media_type": media_type or UNKNOWN
-                            })
-                            is_new, _ = self._upsert(rel_dict)
-                            if r.cover_url:
-                                self.cover_cache.cache_sync(r.cover_url)
-                        else:
-                            # Evaluate unmonitored releases against Calibre
-                            m_res = matcher.check_release(r.to_dict(), auto_request_monitored=False)
-                            if m_res["status"] == "IN_CALIBRE":
-                                eff_vol = m_res.get("effective_volume") or r.volume or 1.0
-                                rel_dict = r.to_dict()
-                                rel_dict.update({
-                                    "status": "IN_CALIBRE",
-                                    "volume": r.volume if r.volume is not None else eff_vol,
-                                    "calibre_matched_book_id": m_res.get("matched_book_id"),
-                                    "media_type": media_type or UNKNOWN
-                                })
-                                self._upsert(rel_dict)
-                            elif r.volume is None or r.volume == 1.0:
-                                # Vol 1 or standalone unmonitored series -> Add to Discovery!
-                                rel_dict = r.to_dict()
-                                rel_dict.update({
-                                    "status": "NEW",
-                                    "calibre_matched_book_id": None,
-                                    "media_type": media_type or UNKNOWN
-                                })
-                                is_new, _ = self._upsert(rel_dict)
-                                if r.cover_url:
-                                    self.cover_cache.cache_sync(r.cover_url)
+                    counts = self._ingest_backfill_releases(releases, matcher, monitored, blacklisted_series)
+                    jnovels_upserted += counts["upserted"]
+                    jnovels_rejected += counts["rejected"]
 
                     page_num += 1
                     await asyncio.sleep(delay_seconds)
 
+            # 4. Nyaa Deep Pagination (resumable deep crawl of category 3_1).
+            # The cursor lives in app_settings so a stopped/capped run resumes on
+            # the next page instead of restarting at page 1. Deliberately gated
+            # on the same max_pages semantics as the J-Novels phase: -1 skips
+            # every deep-pagination phase, 0 is unlimited, >0 is a page budget
+            # for THIS run.
+            if not self.stop_backfill_requested and max_pages != -1 and include_nyaa:
+                from app.providers.nyaa import NyaaNovelProvider
+                from app.parser import is_pdf_release
+                from app.media_type import MANGA
+
+                try:
+                    nyaa_next_page = max(1, int(self.db.get_setting("backfill_nyaa_next_page", "1")))
+                except (TypeError, ValueError):
+                    nyaa_next_page = 1
+                nyaa_done = self._setting_flag(
+                    self.db.get_setting("backfill_nyaa_done", "false"), default=False
+                )
+
+                if nyaa_done:
+                    logger.info("Nyaa historical backfill already complete; skipping (cursor reset re-enables it).")
+                    self.db.set_setting(
+                        "backfill_progress",
+                        "Nyaa historical pages already complete; reset the cursor in Settings to re-scan."
+                    )
+                else:
+                    calibre_dir = self.db.get_setting("calibre_path", self.calibre_path)
+                    scanner = CalibreScanner(calibre_dir)
+                    calibre_series = scanner.get_all_series() if scanner.is_available() else []
+                    calibre_books = scanner.get_all_books() if scanner.is_available() else []
+                    matcher = CalibreMatcher(calibre_series, calibre_books)
+                    monitored = {s["name"].lower(): s for s in self.db.get_all_series(monitored_only=True)}
+                    blacklisted_series = {b["name"].lower() for b in self.db.get_blacklisted_series()}
+
+                    provider = NyaaNovelProvider(config={"max_pages": 1})
+                    started_at_page = nyaa_next_page
+                    page_num = nyaa_next_page
+                    pages_this_run = 0
+                    releases_this_run = 0
+                    reached_end = False
+
+                    while not self.stop_backfill_requested:
+                        # Positive max_pages caps THIS run's Nyaa pages; the
+                        # cursor is already pointing at the next unscanned page.
+                        if max_pages > 0 and pages_this_run >= max_pages:
+                            break
+
+                        self.db.set_setting("backfill_progress", f"Checking Nyaa historical page {page_num}...")
+                        try:
+                            raw_releases = await asyncio.to_thread(
+                                provider.crawl_pages,
+                                max_pages=1,
+                                start_page=page_num,
+                                stop_check=lambda: self.stop_backfill_requested
+                            )
+                        except Exception as exc:
+                            logger.warning(f"Nyaa historical page {page_num} raised: {exc}")
+                            raw_releases = []
+                            crawl_meta = {"stop_reason": "error"}
+                        else:
+                            crawl_meta = getattr(provider, "last_crawl_meta", None) or {}
+                        stop_reason = crawl_meta.get("stop_reason")
+
+                        # Emptiness decides end-of-feed BEFORE chapter/PDF/manga
+                        # filtering: a page whose rows were all chapters is not
+                        # the end of the feed.
+                        if not raw_releases:
+                            if stop_reason == "error":
+                                logger.warning(
+                                    f"Nyaa historical backfill aborted at page {page_num}: transient "
+                                    "fetch error; cursor kept for the next run."
+                                )
+                                self.db.set_setting(
+                                    "backfill_progress",
+                                    f"Nyaa historical page {page_num} failed (transient); will resume there next run."
+                                )
+                                break
+                            if self.stop_backfill_requested or stop_reason == "stop_requested":
+                                break
+                            reached_end = True
+                            self.db.set_setting("backfill_nyaa_done", "true")
+                            self.db.set_setting("backfill_nyaa_next_page", "1")
+                            self.db.set_setting("backfill_last_page", str(page_num))
+                            logger.info(f"Nyaa historical backfill reached the end of the feed at page {page_num}.")
+                            break
+
+                        releases = self.filter_chapter_releases(raw_releases, self.chapter_context())
+                        # Nyaa backfill is EPUB/torrent only and manga must never
+                        # enter the database (same policy as backfill_series).
+                        filtered_releases = []
+                        policy_rejected = 0
+                        for rel in releases:
+                            if is_pdf_release(rel.title, rel.link, rel.guid):
+                                policy_rejected += 1
+                                continue
+                            if self.classify_media(rel) == MANGA:
+                                policy_rejected += 1
+                                continue
+                            filtered_releases.append(rel)
+                        releases = filtered_releases
+
+                        counts = self._ingest_backfill_releases(releases, matcher, monitored, blacklisted_series)
+                        pages_this_run += 1
+                        releases_this_run += len(releases)
+                        nyaa_upserted += counts["upserted"]
+                        nyaa_rejected += policy_rejected + counts["rejected"]
+
+                        page_num += 1
+                        self.db.set_setting("backfill_nyaa_next_page", str(page_num))
+                        self.db.set_setting("backfill_last_page", str(page_num))
+                        await asyncio.sleep(delay_seconds)
+
+                    next_page = 1 if reached_end else page_num
+                    summary = (
+                        f"Nyaa historical backfill: {pages_this_run} page(s), {releases_this_run} release(s) "
+                        f"({nyaa_upserted} upserted, {nyaa_rejected} rejected)"
+                    )
+                    if reached_end:
+                        summary += "; reached the end of the Nyaa feed."
+                    elif self.stop_backfill_requested:
+                        summary += f"; stopped at page {page_num}, cursor kept for resume."
+                    elif max_pages > 0 and pages_this_run >= max_pages:
+                        summary += f"; page budget reached, next run resumes at page {next_page}."
+                    else:
+                        summary += f"; next run resumes at page {next_page}."
+                    self.db.set_setting("backfill_progress", summary)
+                    nyaa_summary = summary
+                    logger.info(summary)
+                    self.db.log_activity(
+                        "NYAA_BACKFILL_FINISHED",
+                        "Nyaa historical backfill phase finished",
+                        json.dumps({
+                            "pages": pages_this_run,
+                            "releases": releases_this_run,
+                            "reached_end": reached_end,
+                            "started_at_page": started_at_page,
+                            "next_page": next_page,
+                            "upserted": nyaa_upserted,
+                            "rejected": nyaa_rejected,
+                        })
+                    )
+
+            total_upserted = jnovels_upserted + nyaa_upserted
+            total_rejected = jnovels_rejected + nyaa_rejected
             self.db.set_setting("backfill_status", "completed")
-            self.db.set_setting("backfill_progress", "Historical backfill finished successfully!")
-            self.db.log_activity("BACKFILL_FINISHED", "Polite backfill completed")
+            final_progress = (
+                f"Historical backfill finished successfully! ({total_upserted} upserted, {total_rejected} rejected)"
+            )
+            if nyaa_summary:
+                final_progress += " " + nyaa_summary
+            self.db.set_setting("backfill_progress", final_progress)
+            self.db.log_activity(
+                "BACKFILL_FINISHED",
+                "Polite backfill completed",
+                f"upserted={total_upserted}, rejected={total_rejected}"
+            )
 
         except Exception as e:
             logger.error(f"Backfill error: {e}", exc_info=True)

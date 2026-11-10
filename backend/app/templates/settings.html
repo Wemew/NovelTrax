@@ -85,10 +85,44 @@
 
                 <div>
                     <label class="block text-xs font-semibold text-slate-300 mb-1">
+                        Catch-up Scan Max Pages
+                    </label>
+                    <input type="number" id="setting-feed-catchup-pages" value="{{ settings.feed_catchup_max_pages or '10' }}" min="1" max="50" step="1" class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-brand-500">
+                    <p class="text-[11px] text-slate-500 mt-1">When a check interval saw more uploads than the normal window holds, the scan keeps paging backwards until it reaches releases from before the previous scan (Nyaa timestamps, J-Novels post dates or the previous first item). This caps that extra backwards walk (1-50 pages).</p>
+                </div>
+
+                <div class="sm:col-span-2">
+                    <label class="flex items-center gap-3 cursor-pointer">
+                        <input type="checkbox" id="setting-feed-catchup-enabled" {% if settings.feed_catchup_enabled != 'false' %}checked{% endif %} class="w-4 h-4 rounded bg-slate-950 border-slate-700 text-brand-600 focus:ring-brand-500">
+                        <div>
+                            <span class="text-xs font-semibold text-slate-200">Gap-free automatic feed scans (catch-up)</span>
+                            <p class="text-[11px] text-slate-500">Enabled by default. Each automatic feed scan continues backwards past the newest page until it hits a release the previous scan already covered, so a burst of uploads larger than one page/window is never missed. Disable to scan only the configured window.</p>
+                        </div>
+                    </label>
+                </div>
+
+                <div>
+                    <label class="block text-xs font-semibold text-slate-300 mb-1">
                         Gentle Backfill Max Pages
                     </label>
-                    <input type="number" id="setting-backfill-pages" value="{{ settings.backfill_max_pages or '30' }}" min="0" required class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-brand-500">
-                    <p class="text-[11px] text-slate-500 mt-1">Set arbitrarily (e.g. 50, 100, 1000) or set to <strong>0 for unlimited</strong>. NovelTrax stops automatically when the end of the feed is reached.</p>
+                    <input type="number" id="setting-backfill-pages" value="{{ settings.backfill_max_pages or '30' }}" min="-1" required class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-brand-500">
+                    <p class="text-[11px] text-slate-500 mt-1">Applies to both the J-Novels and the Nyaa historical deep pages. Set arbitrarily (e.g. 50, 100, 1000) or <strong>0 for unlimited</strong>; <strong>-1 skips deep pagination</strong> entirely. NovelTrax stops automatically when the end of a feed is reached.</p>
+
+                    <label class="mt-3 flex items-start gap-2.5 cursor-pointer">
+                        <input type="checkbox" id="setting-backfill-include-nyaa" {% if settings.get('backfill_include_nyaa', 'true')|lower not in ['false', '0', 'no', 'off'] %}checked{% endif %} class="mt-0.5 w-4 h-4 rounded bg-slate-950 border-slate-700 text-brand-600 focus:ring-brand-500">
+                        <div>
+                            <span class="text-xs font-semibold text-slate-200">Include Nyaa historical pages</span>
+                            <p class="text-[11px] text-slate-500">Deep-crawls Nyaa category 3_1 backwards using the same page budget and request delay. Disable for a J-Novels-only historical backfill.</p>
+                        </div>
+                    </label>
+
+                    <div class="mt-3 flex flex-wrap items-center gap-2">
+                        <button type="button" onclick="resetNyaaBackfillCursor()" id="btn-reset-nyaa-backfill" class="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-[11px] font-semibold flex items-center gap-1.5 transition-colors">
+                            <i data-lucide="rotate-ccw" class="w-3.5 h-3.5 text-brand-400"></i>
+                            Reset Nyaa backfill cursor
+                        </button>
+                        <span class="text-[11px] text-slate-500">The next backfill resumes from the saved Nyaa page.</span>
+                    </div>
                 </div>
 
                 <div>
@@ -107,6 +141,143 @@
                             <p class="text-[11px] text-slate-500">When enabled, unofficial web novel and fan translation releases (such as unlicenced volumes beyond official publishing) will be automatically ignored and excluded from wanted volume coverage.</p>
                         </div>
                     </label>
+                </div>
+            </div>
+        </div>
+
+        <!-- Section: Download Engine -->
+        <div>
+            <h3 class="text-sm font-bold uppercase tracking-wider text-slate-300 border-b border-slate-800 pb-2 mb-4 flex items-center gap-2">
+                <i data-lucide="hard-drive-download" class="w-4 h-4 text-brand-400"></i>
+                Download Engine
+            </h3>
+
+            <div class="space-y-4">
+                <div>
+                    {% set current_engine = (downloader_engine if downloader_engine is defined and downloader_engine else (settings.downloader_engine or 'qbit')) %}
+                    <label for="setting-downloader-engine" class="block text-xs font-semibold text-slate-300 mb-1">
+                        Active Download Engine
+                    </label>
+                    <select id="setting-downloader-engine" name="downloader_engine" class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-brand-500">
+                        <option value="qbit" {% if current_engine != 'torbox' %}selected{% endif %}>qBittorrent / local torrent client</option>
+                        <option value="torbox" {% if current_engine == 'torbox' %}selected{% endif %}>TorBox (debrid cloud + local fetch)</option>
+                    </select>
+                    <p class="text-[11px] text-slate-500 mt-1">
+                        TorBox downloads Nyaa torrent releases into the local downloads folder; direct web links (J-Novels) are not supported.
+                    </p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Section: TorBox Debrid Engine -->
+        <div>
+            <h3 class="text-sm font-bold uppercase tracking-wider text-slate-300 border-b border-slate-800 pb-2 mb-4 flex items-center gap-2">
+                <i data-lucide="cloud-download" class="w-4 h-4 text-cyan-400"></i>
+                TorBox Debrid Engine
+            </h3>
+
+            <p class="text-xs text-slate-400 leading-relaxed mb-4">
+                TorBox is a debrid cloud service: NovelTrax hands it a Nyaa magnet or <code class="font-mono text-slate-300">.torrent</code> URL,
+                TorBox fetches it on its servers, and NovelTrax downloads the finished files into the local downloads folder.
+                <strong class="text-slate-200">Torrent releases only.</strong> Direct web pages such as
+                <code class="font-mono text-slate-300">jnovels.com</code> / <code class="font-mono text-slate-300">j-novel.club</code>
+                cannot be fetched through TorBox (Cloudflare Turnstile blocks cloud fetching), so those releases are skipped with a clear message.
+            </p>
+
+            <div class="space-y-4">
+                <div>
+                    <label for="setting-torbox-api-key" class="block text-xs font-semibold text-slate-300 mb-1">
+                        TorBox API Key
+                    </label>
+                    <div class="flex gap-2">
+                        <input type="password" id="setting-torbox-api-key" name="torbox_api_key" value=""
+                               placeholder="{% if torbox_api_key_set %}API key saved — leave blank to keep{% else %}Paste the API key from torbox.app{% endif %}"
+                               autocomplete="new-password" class="flex-1 bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white font-mono focus:outline-none focus:border-brand-500">
+                        <button type="button" onclick="testTorboxConnection()" id="btn-test-torbox" class="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold flex items-center gap-1.5 transition-colors">
+                            <i data-lucide="plug-zap" class="w-4 h-4 text-cyan-400"></i>
+                            Test TorBox
+                        </button>
+                    </div>
+                    <p class="text-[11px] text-slate-500 mt-1">
+                        The saved key is never rendered back into this page. Leave the field blank to keep the stored key; a new value replaces it.
+                    </p>
+                </div>
+
+                <div id="torbox-test-result" class="hidden p-3 rounded-xl text-xs font-mono"></div>
+
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2 border-t border-slate-800">
+                    <label class="flex items-start gap-3 cursor-pointer">
+                        <input type="checkbox" id="setting-torbox-enabled" {% if settings.torbox_enabled == 'true' %}checked{% endif %} class="mt-0.5 w-4 h-4 rounded bg-slate-950 border-slate-700 text-brand-600 focus:ring-brand-500">
+                        <span>
+                            <span class="text-xs font-semibold text-slate-200">Enable TorBox Engine</span>
+                            <p class="text-[11px] text-slate-500">The engine is only usable when this is on and an API key is saved.</p>
+                        </span>
+                    </label>
+                    <label class="flex items-start gap-3 cursor-pointer">
+                        <input type="checkbox" id="setting-torbox-delete-after" {% if settings.torbox_delete_after_download != 'false' %}checked{% endif %} class="mt-0.5 w-4 h-4 rounded bg-slate-950 border-slate-700 text-brand-600 focus:ring-brand-500">
+                        <span>
+                            <span class="text-xs font-semibold text-slate-200">Delete TorBox copy after download</span>
+                            <p class="text-[11px] text-slate-500">Removes the remote torrent from TorBox once the files are fetched locally.</p>
+                        </span>
+                    </label>
+                    <label class="flex items-start gap-3 cursor-pointer">
+                        <input type="checkbox" id="setting-torbox-strict-selection" {% if settings.torbox_strict_volume_selection != 'false' %}checked{% endif %} class="mt-0.5 w-4 h-4 rounded bg-slate-950 border-slate-700 text-brand-600 focus:ring-brand-500">
+                        <span>
+                            <span class="text-xs font-semibold text-slate-200">Strict selective volume fetch</span>
+                            <p class="text-[11px] text-slate-500">Fetch only the files for volumes you are missing; falls back to the whole torrent when the mapping is unclear.</p>
+                        </span>
+                    </label>
+                    <label class="flex items-start gap-3 cursor-pointer">
+                        <input type="checkbox" id="setting-torbox-delete-on-failure" {% if settings.torbox_delete_on_failure != 'false' %}checked{% endif %} class="mt-0.5 w-4 h-4 rounded bg-slate-950 border-slate-700 text-brand-600 focus:ring-brand-500">
+                        <span>
+                            <span class="text-xs font-semibold text-slate-200">Delete remote copy on failure</span>
+                            <p class="text-[11px] text-slate-500">Cleans up the TorBox torrent when a download terminally fails.</p>
+                        </span>
+                    </label>
+                </div>
+
+                <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                    <div>
+                        <label for="setting-torbox-download-concurrency" class="block text-xs font-semibold text-slate-300 mb-1">Parallel File Downloads</label>
+                        <input type="number" id="setting-torbox-download-concurrency" value="{{ settings.torbox_download_concurrency or '4' }}" min="1" max="16" step="1" class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-brand-500">
+                        <p class="text-[11px] text-slate-500 mt-1">Files fetched in parallel per release (1-16).</p>
+                    </div>
+                    <div>
+                        <label for="setting-torbox-parallel-chunks" class="block text-xs font-semibold text-slate-300 mb-1">Parallel Chunks per File</label>
+                        <input type="number" id="setting-torbox-parallel-chunks" value="{{ settings.torbox_parallel_chunks or '4' }}" min="1" max="8" step="1" class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-brand-500">
+                        <p class="text-[11px] text-slate-500 mt-1">Ranged connections per file (1-8).</p>
+                    </div>
+                    <div>
+                        <label for="setting-torbox-max-download-gb" class="block text-xs font-semibold text-slate-300 mb-1">Max Download Size (GB)</label>
+                        <input type="number" id="setting-torbox-max-download-gb" value="{{ settings.torbox_max_download_gb or '64' }}" min="1" max="10240" step="0.1" class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-brand-500">
+                        <p class="text-[11px] text-slate-500 mt-1">Largest single file TorBox may fetch (1-10240 GB).</p>
+                    </div>
+                    <div>
+                        <label for="setting-torbox-poll-seconds" class="block text-xs font-semibold text-slate-300 mb-1">Poll Interval Floor (Seconds)</label>
+                        <input type="number" id="setting-torbox-poll-seconds" value="{{ settings.torbox_poll_seconds or '5' }}" min="5" max="3600" step="1" class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-brand-500">
+                        <p class="text-[11px] text-slate-500 mt-1">Minimum gap between TorBox status polls (5-3600 s).</p>
+                    </div>
+                    <div>
+                        <label for="setting-torbox-max-concurrent" class="block text-xs font-semibold text-slate-300 mb-1">Max Concurrent Downloads</label>
+                        <input type="number" id="setting-torbox-max-concurrent" value="{{ settings.torbox_max_concurrent or '2' }}" min="1" max="20" step="1" class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-brand-500">
+                        <p class="text-[11px] text-slate-500 mt-1">Active TorBox downloads / fetch workers (1-20).</p>
+                    </div>
+                    <div>
+                        <label for="setting-torbox-timeout-hours" class="block text-xs font-semibold text-slate-300 mb-1">Download Timeout (Hours)</label>
+                        <input type="number" id="setting-torbox-timeout-hours" value="{{ settings.torbox_timeout_hours or '6' }}" min="0" max="168" step="0.25" class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-brand-500">
+                        <p class="text-[11px] text-slate-500 mt-1">Give up after this many hours; <strong>0 disables</strong> the timeout.</p>
+                    </div>
+                </div>
+
+                <div>
+                    <label for="setting-downloads-dir" class="block text-xs font-semibold text-slate-300 mb-1">
+                        Local Downloads Folder
+                    </label>
+                    <input type="text" id="setting-downloads-dir" name="downloads_dir" value="{{ settings.downloads_dir or '/downloads' }}" placeholder="/downloads" class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white font-mono focus:outline-none focus:border-brand-500">
+                    <p class="text-[11px] text-slate-500 mt-1">
+                        Absolute path the app writes fetched TorBox files into. Mount it as a writable Docker volume;
+                        <code class="font-mono text-slate-400">DOWNLOAD_DIR</code> seeds the default.
+                    </p>
                 </div>
             </div>
         </div>
@@ -328,6 +499,43 @@
         }
     }
 
+    async function testTorboxConnection() {
+        const box = document.getElementById('torbox-test-result');
+        const keyInput = document.getElementById('setting-torbox-api-key');
+        const btn = document.getElementById('btn-test-torbox');
+        if (btn) btn.disabled = true;
+        box.classList.remove('hidden');
+        box.className = 'p-3 rounded-xl text-xs font-mono bg-slate-800 text-slate-300 border border-slate-700 flex items-center gap-2';
+        box.innerHTML = '<i data-lucide="loader-2" class="w-4 h-4 animate-spin text-brand-400"></i> Testing TorBox connection...';
+        lucide.createIcons();
+
+        try {
+            const res = await fetch('/api/downloader/torbox/test', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ torbox_api_key: keyInput ? keyInput.value : '' })
+            });
+            const data = await res.json();
+            const ok = (data.success === true || data.connected === true || data.status === 'success');
+            if (res.ok && ok) {
+                box.className = 'p-3 rounded-xl text-xs font-mono bg-emerald-500/10 text-emerald-400 border border-emerald-500/20';
+                box.innerHTML = '✓ ' + (data.message || 'TorBox connection successful!');
+                showToast('TorBox connection successful!', 'success');
+            } else {
+                box.className = 'p-3 rounded-xl text-xs font-mono bg-rose-500/10 text-rose-300 border border-rose-500/20';
+                box.innerHTML = '✗ ' + (data.message || data.detail || 'TorBox connection failed');
+                showToast('TorBox connection failed', 'error');
+            }
+        } catch (err) {
+            box.className = 'p-3 rounded-xl text-xs font-mono bg-rose-500/10 text-rose-300 border border-rose-500/20';
+            box.innerHTML = '✗ Connection error: ' + err;
+            showToast('TorBox test error: ' + err, 'error');
+        } finally {
+            if (btn) btn.disabled = false;
+            lucide.createIcons();
+        }
+    }
+
     async function saveSettings(e) {
         e.preventDefault();
         const payload = {
@@ -336,9 +544,25 @@
             feed_check_interval_minutes: document.getElementById('setting-feed-interval').value,
             backfill_max_pages: document.getElementById('setting-backfill-pages').value,
             backfill_delay_seconds: document.getElementById('setting-backfill-delay').value,
+            backfill_include_nyaa: document.getElementById('setting-backfill-include-nyaa').checked ? 'true' : 'false',
             track_official_only: document.getElementById('setting-official-only').checked ? 'true' : 'false',
+            feed_catchup_enabled: document.getElementById('setting-feed-catchup-enabled').checked ? 'true' : 'false',
+            feed_catchup_max_pages: document.getElementById('setting-feed-catchup-pages').value,
             discord_webhook_url: document.getElementById('setting-discord-url').value,
-            apprise_url: document.getElementById('setting-apprise-url').value
+            apprise_url: document.getElementById('setting-apprise-url').value,
+            downloader_engine: document.getElementById('setting-downloader-engine').value,
+            torbox_enabled: document.getElementById('setting-torbox-enabled').checked ? 'true' : 'false',
+            torbox_api_key: document.getElementById('setting-torbox-api-key').value,
+            torbox_delete_after_download: document.getElementById('setting-torbox-delete-after').checked ? 'true' : 'false',
+            torbox_strict_volume_selection: document.getElementById('setting-torbox-strict-selection').checked ? 'true' : 'false',
+            torbox_delete_on_failure: document.getElementById('setting-torbox-delete-on-failure').checked ? 'true' : 'false',
+            torbox_download_concurrency: document.getElementById('setting-torbox-download-concurrency').value,
+            torbox_parallel_chunks: document.getElementById('setting-torbox-parallel-chunks').value,
+            torbox_max_download_gb: document.getElementById('setting-torbox-max-download-gb').value,
+            torbox_poll_seconds: document.getElementById('setting-torbox-poll-seconds').value,
+            torbox_max_concurrent: document.getElementById('setting-torbox-max-concurrent').value,
+            torbox_timeout_hours: document.getElementById('setting-torbox-timeout-hours').value,
+            downloads_dir: document.getElementById('setting-downloads-dir').value.trim()
         };
 
         try {
@@ -355,6 +579,25 @@
             }
         } catch (err) {
             showToast(`Error saving settings: ${err}`, 'error');
+        }
+    }
+
+    async function resetNyaaBackfillCursor() {
+        const btn = document.getElementById('btn-reset-nyaa-backfill');
+        if (btn) btn.disabled = true;
+        try {
+            const res = await fetch('/api/backfill/nyaa/reset', { method: 'POST' });
+            const data = await res.json();
+            if (data.status === 'success') {
+                showToast(data.message || 'Nyaa backfill cursor reset.', 'success');
+            } else {
+                showToast(data.message || 'Could not reset the Nyaa backfill cursor', 'error');
+            }
+        } catch (err) {
+            showToast(`Error: ${err}`, 'error');
+        } finally {
+            if (btn) btn.disabled = false;
+            lucide.createIcons();
         }
     }
 

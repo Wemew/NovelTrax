@@ -22,6 +22,12 @@ services:
       - CALIBRE_DIR=/calibre
       - DATA_DIR=/app/data
       - TZ=UTC
+      # Local folder where the TorBox debrid engine fetches finished novel files.
+      # Must point at a writable mounted volume (also the qBittorrent save path).
+      - DOWNLOAD_DIR=/downloads
+      # Optional: seed the TorBox engine on first start.
+      # - TORBOX_API_KEY=your-torbox-api-key
+      # - TORBOX_ENABLED=true
     volumes:
       # Mount your Calibre library network share or folder here.
       # IMPORTANT: Keep :ro (read-only) to protect your Calibre library from accidental writes.
@@ -30,6 +36,10 @@ services:
 
       # Persistent application database, settings, and logs:
       - ./data:/app/data
+
+      # TorBox download target: this is where fetched files are written.
+      # Create it on the host (chmod 777 or chown to the container user) before first start:
+      - ./downloads:/downloads
 
 # Optional: If you want Docker itself to mount your CIFS/SMB Windows Network Share directly:
 # volumes:

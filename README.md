@@ -32,6 +32,7 @@ Runs seamlessly in **Docker**, mounts your Calibre library network share safely 
    - **Standard RSS / Atom Feeds**: Ingests feeds from publishers, blogs, and release trackers.
    - **Custom HTML Scraper**: Point NovelTrax at any website and provide CSS selectors.
    - **Live Test Mode**: Test any feed extraction in real time directly from the web dashboard.
+   - **Time-aware, gap-free automatic scans (catch-up)**: a periodic scan is not limited to the newest page/window. It keeps paging backwards until it reaches a release the *previous* scan already covered, so a burst of uploads larger than the normal window cannot fall through the gap between two scans. Nyaa uses RSS/HTML timestamps, J-Novels uses post `<time>` values and falls back to the previous scan's first item (anchor GUID), and paginated feeds keep a per-feed watermark in `feeds.config_json` (`last_scan_oldest_pub_date`, `last_scan_anchor_guid`, `last_scan_started_at`). If the scan hits its page cap before reaching the boundary, the watermark is deliberately **not** advanced so the next scan retries the same gap. Tunable in Settings ("Gap-free automatic feed scans" + "Catch-up Scan Max Pages", default on / 10 pages).
 
 4b. **Light-Novels Only: Manga & Audiobook Separation**
    - Nyaa's Literature category is heavily polluted (roughly 75% of the live `3_1` feed is manga volumes, chapter compilations and dumps), so category filtering alone is not enough. NovelTrax classifies every release by media type.
@@ -64,11 +65,16 @@ Runs seamlessly in **Docker**, mounts your Calibre library network share safely 
    - Omnibus/range filenames and comma/`and` volume lists (`Vol 1, 2, and 3`) are parsed before selection; a file is deselected only when *all* of its volumes are owned, so a partially missing bundle is never skipped.
    - Single-file archives cannot be split at the BitTorrent protocol layer and are downloaded whole as a safe fallback; unparseable book files are always kept.
    - The **Downloads** tab shows downloader connection status, live queue progress and speed, and pause/resume/delete controls.
+   - **TorBox debrid engine (selectable second engine)**: pick `TorBox` as the download engine (Settings tab, or the engine selector in the Downloads config panel). NovelTrax submits the release's magnet or `.torrent` URL to [torbox.app](https://torbox.app), polls the TorBox queue, and fetches the finished files into the local `downloads_dir` (`DOWNLOAD_DIR`, `/downloads` by default) — optionally only the files for the volumes you are missing. Configure the API key, enable the engine, and tune concurrency/chunk/size/poll/timeout limits in the Settings tab.
+   - **Torrent releases only**: TorBox cannot fetch a direct web page. Nyaa magnets and `.torrent` URLs work; J-Novels / J-Novel Club / NovelUpdates web-page links are rejected with a clear "TorBox downloads torrent/magnet releases only" message (Cloudflare Turnstile makes cloud/HTTP fetching of those pages impossible). The engine selector and the Downloads panel explain this limitation in the UI.
+   - **Manga safety net**: once TorBox returns the torrent's file list, a torrent whose content files are **all `.cbz`** is treated as a manga rip and rejected before any download link is requested — the remote torrent is deleted to free the slot, the release is re-classified as `manga` **and hidden for good** (status `IGNORED` + `ignored=1`, so it drops out of Releases/Discovery/wanted/queue views and later feed re-polls cannot resurrect it; only an explicit user un-ignore restores it), and the rejection is audited as `TORBOX_MANGA_REJECTED`. Covers/`.nfo` clutter is ignored, and a mixed torrent that still contains an `.epub` downloads normally.
+   - **In-place release state**: every release row and series-card release shows a download-state chip (`Not downloaded`, `Downloading NN%`, `Downloaded`, `Failed`, `In Calibre`) that updates without a page reload. Failed entries show their error and can be retried or removed; the engine-aware Downloads queue offers **Check now** and a two-step **Clear failed**.
 
 8. **Targeted Series Backfill**
    - The per-series **Backfill** action runs an on-demand background search for one specific series across Nyaa instead of re-scanning every feed.
    - `POST /api/series/{id}/backfill` and `POST /api/series/backfill` accept the series identity and a page ceiling; polite delays and a stop check keep the crawl rate-limited.
-   - Global backfill remains available for a full historical sweep.
+   - **Polite Historical Backfill** (Discovery → *Polite Backfill*) is the global sweep: it ingests the J-Novels Complete Series Index, enriches discovery synopses/covers, then deep-paginates **both** J-Novels and **Nyaa category 3_1** backwards using the Settings page budget and request delay.
+   - The Nyaa phase is **resumable**: a cursor in `app_settings` (`backfill_nyaa_next_page`/`backfill_nyaa_done`) means a stopped run or a run that hits its page budget continues from the next unscanned page instead of restarting at page 1; once the end of the Nyaa feed is reached the phase is marked complete and skipped on later runs until you press **Reset Nyaa backfill cursor** in Settings. `POST /api/backfill/start` also accepts `include_nyaa` (per-run override) and `reset_nyaa` (reset before starting), and `GET /api/backfill/status` reports `include_nyaa`, `nyaa_next_page` and `nyaa_done` (shown in the Discovery progress banner). Nyaa backfill skips PDFs and manga.
 
 9. **Modern Dashboard with Search, Sorting and Lazy Loading**
    - Responsive, dark-mode dashboard built with Tailwind CSS and Lucide icons.
@@ -134,14 +140,22 @@ services:
       - CALIBRE_DIR=/calibre
       - DATA_DIR=/app/data
       - TZ=UTC
-      # Optional: default save path used when sending torrents to qBittorrent
-      # - DOWNLOAD_DIR=/downloads
+      # Local folder where the TorBox engine fetches finished files (also the
+      # default qBittorrent save path). Must be a writable mounted volume.
+      - DOWNLOAD_DIR=/downloads
+      # Optional: seed the TorBox API key / enable flag on first start.
+      # - TORBOX_API_KEY=your-torbox-api-key
+      # - TORBOX_ENABLED=true
     volumes:
       # 1. Mount your Calibre library folder or network share (READ-ONLY)
       - /path/to/your/calibre/library:/calibre:ro
 
       # 2. Mount local directory for persistent database, settings, and logs
       - ./data:/app/data
+
+      # 3. TorBox (and qBittorrent) download target. This is where fetched
+      #    novel files are written; make sure it is writable by the container.
+      - ./downloads:/downloads
 ```
 
 > **Note on Network Shares (SMB / CIFS / NFS):**  
@@ -185,11 +199,15 @@ services:
       - CALIBRE_DIR=/calibre
       - DATA_DIR=/app/data
       - TZ=Etc/UTC
+      # Local folder the TorBox engine fetches files into.
+      - DOWNLOAD_DIR=/downloads
     volumes:
       # Replace with your Calibre dataset host path:
       - /mnt/tank/media/calibre:/calibre:ro
       # Replace with your app data dataset host path:
       - /mnt/tank/apps/noveltrax/data:/app/data
+      # TorBox download target on the pool (must be writable by UID/GID 568).
+      - /mnt/tank/apps/noveltrax/downloads:/downloads
 ```
 
 ---
@@ -202,11 +220,11 @@ services:
 | **Series** | Displays all novel series auto-populated from Calibre. Shows owned volumes (including omnibus-expanded volumes), latest index, and toggle switches to enable/disable monitoring. |
 | **Releases & Requests** | Searchable, sortable catalog of all detected releases in grouped or flat view. Filter by `Requested (Wanted)`, `In Calibre (Acquired)`, `Ignored`, or `All`; ignore/restore a release, dispatch it to qBittorrent with one click, run a per-series backfill, or open its release/hub links. |
 | **Prioritized** | Releases from trusted release groups, with VIP badges, grouped/flat view switcher, group management (add/remove/note) and auto-loading on scroll. |
-| **Downloads** | qBittorrent connection status and in-app configuration (custom URL, host, port, username, password, HTTPS toggle, category, save path), live torrent queue with progress/speed, and pause/resume/delete controls. |
+| **Downloads** | Engine-aware downloader status and in-app configuration: for qBittorrent, the custom URL/host/port/username/password/HTTPS toggle/category/save path; for TorBox, an engine selector, the TorBox explanation and the live TorBox queue with **Check now**, retry/remove and two-step **Clear failed** controls. |
 | **Discovery** | New series discovery panel (Volume 1 and unnumbered/standalone releases) with 1-click **Track** or **Blacklist** buttons, search/sort, plus an editable **Blacklist Management** table. |
 | **Feeds & Scrapers** | Manage configured feeds (the seeded J-Novels and Nyaa Light Novels feeds, plus RSS, NovelUpdates and Custom HTML Scraper entries; Nyaa is also available as a preset in the Add-Feed dropdown). Includes live extraction preview ("Test Scraper") and per-feed check triggers. |
 | **Logs** | Chronological audit trail of all background checks, sync runs, downloader actions, ignore/restore actions and auto-resolutions. |
-| **Settings** | Calibre container path, sync/check intervals, backfill limits and delays, official-translation-only toggle, Discord/generic webhooks, and maintenance tools. The qBittorrent settings live in the **Downloads** tab. |
+| **Settings** | Calibre container path, sync/check intervals, backfill limits and delays, official-translation-only toggle, Discord/generic webhooks, **download engine selector + TorBox engine settings** (API key, enable, delete-after-download, strict selective volume fetch, delete-on-failure, concurrency/chunk/size limits, poll floor, max concurrent, timeout, local downloads folder), and maintenance tools. The qBittorrent connection settings live in the **Downloads** tab. |
 
 ---
 
@@ -278,6 +296,17 @@ Calibre's interpreter runs with `sys.flags.optimize == 2`, which compiles bare `
 
 It prints the interpreter's optimisation level on every run, recompiles each suite with `optimize=0`, counts both compiled and actually-executed assertions, isolates suites from each other, reports failing `file:line`/statement with a full traceback, and exits non-zero on failure. The project's own suites contain no bare asserts (enforced by `tests/test_assert_hygiene.py`); the runner is what proves that, and would catch the next bare assert that slips in.
 
+The TorBox port, the catch-up feed scanner and the Nyaa historical backfill ship five self-contained suites — `tests/test_torbox_downloader.py` (API client, magnet/`.torrent` submit, fetch and secret hygiene), `tests/test_torbox_manager.py` (submit/poll/fetch/retry/remove orchestration), `tests/test_torbox_integration.py` (real `Database` + `TorBoxManager` + `TorboxDownloader` wired over a fake transport, plus static `main.py` route guards), `tests/test_torbox_ui_wiring.py` (static template/docs guards) and `tests/test_nyaa_backfill.py` (Nyaa cursor/resume/end/error semantics + `TaskManager.run_polite_backfill` integration) — plus `tests/test_feed_catchup.py` (catch-up watermark/timestamp logic and `TaskManager.check_feeds` integration) and the existing `tests/test_ui_wiring.py` release-button/Jinja-balance guard. On a host where Calibre's own temp directory is inaccessible, run them with the bundled Python interpreter instead of `calibre-debug`:
+
+```powershell
+$py = "C:\Users\rasmu\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\python\python.exe"
+cd NovelTrax
+$env:PYTHONIOENCODING="utf-8"; $env:TEMP="C:\Users\rasmu\Documents\AI-Workspace\nt-temp"; $env:TMP=$env:TEMP
+& $py tests\run_tests.py torbox
+& $py tests\run_tests.py feed_catchup nyaa_backfill
+& $py tests\run_tests.py ui_wiring downloader
+```
+
 ---
 
 ## ⚙️ Configuration & Environment Variables
@@ -290,7 +319,9 @@ It prints the interpreter's optimisation level on every run, recompiles each sui
 | `CALIBRE_DIR` | `/calibre` | Directory containing Calibre's `metadata.db` |
 | `DATA_DIR` | `/app/data` | Directory where NovelTrax stores its database, cached covers and logs |
 | `TZ` | `UTC` (compose) | Container timezone; used by the timezone utility when no `app_timezone` setting is present. Defaults to `Europe/Copenhagen` if unset or invalid |
-| `DOWNLOAD_DIR` | `/downloads` | Default qBittorrent save path seeded into settings |
+| `DOWNLOAD_DIR` | `/downloads` | Local folder the app writes fetched files into (TorBox engine fetch target, and the default qBittorrent save path). Must be an absolute, writable path — mount a volume for it |
+| `TORBOX_ENABLED` | `false` | Seeds the TorBox engine master toggle on first start (still requires an API key and the TorBox engine selected) |
+| `TORBOX_API_KEY` | empty | Seeds the TorBox API key on first start. The key is stored in the application database, never logged and never rendered back into pages |
 | `QBIT_URL` | `http://localhost:8080` | Default qBittorrent Web API base URL seeded into settings |
 | `QBIT_HOST` | `localhost` | Default qBittorrent host seeded into settings |
 | `QBIT_PORT` | `8080` | Default qBittorrent Web API port seeded into settings |
@@ -308,9 +339,16 @@ These qBittorrent environment variables only seed the database on first start; t
 | Calibre library path in container | Path containing `metadata.db`; has a "Test Connection" button |
 | Calibre sync interval | How often to re-scan Calibre and auto-clear acquired requests |
 | Feed check interval | How often to poll J-Novels, Nyaa and other configured feeds |
-| Gentle backfill max pages | Page ceiling for historical backfill (`0` means unlimited, stopping at end of feed) |
+| Gap-free automatic feed scans | When on (default), each automatic scan keeps paging backwards until it reaches releases from before the previous scan, instead of only scanning the configured window |
+| Catch-up Scan Max Pages | Page budget for that extra backwards walk (1-50, default 10). Hitting the cap leaves the feed watermark unchanged so the next scan retries the gap |
+| Gentle backfill max pages | Page ceiling for the historical backfill, applied to both the J-Novels and Nyaa deep pages (`0` = unlimited, stopping at end of feed; `-1` = skip deep pagination) |
+| Include Nyaa historical pages | When on (default), the polite historical backfill also deep-crawls Nyaa category 3_1 backwards (resumable cursor); off = J-Novels-only historical backfill |
+| Nyaa backfill cursor | `POST /api/backfill/nyaa/reset` (Settings button) rewinds the resumable Nyaa page cursor to page 1 and clears its "complete" flag |
 | Backfill request delay | Polite delay between backfill network requests |
 | Track official translations only | When enabled, unofficial web-novel/fan-translation releases are excluded from wanted coverage |
+| Download engine | `qBittorrent` or `TorBox`; dispatch engine for every release Download action |
+| TorBox API key | API key from [torbox.app](https://torbox.app); a saved key is masked and a blank field keeps it |
+| TorBox engine settings | Enable engine, delete-after-download, strict selective volume fetch, delete-on-failure, parallel file downloads, parallel chunks, max download size, poll floor, max concurrent downloads, timeout hours, local downloads folder |
 | Discord webhook URL | Optional rich-embed notifications, with a live test button |
 | Generic webhook / Apprise endpoint | Optional JSON event notifications (Gotify, Ntfy, Home Assistant, Apprise), with a live test button |
 | Maintenance tools | Clear descriptions, clear discovered series, clear image cache, purge PDF releases |
@@ -333,6 +371,28 @@ The downloader is entirely optional and is configured from the **Downloads** tab
 | `qbit_savepath` | `/downloads` | Save path passed to qBittorrent; falls back to `DOWNLOAD_DIR` then `/downloads` |
 
 A "Test Connection" action reports the qBittorrent version/status for the currently saved settings. Saving the configuration validates the destination and re-tests the connection; the downloader host may be loopback or a private LAN address, but cloud-metadata and non-HTTP(S) targets are rejected.
+
+### TorBox debrid engine settings (Settings tab)
+
+The second download engine is configured from the **Settings** tab (a "Test TorBox" button verifies the key before you save). Select it with the **Download engine** selector or the engine dropdown in the Downloads config panel.
+
+| Setting | Default | Description |
+| --- | --- | --- |
+| `downloader_engine` | `qbit` | Active engine: `qbit` or `torbox`. Only `qbit`/`torbox` are accepted; anything else is rejected |
+| `torbox_enabled` | `false` | Engine master toggle. TorBox is only used when this is on **and** an API key is saved |
+| `torbox_api_key` | empty | TorBox API key. Never logged; masked in the Settings page and kept unchanged when the field is submitted blank |
+| `torbox_delete_after_download` | `true` | Delete the remote TorBox torrent after the files are fetched locally |
+| `torbox_strict_volume_selection` | `true` | Fetch only files whose parsed volumes are missing (best effort; falls back to the whole torrent when the mapping is ambiguous) |
+| `torbox_delete_on_failure` | `true` | Delete the remote TorBox torrent when a download terminally fails |
+| `torbox_download_concurrency` | `4` | Files fetched in parallel per release (clamped 1–16) |
+| `torbox_parallel_chunks` | `4` | Ranged connections per file (clamped 1–8) |
+| `torbox_max_download_gb` | `64` | Largest single file fetched (clamped 1–10240 GB) |
+| `torbox_poll_seconds` | `5` | Poll floor in seconds; active polling is at least this, idle polling backs off |
+| `torbox_max_concurrent` | `2` | Active TorBox submissions / fetch workers (clamped 1–20) |
+| `torbox_timeout_hours` | `6` | Give up after this many hours; `0` disables the timeout |
+| `downloads_dir` | `DOWNLOAD_DIR` or `/downloads` | Absolute local folder the engine writes fetched files into; must be writable |
+
+**Torrent releases only.** TorBox accepts Nyaa magnets and `.torrent` URLs, which it fetches on its own servers. Releases whose link is a direct web page (J-Novels, J-Novel Club, NovelUpdates) are rejected by the server with an explanatory message and logged as `TORBOX_SKIPPED`, because Cloudflare Turnstile blocks cloud fetching of those pages. The UI repeats this limitation next to the engine selector.
 
 ### Prioritized release groups
 

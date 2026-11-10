@@ -6,6 +6,8 @@ ENV PYTHONUNBUFFERED=1
 ENV PORT=8080
 ENV CALIBRE_DIR=/calibre
 ENV DATA_DIR=/app/data
+# Local folder the TorBox debrid engine fetches finished novel files into.
+ENV DOWNLOAD_DIR=/downloads
 
 WORKDIR /app
 
@@ -27,10 +29,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY backend/ /app/
 
 # Create mount points and ensure permissions for any unprivileged UID (e.g. 1000 or TrueNAS 568)
-RUN mkdir -p /calibre /app/data && \
-    chown -R appuser:appuser /app /calibre && \
+# /downloads is the local fetch target for the TorBox engine (DOWNLOAD_DIR); it must be
+# writable by the app user, and a mounted volume must keep those permissions.
+RUN mkdir -p /calibre /app/data /downloads && \
+    chown -R appuser:appuser /app /calibre /downloads && \
     chmod -R 755 /app && \
-    chmod 777 /app/data /calibre
+    chmod 777 /app/data /calibre /downloads
 
 USER appuser
 

@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import List, Dict, Any, Optional, Tuple, Set, Union
 
 from app.status_precedence import resolve_status
+from app.download_state import release_download_state
 
 logger = logging.getLogger("noveltrax.database")
 
@@ -217,6 +218,17 @@ class Database:
                 ("revision", "INTEGER DEFAULT 0"),
                 ("chapter_number", "REAL"),
                 ("chapter_ranges_json", "TEXT DEFAULT '[]'"),
+                # Download-engine bookkeeping (TorBox port §3.1).  The status
+                # vocabulary stays IDLE/DOWNLOADING/COMPLETED/FAILED.
+                ("downloader", "TEXT DEFAULT ''"),
+                ("downloader_id", "TEXT DEFAULT ''"),
+                ("downloader_started_at", "TEXT DEFAULT ''"),
+                ("download_wanted_json", "TEXT DEFAULT '[]'"),
+                ("download_error", "TEXT DEFAULT ''"),
+                ("download_attempts", "INTEGER DEFAULT 0"),
+                ("torbox_progress_json", "TEXT DEFAULT '{}'"),
+                ("download_files_json", "TEXT DEFAULT '[]'"),
+                ("downloaded_at", "TEXT DEFAULT ''"),
             ]:
                 try:
                     cur.execute(f"ALTER TABLE releases ADD COLUMN {col_def[0]} {col_def[1]};")
@@ -238,6 +250,7 @@ class Database:
             cur.execute("CREATE INDEX IF NOT EXISTS idx_releases_ignored ON releases(ignored);")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_releases_status ON releases(status);")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_releases_media_type ON releases(media_type);")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_releases_download_status ON releases(download_status);")
 
             # Series blacklist table
             cur.execute("""
@@ -315,6 +328,27 @@ class Database:
                 ("qbit_url", os.getenv("QBIT_URL", "http://localhost:8080")),
             ]
             for k, v in downloader_defaults:
+                cur.execute("INSERT OR IGNORE INTO app_settings (key, value) VALUES (?, ?);", (k, v))
+
+            # TorBox engine + local fetch target defaults (TorBox port §2).  All
+            # values are strings; ``torbox_last_poll_at`` is written at runtime and
+            # is deliberately not seeded here.
+            torbox_defaults = [
+                ("downloader_engine", "qbit"),
+                ("torbox_enabled", os.getenv("TORBOX_ENABLED", "false")),
+                ("torbox_api_key", os.getenv("TORBOX_API_KEY", "")),
+                ("torbox_delete_after_download", "true"),
+                ("torbox_strict_volume_selection", "true"),
+                ("torbox_delete_on_failure", "true"),
+                ("torbox_download_concurrency", "4"),
+                ("torbox_parallel_chunks", "4"),
+                ("torbox_max_download_gb", "64"),
+                ("torbox_poll_seconds", "5"),
+                ("torbox_max_concurrent", "2"),
+                ("torbox_timeout_hours", "6"),
+                ("downloads_dir", os.getenv("DOWNLOAD_DIR", "/downloads")),
+            ]
+            for k, v in torbox_defaults:
                 cur.execute("INSERT OR IGNORE INTO app_settings (key, value) VALUES (?, ?);", (k, v))
 
             # Seed default J-Novels feed if feeds table is empty
@@ -1449,6 +1483,7 @@ class Database:
                 except Exception:
                     item["missing_volumes"] = []
                 self._attach_detection_fields(item)
+                item["download_state"] = release_download_state(item)
             return items
 
     def count_prioritized_releases(self, status: Optional[str] = None, search: Optional[str] = None) -> int:
@@ -1495,6 +1530,210 @@ class Database:
                 """, (status, release_id))
             conn.commit()
 
+    # --- Download engine bookkeeping (TorBox port §3.2) ----------------------
+    def update_download_handle(
+        self,
+        release_id: int,
+        engine: str,
+        downloader_id: Optional[str] = None,
+        torrent_hash: Optional[str] = None,
+        wanted_volumes: Optional[List[float]] = None,
+    ) -> None:
+        """Persist the engine provenance and effective wanted volumes for a release."""
+        clean_engine = str(engine or "").strip().lower()
+        clean_id = None if downloader_id is None else str(downloader_id).strip()
+        clean_hash = str(torrent_hash).strip() if (
+            isinstance(torrent_hash, str) and torrent_hash.strip()
+        ) else None
+        clean_wanted = None
+        if wanted_volumes is not None:
+            clean_wanted = json.dumps(sorted({round(float(v), 2) for v in wanted_volumes}))
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                UPDATE releases
+                SET download_status = 'DOWNLOADING',
+                    downloader = ?,
+                    downloader_id = COALESCE(?, downloader_id),
+                    torrent_hash = COALESCE(?, torrent_hash),
+                    download_wanted_json = COALESCE(?, download_wanted_json),
+                    download_error = '',
+                    download_attempts = 0,
+                    downloader_started_at = CURRENT_TIMESTAMP,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?;
+            """, (clean_engine, clean_id, clean_hash, clean_wanted, release_id))
+            conn.commit()
+
+    def update_downloader_state(
+        self, release_id: int, download_status: str, engine: Optional[str] = None
+    ) -> None:
+        """Only mutate download_status (and optionally the engine) — not hashes."""
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            if engine:
+                cur.execute(
+                    "UPDATE releases SET download_status = ?, downloader = ?, "
+                    "updated_at = CURRENT_TIMESTAMP WHERE id = ?;",
+                    (download_status, str(engine).strip().lower(), release_id),
+                )
+            else:
+                cur.execute(
+                    "UPDATE releases SET download_status = ?, updated_at = CURRENT_TIMESTAMP "
+                    "WHERE id = ?;",
+                    (download_status, release_id),
+                )
+            conn.commit()
+
+    def set_downloader_id(self, release_id: int, downloader_id: str) -> None:
+        """Replace the engine handle without resetting the submission timestamp.
+
+        Used when a queued TorBox job is promoted to an active torrent; the overall
+        timeout window must keep counting from the original submission.
+        """
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE releases SET downloader_id = ?, updated_at = CURRENT_TIMESTAMP "
+                "WHERE id = ?;",
+                (str(downloader_id or ""), release_id),
+            )
+            conn.commit()
+
+    def set_download_files(self, release_id: int, paths: List[str]) -> None:
+        """Persist the files fetched for a release and mark when they arrived."""
+        clean = [str(path) for path in (paths or [])]
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE releases SET download_files_json = ?, "
+                "downloaded_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?;",
+                (json.dumps(clean), release_id),
+            )
+            conn.commit()
+
+    def update_torbox_progress(self, release_id: int, **fields: Any) -> Dict[str, Any]:
+        """Merge the TorBox phase/progress/timing fields into the release row."""
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT torbox_progress_json FROM releases WHERE id = ?;", (release_id,))
+            row = cur.fetchone()
+            try:
+                data = json.loads((row["torbox_progress_json"] if row else "") or "{}")
+            except (TypeError, ValueError):
+                data = {}
+            if not isinstance(data, dict):
+                data = {}
+            data.update({key: value for key, value in fields.items() if value is not None})
+            data["updated_at"] = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+            cur.execute(
+                "UPDATE releases SET torbox_progress_json = ?, updated_at = CURRENT_TIMESTAMP "
+                "WHERE id = ?;",
+                (json.dumps(data), release_id),
+            )
+            conn.commit()
+            return data
+
+    def get_torbox_progress(self, release_id: int) -> Dict[str, Any]:
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT torbox_progress_json FROM releases WHERE id = ?;", (release_id,))
+            row = cur.fetchone()
+        try:
+            data = json.loads((row["torbox_progress_json"] if row else "") or "{}")
+        except (TypeError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def increment_download_attempt(self, release_id: int) -> int:
+        """Bump the failure attempt counter and return the new value."""
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE releases SET download_attempts = COALESCE(download_attempts, 0) + 1, "
+                "updated_at = CURRENT_TIMESTAMP WHERE id = ?;",
+                (release_id,),
+            )
+            conn.commit()
+            cur.execute(
+                "SELECT COALESCE(download_attempts, 0) AS attempts FROM releases WHERE id = ?;",
+                (release_id,),
+            )
+            row = cur.fetchone()
+            return int(row["attempts"]) if row else 0
+
+    def set_download_error(self, release_id: int, message: str) -> None:
+        """Persist a user-visible failure reason (attempt count is bumped separately)."""
+        clean = str(message or "").strip()
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE releases SET download_error = ?, updated_at = CURRENT_TIMESTAMP "
+                "WHERE id = ?;",
+                (clean, release_id),
+            )
+            conn.commit()
+
+    def clear_download_error(self, release_id: int) -> None:
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE releases SET download_error = '', download_attempts = 0, "
+                "updated_at = CURRENT_TIMESTAMP WHERE id = ?;",
+                (release_id,),
+            )
+            conn.commit()
+
+    def clear_downloader_submission(self, release_id: int, engine: Optional[str] = None) -> None:
+        """Fully detach a release from a downloader queue (user "Remove" action).
+
+        Clearing only ``download_status`` leaves the engine handle, torrent hash,
+        fetched progress and error behind; the row then still looks like engine work
+        to retries/status and can be re-rendered as a ghost queue item.  Reset every
+        submission field so the release is cleanly back to "not queued" while keeping
+        the release itself (and any files already fetched on disk).
+        """
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE releases SET "
+                "download_status = 'IDLE', download_error = '', download_attempts = 0, "
+                "downloader_id = NULL, torrent_hash = NULL, downloader_started_at = NULL, "
+                "download_wanted_json = '[]', torbox_progress_json = '{}', "
+                "download_files_json = '[]', downloaded_at = NULL, "
+                + ("downloader = ?, " if engine else "")
+                + "updated_at = CURRENT_TIMESTAMP WHERE id = ?;",
+                ((str(engine).strip().lower(), release_id) if engine else (release_id,)),
+            )
+            conn.commit()
+
+    def get_active_torbox_downloads(self) -> List[Dict[str, Any]]:
+        """Releases submitted through TorBox that are still DOWNLOADING."""
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT * FROM releases WHERE download_status = 'DOWNLOADING' "
+                "AND downloader = 'torbox' ORDER BY downloader_started_at ASC, id ASC;"
+            )
+            return [dict(row) for row in cur.fetchall()]
+
+    def get_downloader_releases(self, engine: str, limit: int = 100) -> List[Dict[str, Any]]:
+        """Releases currently representing work for *engine* (active first)."""
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT * FROM releases
+                WHERE downloader = ?
+                  AND download_status IN ('DOWNLOADING', 'FAILED')
+                ORDER BY CASE download_status WHEN 'DOWNLOADING' THEN 0 ELSE 1 END,
+                         updated_at DESC
+                LIMIT ?;
+                """,
+                (str(engine or "").strip().lower(), max(1, int(limit))),
+            )
+            return [dict(row) for row in cur.fetchall()]
+
     def get_release_by_id(self, release_id: int) -> Optional[Dict[str, Any]]:
         with self.get_connection() as conn:
             cur = conn.cursor()
@@ -1504,6 +1743,7 @@ class Database:
                 return None
             item = dict(row)
             self._attach_detection_fields(item)
+            item["download_state"] = release_download_state(item)
             return item
 
     def get_releases(
@@ -1583,6 +1823,7 @@ class Database:
                     item["missing_volumes"] = json.loads(item.get("missing_vols_json") or "[]")
                 except Exception:
                     item["missing_volumes"] = []
+                item["download_state"] = release_download_state(item)
             return items
 
     def count_releases(
@@ -1696,6 +1937,7 @@ class Database:
                     r["missing_volumes"] = json.loads(r.get("missing_vols_json") or "[]")
                 except Exception:
                     r["missing_volumes"] = []
+                r["download_state"] = release_download_state(r)
 
             cur.execute("SELECT * FROM series_tracking;")
             tracked_rows = [dict(r) for r in cur.fetchall()]
