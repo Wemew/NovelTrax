@@ -76,6 +76,12 @@
                                 {% if s.calibre_series_id %}
                                 <span class="block text-[10px] text-slate-500 font-mono mt-0.5">Calibre ID: #{{ s.calibre_series_id }}</span>
                                 {% endif %}
+                                {% set pub_format = s.anilist_format_label or '' %}
+                                {% set pub_status = s.anilist_status_label or '' %}
+                                {% set pub_volumes = s.total_volumes if s.total_volumes is defined and s.total_volumes is not none else none %}
+                                {% if pub_format or pub_status or pub_volumes %}
+                                <span class="series-publication-line block text-[10px] text-slate-400 font-mono mt-0.5" title="AniList publication metadata (Format · Status · Volumes)">{% if pub_format %}{{ pub_format }}{% endif %}{% if pub_format and (pub_status or pub_volumes) %} · {% endif %}{% if pub_status %}{{ pub_status }}{% endif %}{% if pub_status and pub_volumes %} · {% endif %}{% if pub_volumes %}{{ pub_volumes }} vols{% endif %}</span>
+                                {% endif %}
                             </div>
                         </td>
 

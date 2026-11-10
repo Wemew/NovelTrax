@@ -1333,6 +1333,13 @@ class Database:
             "fetched_at": _coerce_text(meta.get("fetched_at"))
             or datetime.utcnow().isoformat() + "Z",
         }
+        # Contract v3 §3: the stored JSON is the store of record for the AniList
+        # publication fields (format / status / volumes / chapters).
+        try:
+            from app.providers.metadata import NovelMetadataProvider
+            stored.update(NovelMetadataProvider.publication_from_meta(meta))
+        except Exception as exc:
+            logger.debug("Could not extend stored AniList metadata: %s", exc)
         anilist_id = _coerce_int(meta.get("anilist_id"))
         if anilist_id is None:
             anilist_id = _coerce_int(meta.get("id"))
@@ -1357,6 +1364,60 @@ class Database:
                 )
             except ValueError:
                 continue
+
+    def store_series_publication_metadata(self, series_id: int, meta: Dict[str, Any]) -> None:
+        """Merge only the AniList publication keys into a series' ``anilist_meta_json``.
+
+        Used by the bundle-volume inference recovery path (scheduler §4).  The
+        merge preserves every other stored key and never touches ``name``,
+        ``display_title``, ``calibre_series_id`` or the alias overrides.  It is a
+        safe no-op for unknown ids, invalid/empty metadata and ``identity_locked``
+        rows, and it never raises.
+        """
+        try:
+            sid = _coerce_int(series_id)
+            if sid is None:
+                return
+            if not isinstance(meta, dict):
+                return
+            with self.get_connection() as conn:
+                cur = conn.cursor()
+                cur.execute("SELECT * FROM series_tracking WHERE id = ?;", (sid,))
+                found = cur.fetchone()
+            if found is None:
+                return
+            row = dict(found)
+            if _coerce_int(row.get("identity_locked")) == 1:
+                logger.debug(
+                    "Skipping publication metadata store for identity-locked series %r",
+                    _coerce_text(row.get("name")),
+                )
+                return
+            from app.providers.metadata import NovelMetadataProvider
+            publication = NovelMetadataProvider.publication_from_meta(meta)
+            # "invalid meta" (nothing known) is a no-op.
+            if not any(
+                value not in (None, "", False) for value in publication.values()
+            ):
+                return
+            existing: Dict[str, Any] = {}
+            meta_raw = row.get("anilist_meta_json")
+            if isinstance(meta_raw, dict):
+                existing = dict(meta_raw)
+            elif isinstance(meta_raw, str) and meta_raw.strip():
+                try:
+                    parsed = json.loads(meta_raw)
+                except (TypeError, ValueError):
+                    parsed = {}
+                if isinstance(parsed, dict):
+                    existing = parsed
+            existing.update(publication)
+            self.update_series_identity(
+                sid,
+                anilist_meta_json=json.dumps(existing, ensure_ascii=False),
+            )
+        except Exception as exc:  # pragma: no cover - defensive: never raises
+            logger.debug("store_series_publication_metadata failed: %s", exc)
 
     def _series_release_spellings(self, source_name: str) -> List[str]:
         """Every spelling under which releases may store *source_name*.
@@ -4981,7 +5042,12 @@ class Database:
 
     # --- Novel Metadata Cache Operations ---
     def ensure_metadata_cache_table(self):
-        """Ensures the novel_metadata_cache table exists with required schema."""
+        """Ensures the novel_metadata_cache table exists with required schema.
+
+        Contract v3 §3: ``publication_json`` is added by a guarded migration so
+        databases created before the AniList Format/Status/Volumes work keep
+        working unchanged.
+        """
         with self.get_connection() as conn:
             cur = conn.cursor()
             cur.execute("""
@@ -4991,14 +5057,53 @@ class Database:
                     synopsis TEXT,
                     cover_url TEXT,
                     source TEXT,
+                    publication_json TEXT DEFAULT '{}',
                     cached_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
             """)
             cur.execute("CREATE INDEX IF NOT EXISTS idx_novel_metadata_cache_key ON novel_metadata_cache(query_key);")
+            cur.execute("PRAGMA table_info(novel_metadata_cache);")
+            cache_columns = {row["name"] for row in cur.fetchall()}
+            if "publication_json" not in cache_columns:
+                try:
+                    cur.execute(
+                        "ALTER TABLE novel_metadata_cache "
+                        "ADD COLUMN publication_json TEXT DEFAULT '{}';"
+                    )
+                except sqlite3.OperationalError:
+                    pass
             conn.commit()
 
+    @staticmethod
+    def _publication_from_cached_row(row_dict: Dict[str, Any]) -> Dict[str, Any]:
+        """Parse the cache row's ``publication_json`` into publication keys."""
+        try:
+            from app.providers.metadata import NovelMetadataProvider
+        except Exception:
+            return {}
+        publication_raw = row_dict.get("publication_json")
+        if isinstance(publication_raw, dict):
+            parsed = publication_raw
+        elif isinstance(publication_raw, str) and publication_raw.strip():
+            try:
+                parsed = json.loads(publication_raw)
+            except (TypeError, ValueError):
+                parsed = {}
+        else:
+            parsed = {}
+        if not isinstance(parsed, dict):
+            return {}
+        try:
+            return NovelMetadataProvider.publication_from_meta(parsed)
+        except Exception:
+            return {}
+
     def get_cached_novel_metadata(self, query_key: str) -> Optional[Dict[str, Any]]:
-        """Retrieves cached novel metadata by query key (case-insensitive)."""
+        """Retrieves cached novel metadata by query key (case-insensitive).
+
+        The stored ``publication_json`` is parsed back into the normalized
+        publication keys (format/status/volumes/...) and merged into the row.
+        """
         if not query_key:
             return None
         self.ensure_metadata_cache_table()
@@ -5014,11 +5119,14 @@ class Database:
                 d = dict(row)
                 if "query_key" not in d and "key" in d:
                     d["query_key"] = d["key"]
+                publication = self._publication_from_cached_row(d)
+                if publication:
+                    d.update(publication)
                 return d
             return None
 
     def cache_novel_metadata(self, query_key: str, data: Dict[str, Any]):
-        """Caches novel metadata (title, synopsis, cover_url, source)."""
+        """Caches novel metadata (title, synopsis, cover_url, source + publication)."""
         if not query_key or not data:
             return
         self.ensure_metadata_cache_table()
@@ -5027,22 +5135,47 @@ class Database:
         synopsis = data.get("synopsis") or ""
         cover_url = data.get("cover_url") or ""
         source = data.get("source") or "unknown"
+        # Contract v3 §3: persist the normalized publication dict next to the
+        # legacy cache fields so Format/Status/Volumes survive cache hits.
+        publication_json = "{}"
+        try:
+            from app.providers.metadata import NovelMetadataProvider
+            publication = NovelMetadataProvider.publication_from_meta(data)
+            if publication:
+                publication_json = json.dumps(publication, ensure_ascii=False)
+        except Exception as exc:
+            logger.debug("Could not build cache publication metadata: %s", exc)
         with self.get_connection() as conn:
             cur = conn.cursor()
             cur.execute("PRAGMA table_info(novel_metadata_cache);")
             cols = {r["name"] for r in cur.fetchall()}
             key_col = "query_key" if "query_key" in cols else "key"
             if "synopsis" in cols and "cover_url" in cols:
-                cur.execute(f"""
-                    INSERT INTO novel_metadata_cache ({key_col}, title, synopsis, cover_url, source, cached_at)
-                    VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                    ON CONFLICT({key_col}) DO UPDATE SET
-                        title = excluded.title,
-                        synopsis = excluded.synopsis,
-                        cover_url = CASE WHEN excluded.cover_url != '' THEN excluded.cover_url ELSE novel_metadata_cache.cover_url END,
-                        source = excluded.source,
-                        cached_at = CURRENT_TIMESTAMP;
-                """, (clean_k, title, synopsis, cover_url, source))
+                if "publication_json" in cols:
+                    cur.execute(f"""
+                        INSERT INTO novel_metadata_cache
+                            ({key_col}, title, synopsis, cover_url, source,
+                             publication_json, cached_at)
+                        VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                        ON CONFLICT({key_col}) DO UPDATE SET
+                            title = excluded.title,
+                            synopsis = excluded.synopsis,
+                            cover_url = CASE WHEN excluded.cover_url != '' THEN excluded.cover_url ELSE novel_metadata_cache.cover_url END,
+                            source = excluded.source,
+                            publication_json = CASE WHEN excluded.publication_json != '{{}}' THEN excluded.publication_json ELSE novel_metadata_cache.publication_json END,
+                            cached_at = CURRENT_TIMESTAMP;
+                    """, (clean_k, title, synopsis, cover_url, source, publication_json))
+                else:
+                    cur.execute(f"""
+                        INSERT INTO novel_metadata_cache ({key_col}, title, synopsis, cover_url, source, cached_at)
+                        VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                        ON CONFLICT({key_col}) DO UPDATE SET
+                            title = excluded.title,
+                            synopsis = excluded.synopsis,
+                            cover_url = CASE WHEN excluded.cover_url != '' THEN excluded.cover_url ELSE novel_metadata_cache.cover_url END,
+                            source = excluded.source,
+                            cached_at = CURRENT_TIMESTAMP;
+                    """, (clean_k, title, synopsis, cover_url, source))
             else:
                 cur.execute(f"INSERT OR REPLACE INTO novel_metadata_cache ({key_col}, data) VALUES (?, ?);", (clean_k, json.dumps(data)))
             conn.commit()

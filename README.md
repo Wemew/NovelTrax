@@ -277,6 +277,12 @@ services:
    - **Different series** creates a brand-new tracked series row with `identity_locked=1`, `match_source='manual-new'` and no alias back to the old spelling — the new title must be genuinely new (the server rejects a title that normalises to the current series or to any existing tracked series/display title/alias).
    - **Per-series reset (Settings → Series identity & overrides)**: search any tracked series and press **Reset identity** (two-step confirm, `POST /api/series/{series_id}/reset-identity`) to forget manual/learned aliases, AniList display data, the manual lock and per-release pins for that series, after which automatic matching takes over again. Reset is per series only — there is no global destructive reset. The same card lists the global alias overrides (`GET /api/series/aliases`, delete via `DELETE /api/series/aliases/{override_id}`) and offers an **Attribution audit** (`GET /api/maintenance/series-attribution`) that flags releases whose stored series no longer matches the automatic parse and lets you Re-bind them directly. Release titles are never changed by a reset.
 
+6c. **AniList Publication Metadata & Nyaa Bundle Volume Inference**:
+   - Every AniList lookup also stores **Format** (`format` / `format_label`, e.g. `Light Novel`), **Status** (`status` / `status_label`: Finished, Releasing, Not Yet Released, Hiatus, Cancelled) and the **total volume count** (`volumes` / `total_volumes`) alongside the title, synopsis and cover. Only the novel format family (`NOVEL` / `LIGHT_NOVEL`) is accepted — a `MANGA` or other-format result is never treated as a light novel. The values live in `series_tracking.anilist_meta_json` and in the `novel_metadata_cache` publication JSON, and the **Series** page renders them as a compact `Format · Status · N vols` line (`.series-publication-line`, tooltip "AniList publication metadata (Format · Status · Volumes)"). Kitsu-only results carry no publication fields, so inference is skipped for them.
+   - **Nyaa bundle volume inference**: an unmarked Nyaa light-novel batch release with no volume marker — e.g. `The Executioner and Her Way of Life [Yen Press] [Stick]` — is treated as the **complete series** when AniList reports Format = Light Novel, Status = Finished and a known volume count N. The release is stored as a bundle with `volumes = [1..N]`, `is_bundle`, `is_complete` and `volume_inferred`, and the normal Calibre ownership/wanted logic then runs over all N volumes: the Releases table shows `Bundle: Vol 1–11`, every volume appears in the detected coverage grid, and each missing volume is tracked/requested. Example: **The Executioner and Her Way of Life → Vol 1–11**.
+   - **Limits**: Nyaa feeds only. Inference is skipped for non-Nyaa feeds, titles that already carry a volume marker or explicit volume list, chapter rows, manga/audiobook media types, Releasing/Hiatus/Cancelled statuses, non-novel AniList formats and unknown volume counts. The Nyaa historical deep-page backfill applies the same rule; the targeted per-series provider backfill does not (documented limitation).
+   - Toggle with `nyaa_bundle_volume_inference` (default `true`; Settings → Automation & Polling → **Infer bundle volumes from AniList**). Set it to `false` to disable the heuristic entirely.
+
 ---
 
 ## 🧪 Testing Locally
@@ -319,7 +325,10 @@ $env:PYTHONIOENCODING="utf-8"; $env:TEMP="C:\Users\rasmu\Documents\AI-Workspace\
 & $py tests\run_tests.py feed_catchup nyaa_backfill
 & $py tests\run_tests.py ui_wiring downloader
 & $py tests\run_tests.py rebind_settings_ui
+& $py tests\run_tests.py bundle_inference_ui
 ```
+
+The AniList publication-metadata / Nyaa bundle-inference port adds `tests/test_publication_metadata.py` (GraphQL fields + `publication_from_meta` matrix + cache/persistence), `tests/test_bundle_volume_inference.py` (inference condition matrix, metadata cache/budget, backfill ingestion), `tests/test_publication_metadata_routes.py` (series-page enrichment helper) and `tests/test_bundle_inference_ui.py` (static series-line/settings/README guards).
 
 The re-bind / different-series port adds `tests/test_release_rebind_db.py` (pin, bind/new-title/detach, validation, per-series reset), `tests/test_release_rebind_scheduler.py` (status recompute, pin/lock enforcement across feed scans and reconciliation), `tests/test_settings_features_api.py` (settings-feature routes and validation) and `tests/test_rebind_settings_ui.py` (static modal/card/JS/README guards).
 
@@ -357,6 +366,7 @@ These qBittorrent environment variables only seed the database on first start; t
 | Feed check interval | How often to poll J-Novels, Nyaa and other configured feeds |
 | Gap-free automatic feed scans | When on (default), each automatic scan keeps paging backwards until it reaches releases from before the previous scan, instead of only scanning the configured window |
 | Catch-up Scan Max Pages | Page budget for that extra backwards walk (1-50, default 10). Hitting the cap leaves the feed watermark unchanged so the next scan retries the gap |
+| Infer bundle volumes from AniList (`nyaa_bundle_volume_inference`) | When on (default), unmarked Nyaa light-novel batch releases are expanded to the complete series (`Vol 1–N`) when AniList reports Format: Light Novel, Status: Finished and a known volume count. See the matching section for the exact rule and limits |
 | Gentle backfill max pages | Page ceiling for the historical backfill, applied to both the J-Novels and Nyaa deep pages (`0` = unlimited, stopping at end of feed; `-1` = skip deep pagination) |
 | Include Nyaa historical pages | When on (default), the polite historical backfill also deep-crawls Nyaa category 3_1 backwards (resumable cursor); off = J-Novels-only historical backfill |
 | Nyaa backfill cursor | `POST /api/backfill/nyaa/reset` (Settings button) rewinds the resumable Nyaa page cursor to page 1 and clears its "complete" flag |

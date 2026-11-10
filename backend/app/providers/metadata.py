@@ -1,7 +1,8 @@
 import re
 import json
 import logging
-from typing import Optional, Dict, Any
+import math
+from typing import Optional, Dict, Any, List
 import time
 import threading
 import collections
@@ -22,6 +23,120 @@ DEFAULT_HEADERS = {
     "User-Agent": "NovelTrax/1.0 (https://github.com/Wemew/NovelTrax)",
     "Accept": "application/json"
 }
+
+# ---------------------------------------------------------------------------
+# AniList publication metadata (contract v3 §2)
+# ---------------------------------------------------------------------------
+#: AniList MediaFormat values normalised to our canonical form that count as a
+#: light novel.  ``format_in: [NOVEL]`` already restricts the GraphQL query, but
+#: the mapping must stay defensive: only the NOVEL family may drive bundle
+#: volume inference.
+_NOVEL_FORMAT_KEYS = {"NOVEL", "LIGHT_NOVEL"}
+
+#: Display labels for the known AniList MediaStatus values.
+STATUS_LABELS = {
+    "FINISHED": "Finished",
+    "RELEASING": "Releasing",
+    "NOT_YET_RELEASED": "Not Yet Released",
+    "HIATUS": "Hiatus",
+    "CANCELLED": "Cancelled",
+}
+
+#: Reverse map used when only a previously-stored label is available.
+_STATUS_LABEL_TO_RAW = {label.lower(): raw for raw, label in STATUS_LABELS.items()}
+
+#: The normalized publication keys carried by every metadata result/cache row.
+PUBLICATION_KEYS = (
+    "format",
+    "format_label",
+    "is_light_novel",
+    "status",
+    "status_label",
+    "volumes",
+    "chapters",
+    "total_volumes",
+)
+
+
+def _publication_token(value: Any) -> str:
+    """Normalise a raw AniList enum value (``Light Novel`` -> ``LIGHT_NOVEL``)."""
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if not text:
+        return ""
+    return re.sub(r"[^A-Za-z0-9]+", "_", text.upper()).strip("_")
+
+
+def _publication_text(value: Any) -> str:
+    """Best-effort stripped text for publication fields."""
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _publication_int(value: Any) -> Optional[int]:
+    """Coerce a publication count: only finite integers >= 0 are accepted."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value >= 0 else None
+    if isinstance(value, float):
+        if not math.isfinite(value) or value < 0 or not value.is_integer():
+            return None
+        return int(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            number = float(text)
+        except ValueError:
+            return None
+        if not math.isfinite(number) or number < 0 or not number.is_integer():
+            return None
+        return int(number)
+    return None
+
+
+def _prettify_publication_value(value: Any) -> str:
+    """Prettify an enum-ish value: ``NOT_YET_RELEASED`` -> ``Not Yet Released``."""
+    token = _publication_token(value)
+    if not token:
+        return ""
+    return token.replace("_", " ").title()
+
+
+def _coerce_publication_mapping(meta: Any) -> Dict[str, Any]:
+    """Return a dict from a metadata mapping, JSON string, or nothing."""
+    if isinstance(meta, dict):
+        return meta
+    if isinstance(meta, (bytes, bytearray)):
+        try:
+            meta = bytes(meta).decode("utf-8", "replace")
+        except Exception:
+            return {}
+    if isinstance(meta, str) and meta.strip():
+        try:
+            parsed = json.loads(meta)
+        except (TypeError, ValueError):
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def publication_defaults() -> Dict[str, Any]:
+    """The empty publication dict (all keys present, nothing known)."""
+    return {
+        "format": "",
+        "format_label": "",
+        "is_light_novel": False,
+        "status": "",
+        "status_label": "",
+        "volumes": None,
+        "chapters": None,
+        "total_volumes": None,
+    }
 
 class SlidingWindowRateLimiter:
     """
@@ -130,6 +245,109 @@ class NovelMetadataProvider:
         return re.sub(r'\s+', ' ', t).strip(' :–—-_')
 
     @classmethod
+    def publication_from_meta(cls, meta: Any) -> Dict[str, Any]:
+        """Normalise publication metadata from any AniList/cached metadata shape.
+
+        Accepts a raw AniList result dict, ``series_tracking.anilist_meta_json``
+        (JSON string), the metadata-cache row, an empty value or garbage.  Always
+        returns the normalized publication dict with every key present
+        (``format``, ``format_label``, ``is_light_novel``, ``status``,
+        ``status_label``, ``volumes``, ``chapters``, ``total_volumes``); counts are
+        validated to finite integers >= 0.  Never raises (contract v3 §2).
+        """
+        publication = publication_defaults()
+        try:
+            data = _coerce_publication_mapping(meta)
+            if not data:
+                return publication
+            # Tolerate raw GraphQL envelopes ({"data": {"Media": {...}}}) as well
+            # as our flat result rows.
+            nested_media: Optional[Dict[str, Any]] = None
+            if isinstance(data.get("Media"), dict):
+                nested_media = data["Media"]
+            elif isinstance(data.get("media"), dict):
+                nested_media = data["media"]
+            elif isinstance(data.get("data"), dict):
+                nested_envelope = data["data"]
+                if isinstance(nested_envelope.get("Media"), dict):
+                    nested_media = nested_envelope["Media"]
+                elif isinstance(nested_envelope.get("media"), dict):
+                    nested_media = nested_envelope["media"]
+            if nested_media is not None:
+                data = nested_media
+
+            raw_format = _publication_text(
+                data.get("format") or data.get("anilist_format")
+            )
+            format_label_value = _publication_text(
+                data.get("format_label") or data.get("anilist_format_label")
+            )
+            if not raw_format and format_label_value:
+                label_token = _publication_token(format_label_value)
+                raw_format = "NOVEL" if label_token in _NOVEL_FORMAT_KEYS else label_token
+            format_token = _publication_token(raw_format)
+            is_light_novel = format_token in _NOVEL_FORMAT_KEYS
+            if not format_token and data.get("is_light_novel") is True:
+                # A previously-stored normalized meta row may carry only the flag.
+                format_token = "NOVEL"
+                is_light_novel = True
+            publication["format"] = format_token
+            if is_light_novel:
+                publication["format_label"] = "Light Novel"
+            else:
+                publication["format_label"] = (
+                    format_label_value or _prettify_publication_value(format_token)
+                )
+            publication["is_light_novel"] = bool(is_light_novel)
+
+            raw_status = _publication_text(
+                data.get("status") or data.get("anilist_status")
+            )
+            status_label_value = _publication_text(
+                data.get("status_label") or data.get("anilist_status_label")
+            )
+            if not raw_status and status_label_value:
+                raw_status = _STATUS_LABEL_TO_RAW.get(
+                    status_label_value.strip().lower(), ""
+                ) or _publication_token(status_label_value)
+            status_token = _publication_token(raw_status)
+            publication["status"] = status_token
+            status_label = STATUS_LABELS.get(status_token)
+            if not status_label:
+                status_label = status_label_value or _prettify_publication_value(status_token)
+            publication["status_label"] = status_label
+
+            volumes = _publication_int(data.get("volumes"))
+            if volumes is None:
+                volumes = _publication_int(data.get("total_volumes"))
+            if volumes is None:
+                volumes = _publication_int(data.get("anilist_volumes"))
+            chapters = _publication_int(data.get("chapters"))
+            if chapters is None:
+                chapters = _publication_int(data.get("anilist_chapters"))
+            publication["volumes"] = volumes
+            publication["chapters"] = chapters
+            publication["total_volumes"] = volumes
+        except Exception as exc:  # pragma: no cover - defensive: never raises
+            logger.debug("publication_from_meta failed: %s", exc)
+            return publication_defaults()
+        return publication
+
+    @classmethod
+    def _with_publication(cls, result: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """Return *result* with the normalized publication keys merged in."""
+        if not isinstance(result, dict):
+            return result
+        merged = dict(result)
+        publication = cls.publication_from_meta(result)
+        for key, value in publication.items():
+            if value in (None, "", False) and merged.get(key) not in (None, "", False):
+                # An empty normalized value must not clobber real stored data.
+                continue
+            merged[key] = value
+        return merged
+
+    @classmethod
     def query_kitsu(cls, cleaned_title: str) -> Optional[Dict[str, Any]]:
         """Queries Kitsu JSON:API for light novels and translated web novels.
 
@@ -221,9 +439,12 @@ class NovelMetadataProvider:
 
         Returns the title identity keys used by the series-identity resolver
         (``canonical_title``, ``title``, ``english_title``, ``romaji_title``,
-        ``native_title``, ``synonyms``, ``anilist_id``, ``source``) plus the
-        existing synopsis/cover fields.  A missing description no longer hides the
-        titles (only the synopsis consumers care about that).
+        ``native_title``, ``synonyms``, ``anilist_id``, ``source``), the existing
+        synopsis/cover fields and the normalized publication keys (``format``,
+        ``format_label``, ``is_light_novel``, ``status``, ``status_label``,
+        ``volumes``, ``chapters``, ``total_volumes``).  ``format_in: [NOVEL]`` is
+        kept so the API only ever returns light-novel entries.  A missing
+        description no longer hides the titles.
         """
         query = """
         query ($search: String) {
@@ -235,6 +456,10 @@ class NovelMetadataProvider:
               native
             }
             synonyms
+            format
+            status
+            volumes
+            chapters
             description(asHtml: false)
             coverImage {
               large
@@ -318,6 +543,13 @@ class NovelMetadataProvider:
             "cover_url": cover,
             "source": "AniList",
         }
+        # Contract v3 §2: Format / Status / Volumes travel with every result.
+        result.update(cls.publication_from_meta({
+            "format": media.get("format"),
+            "status": media.get("status"),
+            "volumes": media.get("volumes"),
+            "chapters": media.get("chapters"),
+        }))
         if not (result.get("title") or synonyms):
             return None
         return result
@@ -342,7 +574,7 @@ class NovelMetadataProvider:
                     cached = active_db.get_cached_novel_metadata(k)
                     if cached and (cached.get("title") or "").strip():
                         cached_title = (cached.get("title") or "").strip()
-                        return {
+                        cached_result = {
                             "title": cached_title,
                             "english_title": cached_title,
                             "canonical_title": cached_title,
@@ -355,6 +587,9 @@ class NovelMetadataProvider:
                             "source": cached.get("source", "cache"),
                             "cached": True,
                         }
+                        # Contract v3 §3: publication keys survive cache hits.
+                        cached_result.update(cls.publication_from_meta(cached))
+                        return cls._with_publication(cached_result)
             except Exception as e:
                 logger.debug(f"Series metadata cache lookup failed for '{cleaned}': {e}")
 
@@ -377,19 +612,17 @@ class NovelMetadataProvider:
 
         if result and active_db is not None:
             try:
-                cache_payload = {
-                    "title": result.get("title"),
-                    "synopsis": result.get("synopsis") or "",
-                    "cover_url": result.get("cover_url") or "",
-                    "source": result.get("source") or "unknown",
-                }
+                # Persist the publication keys alongside the legacy cache fields
+                # (cache_novel_metadata stores publication_json from this payload).
+                cache_payload = dict(result)
+                cache_payload.setdefault("synopsis", "")
                 active_db.cache_novel_metadata(cleaned.lower(), cache_payload)
                 english_key = (result.get("english_title") or "").strip().lower()
                 if english_key and english_key != cleaned.lower():
                     active_db.cache_novel_metadata(english_key, cache_payload)
             except Exception as e:
                 logger.debug(f"Failed to cache series metadata for '{cleaned}': {e}")
-        return result
+        return cls._with_publication(result)
 
     @classmethod
     def fetch_novel_metadata(cls, raw_title: str, db: Optional[Any] = None) -> Optional[Dict[str, Any]]:
@@ -413,7 +646,7 @@ class NovelMetadataProvider:
                     if cached and (cached.get("synopsis") or cached.get("cover_url")):
                         logger.info(f"Retrieved novel metadata for '{cleaned}' from SQLite cache.")
                         cached_title = cached.get("title") or cleaned
-                        return {
+                        cached_result = {
                             "title": cached_title,
                             "english_title": cached_title,
                             # Title identity keys travel through the cache too
@@ -428,6 +661,9 @@ class NovelMetadataProvider:
                             "source": cached.get("source", "cache"),
                             "cached": True,
                         }
+                        # Contract v3 §3: publication keys survive cache hits.
+                        cached_result.update(cls.publication_from_meta(cached))
+                        return cls._with_publication(cached_result)
             except Exception as e:
                 logger.debug(f"Metadata cache lookup failed for '{cleaned}': {e}")
 
@@ -459,6 +695,7 @@ class NovelMetadataProvider:
             elif kitsu_res and kitsu_res.get("synopsis"):
                 result = kitsu_res
 
+        result = cls._with_publication(result)
         if result and active_db is not None:
             try:
                 active_db.cache_novel_metadata(cleaned.lower(), result)

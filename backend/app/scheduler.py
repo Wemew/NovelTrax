@@ -69,6 +69,15 @@ SERIES_ANILIST_MATCH_BUDGET_DEFAULT = 10
 #: How long a successful per-series AniList title lookup stays hot in process.
 SERIES_ALT_TITLE_TTL_SECONDS = 6 * 60 * 60
 
+#: Nyaa unmarked-bundle volume inference (contract v3 §4). Unmarked Nyaa
+#: light-novel batch releases are treated as the complete series when AniList
+#: reports Format = Light Novel, Status = Finished and a volume count.
+NYAA_BUNDLE_VOLUME_INFERENCE_KEY = "nyaa_bundle_volume_inference"
+PUBLICATION_CACHE_TTL_SECONDS = 6 * 60 * 60
+NYAA_FEED_TYPES = frozenset({"nyaa", "nyaa_novel", "nyaa_scraper", "nyaa.si"})
+#: One-off provider budget for publication lookups when the caller passes None.
+PUBLICATION_ONE_OFF_BUDGET = 3
+
 
 class TaskManager:
     def __init__(self, db: Database, calibre_path: str, data_dir: Optional[str] = None):
@@ -88,6 +97,9 @@ class TaskManager:
         # during a big scan and across scans; the SQLite metadata cache is still
         # consulted first, so a restart is cheap.
         self._series_alt_cache: Dict[str, Dict[str, Any]] = {}
+        # In-process TTL cache for AniList publication metadata (format/status/
+        # volumes), normalized series name -> {"data": pub, "ts": epoch}.
+        self._publication_cache: Dict[str, Dict[str, Any]] = {}
 
     def _build_media_resolver(self):
         from app.media_type import MediaTypeResolver
@@ -1028,6 +1040,213 @@ class TaskManager:
         if status not in ("IN_CALIBRE", "REQUESTED", "NEW"):
             return None, None
         return status, result.get("matched_book_id")
+
+    # --- AniList publication metadata / Nyaa unmarked-bundle inference -------
+    #
+    # Contract: .agents/volume_inference/CONTRACT.md §4. The provider normalizes
+    # the AniList publication fields (format/status/volumes); this scheduler glue
+    # looks them up through a per-process TTL cache, tracks a bounded fetch
+    # budget, and turns an unmarked Nyaa batch release into the complete series
+    # when AniList says Light Novel + Finished + N volumes.
+
+    @staticmethod
+    def _publication_from_meta(meta: Any) -> Dict[str, Any]:
+        """Normalizes a metadata dict/JSON string via the provider helper.
+
+        Returns ``{}`` when nothing is known or the provider/helper is missing
+        (a partially deployed provider must never break a feed scan).
+        """
+        if not meta:
+            return {}
+        try:
+            from app.providers.metadata import NovelMetadataProvider
+            helper = getattr(NovelMetadataProvider, "publication_from_meta", None)
+            if helper is None:
+                return {}
+            publication = helper(meta)
+            return dict(publication) if isinstance(publication, dict) else {}
+        except Exception as exc:
+            logger.debug(f"Publication metadata normalization failed: {exc}")
+            return {}
+
+    @staticmethod
+    def _publication_usable(publication: Any) -> bool:
+        """True when a publication dict carries a status or a positive volume count."""
+        if not isinstance(publication, dict):
+            return False
+        status = str(publication.get("status") or "").strip()
+        raw_volumes = publication.get("volumes")
+        if raw_volumes is None:
+            raw_volumes = publication.get("total_volumes")
+        try:
+            volumes = int(raw_volumes)
+        except (TypeError, ValueError):
+            volumes = 0
+        return bool(status) or volumes >= 1
+
+    def publication_metadata_for(self, series_name: str,
+                                 budget: Optional[Dict[str, int]] = None) -> Optional[Dict[str, Any]]:
+        """Looks up normalized AniList publication metadata for a series.
+
+        Order (contract v3 §4): TTL cache → tracked row's stored AniList meta →
+        one bounded ``NovelMetadataProvider.fetch_series_metadata`` call (the
+        budget is decremented; a one-off budget of 3 applies when none is given),
+        persisting the result to the tracker when a row exists. Never raises.
+        """
+        try:
+            from app.parser import normalize_text
+            name = (series_name or "").strip()
+            key = normalize_text(name)
+            if not key:
+                return None
+            cache = getattr(self, "_publication_cache", None)
+            if cache is None:
+                cache = self._publication_cache = {}
+            now = time.time()
+            cached = cache.get(key)
+            if cached and (now - float(cached.get("ts") or 0.0)) < PUBLICATION_CACHE_TTL_SECONDS:
+                data = cached.get("data")
+                return dict(data) if isinstance(data, dict) else None
+
+            row: Optional[dict] = None
+            try:
+                row = self.db.get_series_by_name(name)
+            except Exception as exc:
+                logger.debug(f"Publication tracker lookup failed for '{name}': {exc}")
+                row = None
+            if row is None:
+                try:
+                    for candidate in self.db.get_all_series(monitored_only=False) or []:
+                        if normalize_text(candidate.get("name") or "") == key:
+                            row = candidate
+                            break
+                except Exception as exc:
+                    logger.debug(f"Publication normalized tracker lookup failed: {exc}")
+                    row = None
+            if row is not None:
+                raw_meta = row.get("anilist_meta")
+                if raw_meta is None:
+                    raw_meta = row.get("anilist_meta_json")
+                stored = self._publication_from_meta(raw_meta)
+                if self._publication_usable(stored):
+                    cache[key] = {"data": stored, "ts": now}
+                    return dict(stored)
+
+            # Bounded provider lookup (one call per series per TTL at most).
+            effective_budget = budget
+            if effective_budget is None:
+                effective_budget = {"remaining": PUBLICATION_ONE_OFF_BUDGET}
+            try:
+                remaining = int(effective_budget.get("remaining", 0) or 0)
+            except (AttributeError, TypeError, ValueError):
+                remaining = 0
+            if remaining <= 0:
+                return None
+            try:
+                effective_budget["remaining"] = remaining - 1
+            except Exception:
+                pass
+
+            meta = None
+            try:
+                from app.providers.metadata import NovelMetadataProvider
+                meta = NovelMetadataProvider.fetch_series_metadata(name)
+            except Exception as exc:
+                logger.debug(f"Publication metadata lookup failed for '{name}': {exc}")
+                meta = None
+            if not meta:
+                return None
+            publication = self._publication_from_meta(meta)
+            if not self._publication_usable(publication):
+                return None
+            if row is not None and row.get("id") is not None:
+                try:
+                    self.db.store_series_publication_metadata(int(row["id"]), meta)
+                except Exception as exc:
+                    logger.debug(
+                        f"Publication metadata persist failed for '{name}': {exc}"
+                    )
+            cache[key] = {"data": publication, "ts": now}
+            return dict(publication)
+        except Exception as exc:
+            logger.debug(f"Publication metadata lookup skipped for {series_name!r}: {exc}")
+            return None
+
+    def infer_nyaa_bundle_volumes(self, release: Dict[str, Any],
+                                  canonical_series_name: str,
+                                  is_nyaa_feed: bool,
+                                  budget: Optional[Dict[str, int]] = None) -> bool:
+        """Infers the complete-series volume set for an unmarked Nyaa bundle.
+
+        Returns True (and mutates ``release`` in place) only when the setting is
+        enabled, the feed is Nyaa, the release carries no volume information at
+        all, is not manga/audiobook, and AniList reports a FINISHED light novel
+        with a known volume count. Contract v3 §4.
+        """
+        try:
+            if not isinstance(release, dict):
+                return False
+            try:
+                inference_enabled = self._setting_flag(
+                    self.db.get_setting(NYAA_BUNDLE_VOLUME_INFERENCE_KEY, "true"),
+                    default=True,
+                )
+            except Exception:
+                inference_enabled = True
+            if not inference_enabled:
+                return False
+            if not is_nyaa_feed:
+                return False
+            if release.get("volume") is not None:
+                return False
+            if release.get("volumes"):
+                return False
+            if release.get("is_chapter"):
+                return False
+            media_type = str(release.get("media_type") or "").strip().lower()
+            if media_type in ("manga", "audiobook"):
+                return False
+            canonical = (canonical_series_name or "").strip()
+            if not canonical:
+                canonical = str(release.get("series_name") or "").strip()
+            publication = self.publication_metadata_for(canonical, budget)
+            if not isinstance(publication, dict):
+                return False
+            if not bool(publication.get("is_light_novel")):
+                return False
+            status = str(publication.get("status") or "").strip().upper()
+            if status != "FINISHED":
+                return False
+            raw_volumes = publication.get("volumes")
+            if raw_volumes is None:
+                raw_volumes = publication.get("total_volumes")
+            try:
+                total = int(raw_volumes)
+            except (TypeError, ValueError):
+                return False
+            if total < 1:
+                return False
+
+            release["volumes"] = [float(v) for v in range(1, total + 1)]
+            release["volume"] = 1.0
+            release["volume_start"] = 1.0
+            release["volume_end"] = float(total)
+            release["is_bundle"] = total > 1
+            release["is_complete"] = True
+            release["volume_inferred"] = True
+            release["volume_inference_source"] = "anilist_finished"
+            logger.info(
+                "Inferred complete-series bundle for '%s': %s volume(s) "
+                "(AniList %s/%s).",
+                release.get("title") or release.get("series_name"),
+                total,
+                publication.get("status") or "?",
+                publication.get("format") or "?",
+            )
+            return True
+        except Exception as exc:
+            logger.debug(f"Bundle volume inference skipped: {exc}")
+            return False
 
     def enrich_tracked_series_anilist(self, limit: int = SERIES_ANILIST_SYNC_LIMIT_DEFAULT) -> dict:
         """Fetches AniList metadata for a bounded batch of un-enriched tracked rows.
@@ -2110,6 +2329,12 @@ class TaskManager:
             except (TypeError, ValueError):
                 series_match_budget = SERIES_ANILIST_MATCH_BUDGET_DEFAULT
 
+            # One bounded AniList publication-lookup budget per scan (contract
+            # v3 §4): unmarked Nyaa bundles may need a metadata lookup each.
+            publication_budget: Dict[str, int] = {
+                "remaining": max(0, series_match_budget)
+            }
+
             # Get monitored series names and blacklisted series for filtering
             monitored_series = {s["name"].lower(): s for s in self.db.get_all_series(monitored_only=True)}
             blacklisted_series = {b["name"].lower() for b in self.db.get_blacklisted_series()}
@@ -2130,6 +2355,10 @@ class TaskManager:
                 url = feed["url"]
                 auto_request = bool(feed["auto_request"])
                 config = json.loads(feed["config_json"] or "{}")
+                is_nyaa_feed = (
+                    str(feed_type or "").strip().lower() in NYAA_FEED_TYPES
+                    or "nyaa.si" in str(url or "").lower()
+                )
 
                 try:
                     provider = create_provider(feed_type, feed_name, url, config)
@@ -2210,6 +2439,18 @@ class TaskManager:
                                         canonical_series_name = candidate_name
                             rel_dict["series_name"] = canonical_series_name or series_name or None
 
+                        # Media classification now runs before matching: the Nyaa
+                        # bundle inference needs it and manga must be dropped
+                        # before any matcher/DB work (audiobooks are stored).
+                        from app.media_type import MANGA, AUDIOBOOK, UNKNOWN
+                        media_type = self.classify_media(r)
+                        if media_type == MANGA:
+                            skipped_manga += 1
+                            continue
+                        if media_type == AUDIOBOOK:
+                            skipped_audiobooks += 1
+                        inferred_bundle = False
+
                         # If either the original or canonical spelling is
                         # blacklisted, the release stays blacklisted.
                         is_blacklisted = bool(
@@ -2230,12 +2471,30 @@ class TaskManager:
                                 alt_names = self._cached_series_alternate_titles(
                                     canonical_series_name
                                 )
+                            # Unmarked Nyaa light-novel batch release? Infer the
+                            # complete series volume set from AniList before the
+                            # Calibre matcher runs (contract v3 §4).
+                            if (
+                                media_type not in (MANGA, AUDIOBOOK)
+                                and canonical_series_name
+                            ):
+                                inferred_bundle = self.infer_nyaa_bundle_volumes(
+                                    rel_dict,
+                                    canonical_series_name,
+                                    is_nyaa_feed,
+                                    publication_budget,
+                                )
                             # Evaluate against Calibre
                             match_result = matcher.check_release(
                                 rel_dict,
                                 auto_request_monitored=auto_request,
                                 alt_series_names=alt_names or None,
                             )
+                            if inferred_bundle:
+                                # Persist the bundle's complete missing set.
+                                rel_dict["missing_volumes"] = (
+                                    match_result.get("missing_volumes") or []
+                                )
 
                             # Bounded AniList lookup fallback (contract §5.4): a NEW
                             # vol-1/unnumbered release whose series spelling nobody
@@ -2297,16 +2556,9 @@ class TaskManager:
                                 status = "REQUESTED"
 
                         final_volume = r.volume if r.volume is not None else (eff_vol if (is_monitored or status in ("IN_CALIBRE", "REQUESTED")) else None)
-
-                        # Light-novel tracking: manga is dropped, audiobooks are
-                        # stored but kept out of the Releases/Discovery/wishlist views.
-                        from app.media_type import MANGA, AUDIOBOOK, UNKNOWN
-                        media_type = self.classify_media(r)
-                        if media_type == MANGA:
-                            skipped_manga += 1
-                            continue
-                        if media_type == AUDIOBOOK:
-                            skipped_audiobooks += 1
+                        if inferred_bundle and rel_dict.get("volume") is not None:
+                            # Bundle releases are stored as volume 1 of the set.
+                            final_volume = float(rel_dict["volume"])
 
                         rel_dict.update({
                             "source_feed_id": feed_id,
@@ -2350,6 +2602,25 @@ class TaskManager:
                                     and normalize_text(stored_name) != normalize_text(canonical_series_name)
                                 ):
                                     self._rekey_release_series_name(rel_id, canonical_series_name)
+
+                        if is_new and inferred_bundle:
+                            try:
+                                bundle_publication = (
+                                    self.publication_metadata_for(canonical_series_name) or {}
+                                )
+                                self.db.log_activity(
+                                    "BUNDLE_VOLUMES_INFERRED",
+                                    f"Bundle volumes inferred for '{r.title}'",
+                                    json.dumps({
+                                        "series": canonical_series_name or series_name,
+                                        "volumes": len(rel_dict.get("volumes") or []),
+                                        "anilist_status": bundle_publication.get("status"),
+                                        "anilist_format": bundle_publication.get("format"),
+                                        "title": r.title,
+                                    }),
+                                )
+                            except Exception as exc:
+                                logger.debug(f"Bundle inference activity log failed: {exc}")
 
                         # Pre-cache cover image asynchronously without blocking feed scanning
                         if r.cover_url:
@@ -2538,7 +2809,8 @@ class TaskManager:
         }
 
     def _ingest_backfill_releases(self, releases: List[Any], matcher: CalibreMatcher,
-                                  monitored: Dict[str, Any], blacklisted: set) -> Dict[str, int]:
+                                  monitored: Dict[str, Any], blacklisted: set,
+                                  infer_nyaa_bundles: bool = False) -> Dict[str, int]:
         """
         Persists one historical-backfill page with the shared ingestion policy.
 
@@ -2549,12 +2821,28 @@ class TaskManager:
         * unmonitored -> IN_CALIBRE upsert, or a NEW discovery row for volume
           None / 1.0; every other unowned volume is rejected (not persisted).
 
+        ``infer_nyaa_bundles=True`` (Nyaa deep-pagination phase) runs the
+        unmarked-bundle volume inference from contract v3 §4 before matching,
+        using one bounded publication-lookup budget per page call, and persists
+        the inferred complete-series volume set/missing volumes.
+
         Returns counters ``{"upserted", "rejected", "new"}`` so the caller can
         report how much the phase actually changed.
         """
-        from app.media_type import MANGA, UNKNOWN
+        from app.media_type import MANGA, AUDIOBOOK, UNKNOWN
 
         counts = {"upserted": 0, "rejected": 0, "new": 0}
+        publication_budget: Optional[Dict[str, int]] = None
+        if infer_nyaa_bundles:
+            try:
+                budget_setting = max(0, int(self.db.get_setting(
+                    SERIES_ANILIST_MATCH_BUDGET_KEY,
+                    str(SERIES_ANILIST_MATCH_BUDGET_DEFAULT),
+                )))
+            except (TypeError, ValueError):
+                budget_setting = SERIES_ANILIST_MATCH_BUDGET_DEFAULT
+            publication_budget = {"remaining": budget_setting}
+
         for r in releases:
             s_name = r.series_name or ""
             if not s_name:
@@ -2569,13 +2857,32 @@ class TaskManager:
                 counts["rejected"] += 1
                 continue
 
+            rel_dict = r.to_dict()
+            inferred_bundle = False
+            if (
+                infer_nyaa_bundles
+                and media_type != AUDIOBOOK
+                and s_name
+            ):
+                inferred_bundle = self.infer_nyaa_bundle_volumes(
+                    rel_dict, s_name, True, publication_budget
+                )
+
+            def _volume_for(m_res: Dict[str, Any]) -> Any:
+                if inferred_bundle and rel_dict.get("volume") is not None:
+                    return float(rel_dict["volume"])
+                return r.volume if r.volume is not None else (
+                    m_res.get("effective_volume") or r.volume or 1.0
+                )
+
             if s_name.lower() in monitored:
-                m_res = matcher.check_release(r.to_dict(), auto_request_monitored=True)
+                m_res = matcher.check_release(rel_dict, auto_request_monitored=True)
+                if inferred_bundle:
+                    rel_dict["missing_volumes"] = m_res.get("missing_volumes") or []
                 eff_vol = m_res.get("effective_volume") or r.volume or 1.0
-                rel_dict = r.to_dict()
                 rel_dict.update({
                     "status": m_res["status"],
-                    "volume": r.volume if r.volume is not None else eff_vol,
+                    "volume": _volume_for(m_res),
                     "calibre_matched_book_id": m_res.get("matched_book_id"),
                     "media_type": media_type or UNKNOWN
                 })
@@ -2587,13 +2894,14 @@ class TaskManager:
                     self.cover_cache.cache_sync(r.cover_url)
             else:
                 # Evaluate unmonitored releases against Calibre
-                m_res = matcher.check_release(r.to_dict(), auto_request_monitored=False)
+                m_res = matcher.check_release(rel_dict, auto_request_monitored=False)
                 if m_res["status"] == "IN_CALIBRE":
+                    if inferred_bundle:
+                        rel_dict["missing_volumes"] = m_res.get("missing_volumes") or []
                     eff_vol = m_res.get("effective_volume") or r.volume or 1.0
-                    rel_dict = r.to_dict()
                     rel_dict.update({
                         "status": "IN_CALIBRE",
-                        "volume": r.volume if r.volume is not None else eff_vol,
+                        "volume": _volume_for(m_res),
                         "calibre_matched_book_id": m_res.get("matched_book_id"),
                         "media_type": media_type or UNKNOWN
                     })
@@ -2601,14 +2909,17 @@ class TaskManager:
                     counts["upserted"] += 1
                     if is_new:
                         counts["new"] += 1
-                elif r.volume is None or r.volume == 1.0:
-                    # Vol 1 or standalone unmonitored series -> Add to Discovery!
-                    rel_dict = r.to_dict()
+                elif inferred_bundle or r.volume is None or r.volume == 1.0:
+                    # Vol 1 / standalone / inferred complete bundle -> Discovery.
+                    if inferred_bundle:
+                        rel_dict["missing_volumes"] = m_res.get("missing_volumes") or []
                     rel_dict.update({
                         "status": "NEW",
                         "calibre_matched_book_id": None,
                         "media_type": media_type or UNKNOWN
                     })
+                    if inferred_bundle:
+                        rel_dict["volume"] = float(rel_dict.get("volume") or 1.0)
                     is_new, _ = self._upsert(rel_dict)
                     counts["upserted"] += 1
                     if is_new:
@@ -2933,7 +3244,10 @@ class TaskManager:
                             filtered_releases.append(rel)
                         releases = filtered_releases
 
-                        counts = self._ingest_backfill_releases(releases, matcher, monitored, blacklisted_series)
+                        counts = self._ingest_backfill_releases(
+                            releases, matcher, monitored, blacklisted_series,
+                            infer_nyaa_bundles=True,
+                        )
                         pages_this_run += 1
                         releases_this_run += len(releases)
                         nyaa_upserted += counts["upserted"]

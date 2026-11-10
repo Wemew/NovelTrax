@@ -424,6 +424,164 @@ def _series_match_payload(result: Any) -> Dict[str, Any]:
     return payload
 
 
+# --- AniList publication metadata for the series page (CONTRACT volume_inference §5) ---
+
+_LIGHT_NOVEL_FORMAT_TOKENS = ("NOVEL", "LIGHT_NOVEL")
+_PUBLICATION_FORMAT_LABELS = {
+    "NOVEL": "Light Novel",
+    "LIGHT_NOVEL": "Light Novel",
+    "MANGA": "Manga",
+    "ONE_SHOT": "One Shot",
+    "TV": "TV",
+    "MOVIE": "Movie",
+    "OVA": "OVA",
+    "ONA": "ONA",
+    "SPECIAL": "Special",
+    "MUSIC": "Music",
+}
+_PUBLICATION_STATUS_LABELS = {
+    "FINISHED": "Finished",
+    "RELEASING": "Releasing",
+    "NOT_YET_RELEASED": "Not Yet Released",
+    "HIATUS": "Hiatus",
+    "CANCELLED": "Cancelled",
+}
+
+
+def _publication_token(value: Any) -> str:
+    """Canonical upper-case token for a raw AniList format/status value."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    return "_".join(text.upper().replace("-", " ").replace("_", " ").split())
+
+
+def _publication_int(value: Any) -> Optional[int]:
+    """Coerces a publication count to a finite non-negative int (else None)."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if number != number or number in (float("inf"), float("-inf")):
+        return None
+    try:
+        count = int(number)
+    except (OverflowError, ValueError):
+        return None
+    return count if count >= 0 else None
+
+
+def _publication_label(token: str, labels: Dict[str, str]) -> str:
+    """Maps a canonical token to its display label, prettifying unknown values."""
+    if not token:
+        return ""
+    if token in labels:
+        return labels[token]
+    return " ".join(part.capitalize() for part in token.split("_") if part)
+
+
+def _publication_meta_mapping(raw_meta: Any) -> Dict[str, Any]:
+    """Coerces a dict / JSON string / cached metadata row to a metadata mapping."""
+    if isinstance(raw_meta, dict):
+        return dict(raw_meta)
+    if isinstance(raw_meta, str):
+        text = raw_meta.strip()
+        if not text:
+            return {}
+        try:
+            parsed = json.loads(text)
+        except (TypeError, ValueError):
+            return {}
+        return dict(parsed) if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _series_publication_fields(raw_meta: Any) -> Dict[str, Any]:
+    """Normalised AniList publication fields for a series row; never raises.
+
+    Accepts a raw metadata dict, an ``anilist_meta_json`` string (or None) and
+    returns the series-page keys (``anilist_format``/``anilist_format_label``/
+    ``is_light_novel``/``anilist_status``/``anilist_status_label``/
+    ``total_volumes``/``anilist_chapters``). Prefers the provider-side
+    normaliser when the metadata module exposes ``publication_from_meta``; the
+    local parser fills in anything the provider could not answer.
+    """
+    fields: Dict[str, Any] = {
+        "anilist_format": "",
+        "anilist_format_label": "",
+        "is_light_novel": False,
+        "anilist_status": "",
+        "anilist_status_label": "",
+        "total_volumes": None,
+        "anilist_chapters": None,
+    }
+    try:
+        meta = _publication_meta_mapping(raw_meta)
+        if not meta:
+            return fields
+
+        provider_data: Dict[str, Any] = {}
+        try:
+            from app.providers.metadata import NovelMetadataProvider
+            normalizer = getattr(NovelMetadataProvider, "publication_from_meta", None)
+            if callable(normalizer):
+                candidate = normalizer(meta)
+                if isinstance(candidate, dict):
+                    provider_data = candidate
+        except Exception:
+            provider_data = {}
+
+        raw_format = _publication_token(provider_data.get("format") or meta.get("format"))
+        raw_status = _publication_token(provider_data.get("status") or meta.get("status"))
+
+        format_label = str(
+            provider_data.get("format_label") or meta.get("format_label") or ""
+        ).strip()
+        if not format_label:
+            format_label = _publication_label(raw_format, _PUBLICATION_FORMAT_LABELS)
+
+        status_label = str(
+            provider_data.get("status_label") or meta.get("status_label") or ""
+        ).strip()
+        if not status_label:
+            status_label = _publication_label(raw_status, _PUBLICATION_STATUS_LABELS)
+
+        is_light_novel = provider_data.get("is_light_novel")
+        if not isinstance(is_light_novel, bool):
+            raw_flag = meta.get("is_light_novel")
+            if isinstance(raw_flag, bool):
+                is_light_novel = raw_flag
+            elif raw_flag is not None:
+                is_light_novel = str(raw_flag).strip().lower() in ("1", "true", "yes", "on")
+            else:
+                is_light_novel = raw_format in _LIGHT_NOVEL_FORMAT_TOKENS
+
+        total_volumes = _publication_int(provider_data.get("total_volumes"))
+        if total_volumes is None:
+            total_volumes = _publication_int(provider_data.get("volumes"))
+        if total_volumes is None:
+            total_volumes = _publication_int(meta.get("total_volumes"))
+        if total_volumes is None:
+            total_volumes = _publication_int(meta.get("volumes"))
+
+        chapters = _publication_int(provider_data.get("chapters"))
+        if chapters is None:
+            chapters = _publication_int(meta.get("chapters"))
+
+        fields.update({
+            "anilist_format": raw_format,
+            "anilist_format_label": format_label,
+            "is_light_novel": bool(is_light_novel),
+            "anilist_status": raw_status,
+            "anilist_status_label": status_label,
+            "total_volumes": total_volumes,
+            "anilist_chapters": chapters,
+        })
+    except Exception:
+        return fields
+    return fields
+
+
 # --- Release re-bind / series identity reset helpers (CONTRACT_V2_REBIND §4) ---
 
 def _coerce_bool(value: Any, default: bool = False) -> bool:
@@ -620,6 +778,18 @@ async def dashboard_view(request: Request):
 @app.get("/series", response_class=HTMLResponse)
 async def series_view(request: Request):
     series_list = db.get_all_series()
+    # Enrich every tracked series with the persisted AniList publication metadata
+    # (Format / Status / Volumes) for the series-page card. Keys already present on
+    # the row win, so cached/enriched rows are never overwritten.
+    for series in series_list:
+        if not isinstance(series, dict):
+            continue
+        raw_meta = series.get("anilist_meta_json")
+        if raw_meta in (None, ""):
+            raw_meta = series.get("anilist_meta")
+        publication = _series_publication_fields(raw_meta)
+        for key, value in publication.items():
+            series.setdefault(key, value)
     return templates.TemplateResponse(
         request=request,
         name="series.html",
