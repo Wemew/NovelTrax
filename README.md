@@ -217,7 +217,7 @@ services:
 | Tab | Purpose |
 | --- | --- |
 | **Overview** | Quick summary cards (Tracked Series, Wanted Requests, Acquired Books, Active Feeds), Calibre status banner, pending request cards with **Release** and **Series Hub** links, and recent activity logs. |
-| **Series** | Displays all novel series auto-populated from Calibre. Shows owned volumes (including omnibus-expanded volumes), latest index, and toggle switches to enable/disable monitoring. |
+| **Series** | Displays all novel series auto-populated from Calibre. Shows owned volumes (including omnibus-expanded volumes), latest index, toggle switches to enable/disable monitoring, and per-row **Match Calibre** / **Refresh AniList** / **Recheck Calibre** / **Unlink Calibre** repair actions. |
 | **Releases & Requests** | Searchable, sortable catalog of all detected releases in grouped or flat view. Filter by `Requested (Wanted)`, `In Calibre (Acquired)`, `Ignored`, or `All`; ignore/restore a release, dispatch it to the downloader with one click, re-bind its series / mark it a different series, run a per-series backfill, or open its release/hub links. |
 | **Prioritized** | Releases from trusted release groups, with VIP badges, grouped/flat view switcher, group management (add/remove/note) and auto-loading on scroll. |
 | **Downloads** | Engine-aware downloader status and in-app configuration: for qBittorrent, the custom URL/host/port/username/password/HTTPS toggle/category/save path; for TorBox, an engine selector, the TorBox explanation and the live TorBox queue with **Check now**, retry/remove and two-step **Clear failed** controls. |
@@ -285,6 +285,17 @@ services:
 
 ---
 
+## 🩹 Repairing false In Calibre ownership
+
+A false **In Calibre** link happens when automatic matching (AniList synonyms, romaji/native titles or fuzzy Calibre name matching) attaches a tracked series to the wrong Calibre entry — often a different franchise entry. The Series page then reports e.g. `In Calibre: 6 books`, the grouped releases view checks Vol 1–6 as owned and every release row shows `IN CALIBRE`, even though none of those books are actually in the library. The Series page row actions offer two repair paths (only visible for Calibre-linked series):
+
+* **Recheck Calibre** (`refresh-cw` icon, tooltip "Re-read Calibre and recompute this series' owned volumes/statuses") — calls `POST /api/series/{series_id}/recheck-calibre`. It re-reads the current Calibre library, verifies the linked Calibre series still exists, recomputes the tracker's `owned_volumes_json` from the real books' `series_index` values (expanding omnibus/bundle ranges when the scanner provides them) and reconciles the releases against the real library: a release stays/becomes `IN_CALIBRE` only when its volume is genuinely owned, otherwise it returns to `REQUESTED`/`NEW`. If the linked Calibre series no longer exists, it runs the unlink flow and reports that. Logs `SERIES_CALIBRE_RECHECKED`.
+* **Unlink Calibre** (`unlink` icon, tooltip "Unlink from Calibre (repairs false In Calibre ownership)") — calls `POST /api/series/{series_id}/unlink-calibre` after a confirmation dialog. It removes the tracker's `calibre_series_id`, clears `owned_volumes_json`, clears `calibre_matched_book_id` and resets the series' releases from `IN_CALIBRE` to `REQUESTED` (volume > 1) or `NEW` (volume unknown or 1.0), so they return to the Wanted/New lifecycle. `IGNORED`/`BLACKLISTED` rows are left untouched and the grouped view can no longer mark volumes as owned from the wrong link. Logs `SERIES_CALIBRE_UNLINKED`.
+
+Neither action destroys the tracker's identity: the stable tracking name, display title, AniList metadata, alias overrides, per-release pins and identity locks are preserved. After repairing, use the row's **Match Calibre** action to link the series to the correct Calibre entry (or leave it unlinked so it is treated as not-owned). Both actions are also available per linked row in **Settings → Series identity & overrides** ("Unlink Calibre"). Recommended workflow: run **Recheck Calibre** first when the link may be valid but the ownership data is stale; use **Unlink Calibre** when the link is plainly the wrong series.
+
+---
+
 ## 🧪 Testing Locally
 
 The automated suites run under the Calibre bundled Python interpreter, which provides Calibre's native SQLite semantics. The primary integration suites are:
@@ -326,9 +337,10 @@ $env:PYTHONIOENCODING="utf-8"; $env:TEMP="C:\Users\rasmu\Documents\AI-Workspace\
 & $py tests\run_tests.py ui_wiring downloader
 & $py tests\run_tests.py rebind_settings_ui
 & $py tests\run_tests.py bundle_inference_ui
+& $py tests\run_tests.py calibre_repair_ui
 ```
 
-The AniList publication-metadata / Nyaa bundle-inference port adds `tests/test_publication_metadata.py` (GraphQL fields + `publication_from_meta` matrix + cache/persistence), `tests/test_bundle_volume_inference.py` (inference condition matrix, metadata cache/budget, backfill ingestion), `tests/test_publication_metadata_routes.py` (series-page enrichment helper) and `tests/test_bundle_inference_ui.py` (static series-line/settings/README guards).
+The AniList publication-metadata / Nyaa bundle-inference port adds `tests/test_publication_metadata.py` (GraphQL fields + `publication_from_meta` matrix + cache/persistence), `tests/test_bundle_volume_inference.py` (inference condition matrix, metadata cache/budget, backfill ingestion), `tests/test_publication_metadata_routes.py` (series-page enrichment helper) and `tests/test_bundle_inference_ui.py` (static series-line/settings/README guards). The false-In-Calibre repair port adds `tests/test_calibre_unlink_db.py` (DB unlink/owned-volumes), `tests/test_calibre_recheck_scheduler.py` (recheck/unlink wrappers with a fake Calibre scanner), `tests/test_calibre_repair_routes.py` (route guards) and `tests/test_calibre_repair_ui.py` (Series-page repair buttons/JS/README guards).
 
 The re-bind / different-series port adds `tests/test_release_rebind_db.py` (pin, bind/new-title/detach, validation, per-series reset), `tests/test_release_rebind_scheduler.py` (status recompute, pin/lock enforcement across feed scans and reconciliation), `tests/test_settings_features_api.py` (settings-feature routes and validation) and `tests/test_rebind_settings_ui.py` (static modal/card/JS/README guards).
 

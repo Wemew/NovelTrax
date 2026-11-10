@@ -154,6 +154,24 @@
                                     <i data-lucide="sparkles" class="w-3.5 h-3.5"></i>
                                     <span class="sr-only">Refresh AniList</span>
                                 </button>
+                                {% if s.calibre_series_id %}
+                                <button type="button" class="series-recheck-calibre-btn p-1.5 rounded-lg bg-slate-800 hover:bg-emerald-500/20 text-slate-400 hover:text-emerald-300 border border-slate-700 hover:border-emerald-500/30 transition-colors"
+                                        data-series-id="{{ s.id }}" data-series-name="{{ s.name }}"
+                                        onclick="recheckSeriesCalibre({{ s.id }}, this)"
+                                        aria-label="Recheck Calibre"
+                                        title="Re-read Calibre and recompute this series' owned volumes/statuses">
+                                    <i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i>
+                                    <span class="sr-only">Recheck Calibre</span>
+                                </button>
+                                <button type="button" class="series-unlink-calibre-btn p-1.5 rounded-lg bg-slate-800 hover:bg-rose-500/20 text-slate-400 hover:text-rose-300 border border-slate-700 hover:border-rose-500/30 transition-colors"
+                                        data-series-id="{{ s.id }}" data-series-name="{{ s.name }}"
+                                        onclick="unlinkSeriesCalibre({{ s.id }}, this)"
+                                        aria-label="Unlink Calibre"
+                                        title="Unlink from Calibre (repairs false In Calibre ownership)">
+                                    <i data-lucide="unlink" class="w-3.5 h-3.5"></i>
+                                    <span class="sr-only">Unlink Calibre</span>
+                                </button>
+                                {% endif %}
                             </div>
                         </td>
                     </tr>
@@ -431,8 +449,57 @@
         }
     }
 
+    async function recheckSeriesCalibre(seriesId, btn) {
+        const id = Number(seriesId) || 0;
+        if (!id) return;
+        if (btn) btn.disabled = true;
+        try {
+            const res = await fetch(`/api/series/${id}/recheck-calibre`, { method: 'POST' });
+            const data = await res.json();
+            if (res.ok && (data.status === 'success' || data.status === 'ok')) {
+                const owned = Array.isArray(data.owned_volumes) ? data.owned_volumes.length : 0;
+                const message = data.message || (data.linked
+                    ? `Calibre rechecked: ${owned} owned volume(s)`
+                    : 'Calibre series no longer exists; the series was unlinked');
+                showToast(message, 'success');
+                setTimeout(() => location.reload(), 800);
+            } else {
+                showToast(data.message || data.detail || 'Could not recheck Calibre', 'error');
+            }
+        } catch (err) {
+            showToast(`Error: ${err}`, 'error');
+        } finally {
+            if (btn) btn.disabled = false;
+        }
+    }
+
+    async function unlinkSeriesCalibre(seriesId, btn) {
+        const id = Number(seriesId) || 0;
+        if (!id) return;
+        const confirmed = confirm('Unlink this series from Calibre?\n\nThe Calibre link and the owned-volume data are removed, and this series\' releases are reset from In Calibre to Wanted/New so they can be requested again. Aliases and AniList metadata are preserved.');
+        if (!confirmed) return;
+        if (btn) btn.disabled = true;
+        try {
+            const res = await fetch(`/api/series/${id}/unlink-calibre`, { method: 'POST' });
+            const data = await res.json();
+            if (res.ok && (data.status === 'success' || data.status === 'ok')) {
+                const reset = Number(data.releases_reset) || 0;
+                const message = data.message || ((data.already_unlinked
+                    ? 'Series was already unlinked from Calibre'
+                    : 'Series unlinked from Calibre') + (reset ? `: ${reset} release(s) reset` : ''));
+                showToast(message, 'success');
+                setTimeout(() => location.reload(), 800);
+            } else {
+                showToast(data.message || data.detail || 'Could not unlink series from Calibre', 'error');
+            }
+        } catch (err) {
+            showToast(`Error: ${err}`, 'error');
+        } finally {
+            if (btn) btn.disabled = false;
+        }
+    }
+
     document.addEventListener('keydown', (evt) => {
         if (evt.key === 'Escape') closeSeriesMatchModal();
-    });
-</script>
+    });</script>
 {% endblock %}

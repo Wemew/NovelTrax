@@ -1842,6 +1842,63 @@ async def api_reset_series_identity(series_id: int):
     }
     return JSONResponse(payload)
 
+# --- Calibre false-ownership repair (CONTRACT calibre_repair v4 §5) ---
+
+@app.post("/api/series/{series_id}/unlink-calibre")
+async def api_unlink_series_calibre(series_id: int):
+    """Removes the tracker's Calibre link and resets its false In-Calibre releases."""
+    series_row = await asyncio.to_thread(_find_series_row, series_id)
+    if not series_row:
+        raise HTTPException(status_code=404, detail="Series not found")
+    try:
+        result = await asyncio.to_thread(task_manager.unlink_series_calibre, series_id)
+    except (KeyError, LookupError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc) or "Series not found") from exc
+    except Exception as exc:
+        logger.warning(f"Calibre unlink failed for series #{series_id}: {type(exc).__name__}: {exc}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not unlink the series from Calibre: {exc}",
+        ) from exc
+
+    payload = dict(result) if isinstance(result, dict) else {}
+    # Already-unlinked is a successful 200 response, never an error.
+    payload["status"] = "success"
+    payload.setdefault("series_id", series_id)
+    payload.setdefault("series_name", series_row.get("name") or "")
+    payload.setdefault("old_calibre_series_id", None)
+    payload.setdefault("releases_reset", 0)
+    payload.setdefault("already_unlinked", False)
+    payload.setdefault("message", "")
+    return JSONResponse(payload)
+
+@app.post("/api/series/{series_id}/recheck-calibre")
+async def api_recheck_series_calibre(series_id: int):
+    """Re-reads Calibre, recomputes owned volumes and reconciles false In-Calibre releases."""
+    series_row = await asyncio.to_thread(_find_series_row, series_id)
+    if not series_row:
+        raise HTTPException(status_code=404, detail="Series not found")
+    try:
+        result = await asyncio.to_thread(task_manager.recheck_series_calibre, series_id)
+    except (KeyError, LookupError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc) or "Series not found") from exc
+    except Exception as exc:
+        logger.warning(f"Calibre recheck failed for series #{series_id}: {type(exc).__name__}: {exc}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not recheck the series Calibre link: {exc}",
+        ) from exc
+
+    payload = dict(result) if isinstance(result, dict) else {}
+    payload.setdefault("status", "success")
+    payload.setdefault("series_id", series_id)
+    payload.setdefault("series_name", series_row.get("name") or "")
+    payload.setdefault("linked", bool(series_row.get("calibre_series_id")))
+    payload.setdefault("owned_volumes", [])
+    payload.setdefault("reconciled", {})
+    payload.setdefault("message", "")
+    return JSONResponse(payload)
+
 # --- Storage / network / maintenance diagnostics (CONTRACT_V2_REBIND §6.3) ---
 
 @app.get("/api/storage/health")

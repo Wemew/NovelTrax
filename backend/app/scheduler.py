@@ -1,6 +1,7 @@
 import os
 import json
 import logging
+import math
 import threading
 import time
 import concurrent.futures
@@ -1909,6 +1910,389 @@ class TaskManager:
                 f"{locked_cleared} lock(s) cleared"
             ),
         })
+        return summary
+
+    # --- Calibre false-ownership repair (contract v4 §4) --------------------
+    #
+    # A tracker may carry a wrong calibre_series_id (AniList synonym/fuzzy
+    # matching), which makes the series page report volumes as "In Calibre"
+    # that are not actually owned. These two operators repair that: recheck
+    # recomputes ownership from the real Calibre books, unlink removes the link
+    # and resets the affected releases through the DB layer.
+
+    def _series_row_by_id(self, series_id: int) -> Optional[dict]:
+        """Tracker row by primary key (falls back to the plain series list)."""
+        rows: List[dict] = []
+        try:
+            rows = self.db.get_series_identity_rows()
+        except Exception:
+            rows = []
+        if not rows:
+            try:
+                rows = self.db.get_all_series(monitored_only=False)
+            except Exception:
+                rows = []
+        for row in rows or []:
+            if row.get("id") == series_id:
+                return row
+        return None
+
+    @staticmethod
+    def _calibre_id_matches(value: Any, target: Any) -> bool:
+        """Compares a Calibre series id from a dict against the target id."""
+        if value is None or target is None:
+            return False
+        try:
+            return int(value) == int(target)
+        except (TypeError, ValueError):
+            return str(value) == str(target)
+
+    @staticmethod
+    def _current_owned_volumes(row: dict) -> List[float]:
+        """Parses the tracker's stored owned_volumes_json (defensive)."""
+        raw = row.get("owned_volumes_json") if isinstance(row, dict) else None
+        try:
+            values = json.loads(raw or "[]")
+        except (TypeError, ValueError):
+            return []
+        owned: List[float] = []
+        if isinstance(values, list):
+            for value in values:
+                try:
+                    number = float(value)
+                except (TypeError, ValueError):
+                    continue
+                if math.isfinite(number) and number >= 0:
+                    owned.append(number)
+        return sorted(set(owned))
+
+    def _calibre_owned_volumes_for_series(self, calibre_series_id: Any,
+                                          scanner: Any,
+                                          books: List[dict]) -> List[float]:
+        """Recomputes the owned volumes of one Calibre series from real books.
+
+        Uses ``scanner.get_series_volumes_map`` (exactly like ``sync_calibre``)
+        when available so omnibus books ("Vol 1-3") expand to every contained
+        volume, and the finite ``series_index`` values of that series' books.
+        """
+        owned: set = set()
+        try:
+            volumes_map = scanner.get_series_volumes_map()
+        except Exception as exc:
+            logger.debug(f"Recheck volumes map unavailable: {exc}")
+            volumes_map = None
+        if isinstance(volumes_map, dict) and volumes_map:
+            for key in (str(calibre_series_id), calibre_series_id):
+                try:
+                    mapped = volumes_map.get(key)
+                except TypeError:
+                    mapped = None
+                if not mapped:
+                    continue
+                for value in mapped:
+                    try:
+                        number = float(value)
+                    except (TypeError, ValueError):
+                        continue
+                    if math.isfinite(number) and number >= 0:
+                        owned.add(number)
+                break
+        for book in books or []:
+            if not self._calibre_id_matches(book.get("series_id"), calibre_series_id):
+                continue
+            try:
+                number = float(book.get("series_index"))
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(number) and number >= 0:
+                owned.add(number)
+        return sorted(owned)
+
+    def _reset_stale_in_calibre_releases(self, series_name: str,
+                                         owned_volumes: List[float]) -> int:
+        """Repairs releases marked IN_CALIBRE whose volume is not actually owned.
+
+        Explicit repair path (v4 "Recheck Calibre"): the normal reconcile path
+        intentionally preserves IN_CALIBRE through status precedence, which would
+        leave false-ownership rows stuck after a wrong Calibre link. Volumes in
+        ``owned_volumes`` stay IN_CALIBRE; anything else returns to REQUESTED
+        (volume > 1) / NEW (volume None/1.0). Pinned/veto rows are untouched.
+        Returns the number of rows reset.
+        """
+        from app.parser import normalize_text
+        name = (series_name or "").strip()
+        if not name:
+            return 0
+        target_norm = normalize_text(name)
+        if not target_norm:
+            return 0
+        owned = set()
+        for value in owned_volumes or []:
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(number):
+                owned.add(number)
+        try:
+            releases = self.db.get_releases(limit=50000, include_ignored=True)
+        except Exception as exc:
+            logger.debug(f"Stale-In-Calibre scan failed for '{name}': {exc}")
+            return 0
+        reset = 0
+        for release in releases or []:
+            stored = (release.get("series_name") or "").strip()
+            if not stored or normalize_text(stored) != target_norm:
+                continue
+            if self._release_identity_pinned(release):
+                continue
+            status = (release.get("status") or "").strip().upper()
+            if status != "IN_CALIBRE":
+                continue
+            try:
+                volume = float(release.get("volume")) if release.get("volume") is not None else None
+            except (TypeError, ValueError):
+                volume = None
+            if volume is not None and volume in owned:
+                continue
+            target_status = "REQUESTED" if (volume is not None and volume > 1.0) else "NEW"
+            try:
+                # Explicit repair: status precedence must not preserve the false
+                # IN_CALIBRE classification, and the stale matched book id must
+                # actually be cleared (update_release_status COALESCEs it).
+                with self.db.get_connection() as conn:
+                    cur = conn.cursor()
+                    cur.execute(
+                        "UPDATE releases SET status = ?, ignored = 0, "
+                        "calibre_matched_book_id = NULL, updated_at = CURRENT_TIMESTAMP "
+                        "WHERE id = ?;",
+                        (target_status, release["id"]),
+                    )
+                    conn.commit()
+                reset += 1
+            except Exception as exc:
+                logger.debug(
+                    f"Stale In-Calibre reset failed for release #{release.get('id')}: {exc}"
+                )
+        if reset:
+            logger.info(
+                "Recheck reset %s stale In-Calibre release(s) for '%s'.", reset, name
+            )
+        return reset
+
+    def recheck_series_calibre(self, series_id: int) -> Dict[str, Any]:
+        """Re-reads Calibre and repairs a tracker's owned volumes/statuses.
+
+        Contract v4 §4: verifies the linked Calibre series still exists (unlinks
+        it when gone), recomputes ``owned_volumes_json`` from the real books
+        (omnibus-aware), reconciles the tracker's releases against the real
+        library, logs ``SERIES_CALIBRE_RECHECKED`` and returns a summary.
+        Raises KeyError for an unknown tracker id; every Calibre read failure is
+        contained and reported in the returned message (link left unchanged).
+        """
+        try:
+            series_id_int = int(series_id)
+        except (TypeError, ValueError):
+            raise KeyError(f"series #{series_id!r} not found")
+        row = self._series_row_by_id(series_id_int)
+        if row is None:
+            raise KeyError(f"series #{series_id_int} not found")
+        series_name = (row.get("name") or "").strip()
+        calibre_series_id = row.get("calibre_series_id")
+
+        if calibre_series_id in (None, ""):
+            return {
+                "status": "success",
+                "linked": False,
+                "already_unlinked": True,
+                "series_id": series_id_int,
+                "series_name": series_name,
+                "message": f"Series '{series_name}' is not linked to Calibre; nothing to recheck.",
+            }
+
+        read_error: Optional[str] = None
+        scanner = None
+        series_list: List[dict] = []
+        books: List[dict] = []
+        try:
+            calibre_dir = self.db.get_setting("calibre_path", self.calibre_path)
+            scanner = CalibreScanner(calibre_dir)
+            if not scanner.is_available():
+                read_error = (
+                    f"Calibre library is not accessible at {getattr(scanner, 'db_path', calibre_dir)}"
+                )
+            else:
+                series_list = list(scanner.get_all_series() or [])
+                books = list(scanner.get_all_books() or [])
+        except Exception as exc:
+            logger.debug(f"Recheck Calibre read failed for series #{series_id_int}: {exc}")
+            read_error = f"Could not read the Calibre library ({exc})"
+            series_list = []
+            books = []
+
+        if read_error:
+            return {
+                "status": "success",
+                "linked": True,
+                "unlinked": False,
+                "series_id": series_id_int,
+                "series_name": series_name,
+                "calibre_series_id": calibre_series_id,
+                "owned_volumes": self._current_owned_volumes(row),
+                "reconciled": {},
+                "message": f"Recheck for '{series_name}' skipped: {read_error}; the link was left unchanged.",
+            }
+
+        linked_series = None
+        for candidate in series_list:
+            if self._calibre_id_matches(
+                candidate.get("series_id", candidate.get("id")), calibre_series_id
+            ):
+                linked_series = candidate
+                break
+
+        if linked_series is None:
+            unlink_summary: Dict[str, Any] = {}
+            try:
+                unlink_summary = dict(
+                    self.db.unlink_series_from_calibre(series_id_int, actor="user") or {}
+                )
+            except Exception as exc:
+                logger.debug(f"Recheck unlink failed for series #{series_id_int}: {exc}")
+                return {
+                    "status": "error",
+                    "linked": True,
+                    "unlinked": False,
+                    "series_id": series_id_int,
+                    "series_name": series_name,
+                    "calibre_series_id": calibre_series_id,
+                    "message": (
+                        f"Calibre series #{calibre_series_id} no longer exists, but the "
+                        f"unlink failed: {exc}"
+                    ),
+                }
+            releases_reset = int(unlink_summary.get("releases_reset") or 0)
+            try:
+                self.db.log_activity(
+                    "SERIES_CALIBRE_RECHECKED",
+                    f"Calibre recheck unlinked '{series_name}'",
+                    json.dumps({
+                        "series": series_name,
+                        "calibre_series_id": calibre_series_id,
+                        "owned_volumes": 0,
+                        "unlinked": True,
+                        "releases_reset": releases_reset,
+                    }),
+                )
+            except Exception:
+                pass
+            return {
+                "status": "success",
+                "linked": False,
+                "unlinked": True,
+                "series_id": series_id_int,
+                "series_name": series_name,
+                "calibre_series_id": calibre_series_id,
+                "releases_reset": releases_reset,
+                "already_unlinked": bool(unlink_summary.get("already_unlinked")),
+                "message": (
+                    f"Calibre series #{calibre_series_id} no longer exists; "
+                    f"'{series_name}' was unlinked and {releases_reset} release(s) reset."
+                ),
+            }
+
+        owned_volumes = self._calibre_owned_volumes_for_series(
+            calibre_series_id, scanner, books
+        )
+        persist_ok = True
+        try:
+            persist_ok = bool(self.db.set_series_owned_volumes(series_id_int, owned_volumes))
+        except Exception as exc:
+            logger.debug(f"Recheck owned-volume persist failed for series #{series_id_int}: {exc}")
+            persist_ok = False
+
+        reconciled: Dict[str, Any] = {}
+        stale_reset = 0
+        try:
+            stale_reset = self._reset_stale_in_calibre_releases(series_name, owned_volumes)
+        except Exception as exc:
+            logger.debug(f"Recheck stale-In-Calibre reset failed for '{series_name}': {exc}")
+        try:
+            reconciled = self.reconcile_series_releases(series_name)
+        except Exception as exc:
+            logger.debug(f"Recheck reconcile failed for '{series_name}': {exc}")
+            reconciled = {}
+        if isinstance(reconciled, dict):
+            reconciled["stale_in_calibre_reset"] = stale_reset
+
+        try:
+            self.db.log_activity(
+                "SERIES_CALIBRE_RECHECKED",
+                f"Calibre ownership recomputed for '{series_name}'",
+                json.dumps({
+                    "series": series_name,
+                    "calibre_series_id": calibre_series_id,
+                    "owned_volumes": len(owned_volumes),
+                    "stale_in_calibre_reset": stale_reset,
+                    "reconciled": reconciled,
+                }),
+            )
+        except Exception:
+            pass
+
+        in_calibre_count = int(reconciled.get("in_calibre") or 0)
+        message = (
+            f"Rechecked '{series_name}' against Calibre series #{calibre_series_id}: "
+            f"{len(owned_volumes)} owned volume(s) recomputed, "
+            f"{stale_reset} stale In-Calibre release(s) reset, "
+            f"{in_calibre_count} release(s) now In Calibre."
+        )
+        if not persist_ok:
+            message += " (Owned-volume storage update failed; releases were still reconciled.)"
+        return {
+            "status": "success",
+            "linked": True,
+            "unlinked": False,
+            "series_id": series_id_int,
+            "series_name": series_name,
+            "calibre_series_id": calibre_series_id,
+            "owned_volumes": owned_volumes,
+            "reconciled": reconciled,
+            "message": message,
+        }
+
+    def unlink_series_calibre(self, series_id: int) -> Dict[str, Any]:
+        """Removes a tracker's Calibre link and resets its releases (contract v4).
+
+        Delegates to ``db.unlink_series_from_calibre`` (which logs
+        ``SERIES_CALIBRE_UNLINKED``), then returns the DB summary plus a
+        user-facing message. Raises KeyError for an unknown tracker id.
+        """
+        try:
+            series_id_int = int(series_id)
+        except (TypeError, ValueError):
+            raise KeyError(f"series #{series_id!r} not found")
+        summary = dict(
+            self.db.unlink_series_from_calibre(series_id_int, actor="user") or {}
+        )
+        series_name = str(summary.get("series_name") or "").strip()
+        releases_reset = int(summary.get("releases_reset") or 0)
+        if summary.get("already_unlinked"):
+            summary["message"] = (
+                f"Series '{series_name}' was already unlinked from Calibre."
+            )
+        else:
+            summary["message"] = (
+                f"Series '{series_name}' unlinked from Calibre "
+                f"(#{summary.get('old_calibre_series_id')}); "
+                f"{releases_reset} release(s) returned to Wanted/New."
+            )
+        logger.info(
+            "Calibre unlink for series #%s (%s): %s release(s) reset.",
+            summary.get("series_id", series_id_int),
+            series_name,
+            releases_reset,
+        )
         return summary
 
     def start(self):

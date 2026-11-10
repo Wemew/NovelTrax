@@ -989,6 +989,20 @@
                 resetSeriesIdentity(seriesId, name);
             });
             card.appendChild(resetBtn);
+
+            if (row.calibre_series_id) {
+                const unlinkBtn = document.createElement('button');
+                unlinkBtn.type = 'button';
+                unlinkBtn.className = 'series-unlink-calibre-btn px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-rose-500/20 text-rose-300 border border-slate-700 text-[11px] font-semibold flex items-center justify-center gap-1.5 transition-colors flex-shrink-0';
+                unlinkBtn.setAttribute('data-series-id', String(seriesId));
+                unlinkBtn.setAttribute('data-series-name', name);
+                unlinkBtn.title = 'Unlink from Calibre (repairs false In Calibre ownership)';
+                unlinkBtn.textContent = 'Unlink Calibre';
+                unlinkBtn.addEventListener('click', function () {
+                    unlinkSeriesCalibre(seriesId, unlinkBtn);
+                });
+                card.appendChild(unlinkBtn);
+            }
             box.appendChild(card);
         });
     }
@@ -1018,6 +1032,32 @@
             }
         } catch (err) {
             showToast('Error resetting series identity: ' + err, 'error');
+        }
+    }
+
+    async function unlinkSeriesCalibre(seriesId, btn) {
+        const id = Number(seriesId) || 0;
+        if (!id) return;
+        const confirmed = confirm('Unlink this series from Calibre?\n\nThe Calibre link and the owned-volume data are removed, and this series\' releases are reset from In Calibre to Wanted/New so they can be requested again. Aliases and AniList metadata are preserved.');
+        if (!confirmed) return;
+        if (btn) btn.disabled = true;
+        try {
+            const res = await fetch(`/api/series/${id}/unlink-calibre`, { method: 'POST' });
+            const data = await res.json();
+            if (res.ok && data && (data.status === 'success' || data.status === 'ok')) {
+                const reset = Number(data.releases_reset) || 0;
+                const message = data.message || ((data.already_unlinked
+                    ? 'Series was already unlinked from Calibre'
+                    : 'Series unlinked from Calibre') + (reset ? `: ${reset} release(s) reset` : ''));
+                showToast(message, 'success');
+                loadSeriesIdentityOverview(_seriesIdentityCurrentQuery());
+            } else {
+                showToast((data && (data.message || data.detail)) || 'Could not unlink series from Calibre', 'error');
+            }
+        } catch (err) {
+            showToast('Error unlinking series from Calibre: ' + err, 'error');
+        } finally {
+            if (btn) btn.disabled = false;
         }
     }
 

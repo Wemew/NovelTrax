@@ -1,5 +1,6 @@
 import os
 import re
+import math
 import sqlite3
 import json
 import logging
@@ -2820,6 +2821,170 @@ class Database:
         )
         return True
 
+    # --- Series <-> Calibre repair (v4 §3) ---
+    def unlink_series_from_calibre(self, series_id: int, actor: str = "user") -> Dict[str, Any]:
+        """Remove a (possibly false) Calibre link and reset its In-Calibre releases.
+
+        Repairs the screenshot case where a series was linked to the wrong Calibre
+        entry and therefore "looked" owned: the tracker's ``calibre_series_id``,
+        ``owned_volumes_json`` and the link-derived ``book_count`` /
+        ``latest_index`` are cleared and the series' releases move from
+        ``IN_CALIBRE`` back to a sane lifecycle status (``REQUESTED`` for volume
+        > 1, ``NEW`` for volume None/1.0) with ``calibre_matched_book_id`` cleared.
+        ``IGNORED``/``BLACKLISTED`` rows are explicit user decisions and are left
+        untouched.  ``name``, ``display_title``, ``anilist_meta_json``, alias
+        overrides and ``identity_locked`` are preserved (Calibre linkage is a
+        library fact, not identity state); a later Calibre sync restores the
+        library-derived counts.
+
+        Raises :class:`KeyError` for an unknown series id; an already-unlinked
+        series is a safe no-op returning ``already_unlinked=True``.
+        """
+        from app.parser import normalize_text
+
+        sid = _coerce_int(series_id)
+        if sid is None:
+            raise ValueError("series_id is required")
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT * FROM series_tracking WHERE id = ?;", (sid,))
+            found = cur.fetchone()
+        if found is None:
+            raise KeyError(f"series {sid} not found")
+        row = dict(found)
+        name = _coerce_text(row.get("name"))
+        name_norm = normalize_text(name)
+        old_calibre_id = _coerce_int(row.get("calibre_series_id"))
+        if old_calibre_id is None:
+            # Already unlinked: do not touch ownership/statuses/activity.
+            return {
+                "status": "success",
+                "series_id": sid,
+                "series_name": name,
+                "old_calibre_series_id": None,
+                "releases_reset": 0,
+                "already_unlinked": True,
+            }
+
+        releases_reset = 0
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                UPDATE series_tracking SET
+                    calibre_series_id = NULL,
+                    owned_volumes_json = '[]',
+                    book_count = 0,
+                    latest_index = 0.0,
+                    last_sync = CURRENT_TIMESTAMP
+                WHERE id = ?;
+            """, (sid,))
+
+            matched_releases: List[Dict[str, Any]] = []
+            if name_norm:
+                cur.execute("""
+                    SELECT id, series_name, volume, status, calibre_matched_book_id
+                    FROM releases
+                    WHERE series_name IS NOT NULL AND trim(series_name) != '';
+                """)
+                matched_releases = [
+                    dict(release)
+                    for release in cur.fetchall()
+                    if normalize_text(release["series_name"]) == name_norm
+                ]
+            release_updates: List[Tuple[str, int]] = []
+            for release in matched_releases:
+                status = _coerce_text(release.get("status")).upper()
+                if status in ("IGNORED", "BLACKLISTED"):
+                    # Explicit user veto: leave status AND matched-book id alone.
+                    continue
+                matched_book_id = release.get("calibre_matched_book_id")
+                new_status = status or "NEW"
+                if status == "IN_CALIBRE":
+                    try:
+                        volume_value = (
+                            float(release["volume"])
+                            if release.get("volume") is not None
+                            else None
+                        )
+                    except (TypeError, ValueError):
+                        volume_value = None
+                    new_status = (
+                        "REQUESTED"
+                        if (volume_value is not None and volume_value > 1.0)
+                        else "NEW"
+                    )
+                    releases_reset += 1
+                if new_status != status or matched_book_id is not None:
+                    release_updates.append((new_status, int(release["id"])))
+            if release_updates:
+                cur.executemany("""
+                    UPDATE releases SET
+                        status = ?,
+                        calibre_matched_book_id = NULL,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?;
+                """, release_updates)
+            conn.commit()
+
+        self.log_activity(
+            "SERIES_CALIBRE_UNLINKED",
+            f"Unlinked series {name!r} from Calibre #{old_calibre_id}",
+            json.dumps({
+                "series_id": sid,
+                "series_name": name,
+                "old_calibre_series_id": old_calibre_id,
+                "releases_reset": releases_reset,
+                "actor": _coerce_text(actor),
+            }),
+        )
+        return {
+            "status": "success",
+            "series_id": sid,
+            "series_name": name,
+            "old_calibre_series_id": old_calibre_id,
+            "releases_reset": releases_reset,
+            "already_unlinked": False,
+        }
+
+    def set_series_owned_volumes(self, series_id: int, volumes: List[float]) -> bool:
+        """Store a tracker's owned volumes as sorted/deduped finite, non-negative JSON.
+
+        Used by the Calibre recheck repair path to recompute ownership from the real
+        library.  No other ``series_tracking`` column is touched.  Returns ``False``
+        for an unknown series id (invalid entries inside *volumes* are dropped).
+        """
+        sid = _coerce_int(series_id)
+        if sid is None:
+            return False
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT id FROM series_tracking WHERE id = ?;", (sid,))
+            if cur.fetchone() is None:
+                return False
+        cleaned: Set[float] = set()
+        if isinstance(volumes, (list, tuple, set)):
+            for value in volumes:
+                if isinstance(value, bool):
+                    continue
+                try:
+                    number = float(value)
+                except (TypeError, ValueError):
+                    continue
+                if not math.isfinite(number) or number < 0:
+                    continue
+                cleaned.add(number)
+        owned_json = json.dumps(sorted(cleaned))
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                UPDATE series_tracking SET
+                    owned_volumes_json = ?,
+                    last_sync = CURRENT_TIMESTAMP
+                WHERE id = ?;
+            """, (owned_json, sid))
+            conn.commit()
+        return True
+
     # --- Release Operations ---
     def purge_pdf_releases(self) -> int:
         """
@@ -4019,6 +4184,20 @@ class Database:
                     cover = rel.get("cover_url") or (calibre_match.get("cover_url") if calibre_match else "") or ""
                     synopsis = rel.get("description") or (calibre_match.get("description") if calibre_match else "") or ""
                     website_url = rel.get("series_link") or (calibre_match.get("website_url") if calibre_match else "") or ""
+                    # "In Calibre" means the tracker is actually LINKED to a
+                    # Calibre series (or carries explicitly owned volumes); a
+                    # tracked-but-unlinked series must not claim ownership after
+                    # an explicit unlink (contract v4).
+                    calibre_id_value = (
+                        _coerce_int(calibre_match.get("calibre_series_id"))
+                        if calibre_match is not None else None
+                    )
+                    calibre_owned_volumes = (
+                        _coerce_owned_volumes(calibre_match.get("owned_volumes_json"))
+                        if calibre_match is not None else []
+                    )
+                    calibre_linked = calibre_id_value is not None
+                    in_calibre_flag = bool(calibre_linked or calibre_owned_volumes)
 
                     groups_dict[matched_key] = {
                         "series_key": matched_key,
@@ -4031,11 +4210,11 @@ class Database:
                         "stable_name": stable_title,
                         "raw_name": s_name,
                         "cover_url": cover,
-                        "in_calibre": calibre_match is not None,
+                        "in_calibre": in_calibre_flag,
                         "is_monitored": bool(calibre_match.get("is_monitored", 0)) if calibre_match else False,
-                        "calibre_series_id": calibre_match.get("calibre_series_id") if calibre_match else None,
-                        "calibre_book_count": calibre_match.get("book_count", 0) if calibre_match else 0,
-                        "calibre_latest_index": calibre_match.get("latest_index", 0.0) if calibre_match else 0.0,
+                        "calibre_series_id": calibre_id_value,
+                        "calibre_book_count": calibre_match.get("book_count", 0) if calibre_linked else 0,
+                        "calibre_latest_index": calibre_match.get("latest_index", 0.0) if calibre_linked else 0.0,
                         "synopsis": synopsis,
                         "website_url": website_url,
                         "releases": [],
