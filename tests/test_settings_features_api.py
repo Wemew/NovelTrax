@@ -463,8 +463,13 @@ def check_tracked_series_picker_route():
     segment = function_source(source, func)
 
     check(
-        "db.get_all_series" in to_thread_targets(func),
-        "main.py: tracked picker does not dispatch db.get_all_series through asyncio.to_thread",
+        "_series_picker_snapshot" in to_thread_targets(func),
+        "main.py: tracked picker does not dispatch the series picker snapshot "
+        "through asyncio.to_thread",
+    )
+    check(
+        'snapshot.get("tracked")' in segment,
+        "main.py: tracked picker does not consume snapshot['tracked']",
     )
     check(
         not http_status_constants(func),

@@ -334,6 +334,15 @@ class Database:
             cur.execute("CREATE INDEX IF NOT EXISTS idx_releases_status ON releases(status);")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_releases_media_type ON releases(media_type);")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_releases_download_status ON releases(download_status);")
+            # Contract v5 §5: expression index backing the normalised series-name
+            # lookups used by the pickers/aggregates (guarded for very old SQLite).
+            try:
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_releases_series_name_norm "
+                    "ON releases(lower(trim(series_name)));"
+                )
+            except sqlite3.OperationalError:
+                pass
 
             # Series blacklist table
             cur.execute("""
@@ -959,19 +968,45 @@ class Database:
         return updated_count
 
     def get_all_series(self, monitored_only: bool = False) -> List[Dict[str, Any]]:
+        """All tracked series with their latest non-empty release cover.
+
+        Performance contract v5 §5: a single statement replaces the historical
+        correlated subquery (one full ``releases`` scan per series row).  The
+        ``cover_latest`` CTE aggregates ``MAX(id)`` per normalised series name
+        once, then joins the cover row; Python only merges the ``cover_url``
+        value.  Ordering, ``monitored_only`` semantics and output keys are
+        unchanged.  A release cover wins; when no release has a cover the
+        tracker's own (enrichment) cover is kept, and neither -> ``None``.
+        """
+        order_sql = (
+            "ORDER BY st.name COLLATE NOCASE ASC"
+            if monitored_only
+            else "ORDER BY st.is_monitored DESC, st.name COLLATE NOCASE ASC"
+        )
+        where_sql = "WHERE st.is_monitored = 1" if monitored_only else ""
+        query = f"""
+            WITH cover_latest AS (
+                SELECT lower(trim(series_name)) AS norm, MAX(id) AS latest_id
+                FROM releases
+                WHERE cover_url IS NOT NULL AND cover_url != ''
+                GROUP BY lower(trim(series_name))
+            )
+            SELECT st.*, releases.cover_url AS release_cover_url
+            FROM series_tracking st
+            LEFT JOIN cover_latest ON cover_latest.norm = lower(trim(st.name))
+            LEFT JOIN releases ON releases.id = cover_latest.latest_id
+            {where_sql}
+            {order_sql};
+        """
         with self.get_connection() as conn:
             cur = conn.cursor()
-            base_query = """
-                SELECT 
-                    st.*,
-                    (SELECT r.cover_url FROM releases r WHERE lower(r.series_name) = lower(st.name) AND r.cover_url IS NOT NULL AND r.cover_url != '' ORDER BY r.id DESC LIMIT 1) AS cover_url
-                FROM series_tracking st
-            """
-            if monitored_only:
-                cur.execute(f"{base_query} WHERE st.is_monitored = 1 ORDER BY st.name COLLATE NOCASE ASC;")
-            else:
-                cur.execute(f"{base_query} ORDER BY st.is_monitored DESC, st.name COLLATE NOCASE ASC;")
-            return [dict(row) for row in cur.fetchall()]
+            cur.execute(query)
+            rows = [dict(row) for row in cur.fetchall()]
+        for row in rows:
+            release_cover = _coerce_text(row.pop("release_cover_url", ""))
+            tracker_cover = _coerce_text(row.get("cover_url"))
+            row["cover_url"] = release_cover or tracker_cover or None
+        return rows
 
     def toggle_series_monitored(self, series_id: int) -> bool:
         with self.get_connection() as conn:
@@ -2608,6 +2643,45 @@ class Database:
         releases_unpinned = 0
         releases_rekeyed = 0
         display_cleared = False
+
+        # Read phase (contract v5 §5): collect + normalise the series' releases on
+        # a plain read connection BEFORE the write transaction, so the SQLite write
+        # lock is never held across an O(releases) Python scan.
+        release_rows: List[Dict[str, Any]] = []
+        if name_norm:
+            with self.get_connection() as conn:
+                cur = conn.cursor()
+                cur.execute("""
+                    SELECT id, title, series_name, series_pinned FROM releases
+                    WHERE series_name IS NOT NULL AND trim(series_name) != '';
+                """)
+                release_rows = [
+                    dict(release)
+                    for release in cur.fetchall()
+                    if normalize_text(release["series_name"]) == name_norm
+                ]
+        pinned_ids: List[int] = []
+        if unpin_releases and release_rows:
+            pinned_ids = [
+                release["id"] for release in release_rows
+                if _coerce_int(release.get("series_pinned")) == 1
+            ]
+        rekey_updates: List[Tuple[str, int]] = []
+        if rekey_to_parsed and was_manual and release_rows:
+            for release in release_rows:
+                stored_name = _coerce_text(release.get("series_name"))
+                parsed_name = self._parsed_release_series_name(release.get("title"))
+                if not parsed_name:
+                    continue
+                if normalize_text(parsed_name) == normalize_text(stored_name):
+                    continue
+                if normalize_text(parsed_name) == name_norm:
+                    continue
+                rekey_updates.append((parsed_name, int(release["id"])))
+            releases_rekeyed = len(rekey_updates)
+
+        # Short write transaction: display/lock updates then the precomputed
+        # unpin/re-key statements.
         with self.get_connection() as conn:
             cur = conn.cursor()
             if clear_display:
@@ -2622,46 +2696,18 @@ class Database:
                 "UPDATE series_tracking SET identity_locked = 0, last_sync = CURRENT_TIMESTAMP WHERE id = ?;",
                 (sid,),
             )
-            # Collect the series' releases ONCE (by normalised stored name) so the
-            # unpin and parsed-rekey rules operate on exactly the same rows.
-            release_rows: List[Dict[str, Any]] = []
-            if name_norm:
-                cur.execute("""
-                    SELECT id, title, series_name, series_pinned FROM releases
-                    WHERE series_name IS NOT NULL AND trim(series_name) != '';
-                """)
-                release_rows = [
-                    dict(release)
-                    for release in cur.fetchall()
-                    if normalize_text(release["series_name"]) == name_norm
-                ]
-            if unpin_releases and release_rows:
-                pinned_ids = [
-                    release["id"] for release in release_rows
-                    if _coerce_int(release.get("series_pinned")) == 1
-                ]
-                if pinned_ids:
-                    cur.executemany("""
-                        UPDATE releases SET series_pinned = 0, series_pinned_at = '',
-                            updated_at = CURRENT_TIMESTAMP
-                        WHERE id = ?;
-                    """, [(pinned_id,) for pinned_id in pinned_ids])
-                    releases_unpinned = len(pinned_ids)
-            if rekey_to_parsed and was_manual and release_rows:
-                for release in release_rows:
-                    stored_name = _coerce_text(release.get("series_name"))
-                    parsed_name = self._parsed_release_series_name(release.get("title"))
-                    if not parsed_name:
-                        continue
-                    if normalize_text(parsed_name) == normalize_text(stored_name):
-                        continue
-                    if normalize_text(parsed_name) == name_norm:
-                        continue
-                    cur.execute("""
-                        UPDATE releases SET series_name = ?, updated_at = CURRENT_TIMESTAMP
-                        WHERE id = ?;
-                    """, (parsed_name, release["id"]))
-                    releases_rekeyed += 1
+            if pinned_ids:
+                cur.executemany("""
+                    UPDATE releases SET series_pinned = 0, series_pinned_at = '',
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?;
+                """, [(pinned_id,) for pinned_id in pinned_ids])
+                releases_unpinned = len(pinned_ids)
+            if rekey_updates:
+                cur.executemany("""
+                    UPDATE releases SET series_name = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?;
+                """, rekey_updates)
             conn.commit()
 
         self.log_activity(
@@ -2866,7 +2912,51 @@ class Database:
                 "already_unlinked": True,
             }
 
+        # Read phase (contract v5 §5): collect + normalise the series' releases on
+        # a plain read connection BEFORE any write transaction, so the SQLite
+        # write lock is never held across an O(releases) Python scan.
+        matched_releases: List[Dict[str, Any]] = []
+        if name_norm:
+            with self.get_connection() as conn:
+                cur = conn.cursor()
+                cur.execute("""
+                    SELECT id, series_name, volume, status, calibre_matched_book_id
+                    FROM releases
+                    WHERE series_name IS NOT NULL AND trim(series_name) != '';
+                """)
+                matched_releases = [
+                    dict(release)
+                    for release in cur.fetchall()
+                    if normalize_text(release["series_name"]) == name_norm
+                ]
         releases_reset = 0
+        release_updates: List[Tuple[str, int]] = []
+        for release in matched_releases:
+            status = _coerce_text(release.get("status")).upper()
+            if status in ("IGNORED", "BLACKLISTED"):
+                # Explicit user veto: leave status AND matched-book id alone.
+                continue
+            matched_book_id = release.get("calibre_matched_book_id")
+            new_status = status or "NEW"
+            if status == "IN_CALIBRE":
+                try:
+                    volume_value = (
+                        float(release["volume"])
+                        if release.get("volume") is not None
+                        else None
+                    )
+                except (TypeError, ValueError):
+                    volume_value = None
+                new_status = (
+                    "REQUESTED"
+                    if (volume_value is not None and volume_value > 1.0)
+                    else "NEW"
+                )
+                releases_reset += 1
+            if new_status != status or matched_book_id is not None:
+                release_updates.append((new_status, int(release["id"])))
+
+        # Short write transaction: tracker link/ownership clear + release resets.
         with self.get_connection() as conn:
             cur = conn.cursor()
             cur.execute("""
@@ -2878,44 +2968,6 @@ class Database:
                     last_sync = CURRENT_TIMESTAMP
                 WHERE id = ?;
             """, (sid,))
-
-            matched_releases: List[Dict[str, Any]] = []
-            if name_norm:
-                cur.execute("""
-                    SELECT id, series_name, volume, status, calibre_matched_book_id
-                    FROM releases
-                    WHERE series_name IS NOT NULL AND trim(series_name) != '';
-                """)
-                matched_releases = [
-                    dict(release)
-                    for release in cur.fetchall()
-                    if normalize_text(release["series_name"]) == name_norm
-                ]
-            release_updates: List[Tuple[str, int]] = []
-            for release in matched_releases:
-                status = _coerce_text(release.get("status")).upper()
-                if status in ("IGNORED", "BLACKLISTED"):
-                    # Explicit user veto: leave status AND matched-book id alone.
-                    continue
-                matched_book_id = release.get("calibre_matched_book_id")
-                new_status = status or "NEW"
-                if status == "IN_CALIBRE":
-                    try:
-                        volume_value = (
-                            float(release["volume"])
-                            if release.get("volume") is not None
-                            else None
-                        )
-                    except (TypeError, ValueError):
-                        volume_value = None
-                    new_status = (
-                        "REQUESTED"
-                        if (volume_value is not None and volume_value > 1.0)
-                        else "NEW"
-                    )
-                    releases_reset += 1
-                if new_status != status or matched_book_id is not None:
-                    release_updates.append((new_status, int(release["id"])))
             if release_updates:
                 cur.executemany("""
                     UPDATE releases SET

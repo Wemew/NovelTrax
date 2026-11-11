@@ -62,6 +62,7 @@ DISCOVERY_PARTIAL = os.path.join(TEMPLATES_DIR, "partials", "discovery_card_chun
 DISCOVERY_TEMPLATE = os.path.join(TEMPLATES_DIR, "discovery.html")
 SERIES_TEMPLATE = os.path.join(TEMPLATES_DIR, "series.html")
 DOWNLOADS_TEMPLATE = os.path.join(TEMPLATES_DIR, "downloads.html")
+SERIES_TEMPLATE = os.path.join(TEMPLATES_DIR, "series.html")
 LOGS_TEMPLATE = os.path.join(TEMPLATES_DIR, "logs.html")
 README_FILE = os.path.join(PROJECT_ROOT, "README.md")
 
@@ -414,6 +415,8 @@ README_MARKERS = (
     "Clear Metadata Cache",
     "Deferred settings features",
     "log-file rotation",
+    "500 ms",
+    "aborts stale in-flight requests",
 )
 
 
@@ -499,9 +502,81 @@ def check_rebind_modal_js():
         "input[name=\"release-rebind-mode\"]" in source,
         "base.html: setReleaseRebindMode() does not sync the mode radios",
     )
+    search_body = isolate(
+        source,
+        "function searchReleaseRebindSeries(",
+        "function renderReleaseRebindResults(",
+        "base.html searchReleaseRebindSeries",
+    )
     check(
-        "}, 250);" in source,
-        "base.html: the re-bind series search is not debounced by 250 ms",
+        "}, 500);" in search_body,
+        "base.html: the re-bind series search is not debounced by 500 ms",
+    )
+    check(
+        "}, 250);" not in search_body,
+        "base.html: the re-bind series search still uses the old 250 ms debounce",
+    )
+    check(
+        "let _releaseRebindAbortController = null;" in source
+        and "let _releaseRebindSearchSeq = 0;" in source
+        and "let _releaseRebindLastQuery = null;" in source,
+        "base.html: the re-bind search abort/sequence/last-query state is missing",
+    )
+    check(
+        "new AbortController()" in search_body,
+        "base.html: the re-bind search does not create an AbortController",
+    )
+    check(
+        search_body.count("signal: signal") >= 2,
+        "base.html: both re-bind picker fetches must receive the abort signal",
+    )
+    check(
+        "_releaseRebindAbortController.abort()" in search_body,
+        "base.html: the re-bind search does not abort the previous request",
+    )
+    check(
+        "_releaseRebindSearchSeq += 1;" in search_body
+        and "const seq = _releaseRebindSearchSeq;" in search_body
+        and "seq !== _releaseRebindSearchSeq" in search_body,
+        "base.html: the re-bind search has no stale-response sequence guard",
+    )
+    check(
+        "term === _releaseRebindLastQuery && _releaseRebindResults.length > 0"
+        in search_body,
+        "base.html: the re-bind search does not skip an identical already-loaded query",
+    )
+    check(
+        "_releaseRebindLastQuery = term;" in search_body,
+        "base.html: the re-bind search does not record the loaded query",
+    )
+    check(
+        "err.name === 'AbortError'" in search_body,
+        "base.html: the re-bind search does not swallow AbortError",
+    )
+    open_body = isolate(
+        source, "function openReleaseRebindModal(", "function closeReleaseRebindModal(",
+        "base.html openReleaseRebindModal",
+    )
+    close_body = isolate(
+        source, "function closeReleaseRebindModal(", "function setReleaseRebindMode(",
+        "base.html closeReleaseRebindModal",
+    )
+    for function_label, body in (
+        ("openReleaseRebindModal", open_body),
+        ("closeReleaseRebindModal", close_body),
+    ):
+        check(
+            "_releaseRebindLastQuery = null;" in body,
+            "base.html: %s() does not reset the loaded-query marker" % function_label,
+        )
+        check(
+            "_releaseRebindAbortController.abort()" in body,
+            "base.html: %s() does not abort an in-flight re-bind search"
+            % function_label,
+        )
+    check(
+        "_releaseRebindSearchSeq += 1;" in close_body,
+        "base.html: closeReleaseRebindModal() does not invalidate in-flight responses",
     )
     check(
         re.search(r"\.key === 'Escape'", source) is not None,
@@ -589,6 +664,35 @@ def check_release_partials_preserved():
     )
 
 
+def check_other_search_debounces():
+    """Only the re-bind picker moved to 500 ms; the other searches stay at 250 ms."""
+    settings = read_text(SETTINGS_TEMPLATE)
+    check(
+        "}, 250);" in isolate(
+            settings,
+            "function debounceSeriesIdentitySearch(",
+            "async function resetSeriesIdentity(",
+            "settings.html debounceSeriesIdentitySearch",
+        ),
+        "settings.html: the series-identity search must keep its 250 ms debounce",
+    )
+    series = read_text(SERIES_TEMPLATE)
+    series_match = isolate(
+        series,
+        "function onSeriesMatchSearchInput(",
+        "async function searchCalibreSeries(",
+        "series.html onSeriesMatchSearchInput",
+    )
+    check(
+        "}, 250);" in series_match,
+        "series.html: the match modal search must keep its 250 ms debounce",
+    )
+    check(
+        "}, 500);" not in series_match,
+        "series.html: the match modal search must not be changed to 500 ms",
+    )
+
+
 # ---------------------------------------------------------------------------
 # 3. settings.html
 # ---------------------------------------------------------------------------
@@ -630,7 +734,12 @@ def check_settings_identity_card():
         "settings.html: identity reset/alias delete are not confirmed",
     )
     check(
-        "}, 250);" in source,
+        "}, 250);" in isolate(
+            source,
+            "function debounceSeriesIdentitySearch(",
+            "async function resetSeriesIdentity(",
+            "settings.html debounceSeriesIdentitySearch",
+        ),
         "settings.html: the series-identity search is not debounced by 250 ms",
     )
     check(
@@ -967,6 +1076,7 @@ def check_balanced_jinja(path, label):
 def main():
     check_rebind_modal_markup()
     check_rebind_modal_js()
+    check_other_search_debounces()
     check_base_preserved()
 
     check_rebind_partial(FLAT_PARTIAL, "partials/flat_release_row_chunk.html")
@@ -1000,8 +1110,9 @@ def main():
 
     print(
         "rebind-settings-ui static guard PASSED: base.html re-bind modal (ids, modes, "
-        "tracked+Calibre search, default-unchecked pin, new-title/detach, Escape/"
-        "backdrop/focus, rebind+unpin endpoints, element+object call forms), both "
+        "tracked+Calibre search debounced at 500 ms with AbortController/sequence/"
+        "last-query stale-response protection, default-unchecked pin, new-title/detach, "
+        "Escape/backdrop/focus, rebind+unpin endpoints, element+object call forms), both "
         "release partials (release-rebind-btn + release-pinned-badge), settings "
         "identity/reset/alias/attribution card, display & logging card, storage & "
         "diagnostics card, unsaved-changes guard, textContent-only rendering, README "

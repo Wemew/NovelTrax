@@ -79,6 +79,12 @@ NYAA_FEED_TYPES = frozenset({"nyaa", "nyaa_novel", "nyaa_scraper", "nyaa.si"})
 #: One-off provider budget for publication lookups when the caller passes None.
 PUBLICATION_ONE_OFF_BUDGET = 3
 
+#: TTL for the in-process Calibre library snapshot used by the re-bind status/
+#: reconcile path (contract v5 §6). A Calibre scan is comparatively expensive and
+#: a re-bind reads the library several times; one read per 10 s is enough because
+#: re-bind does not modify Calibre (sync_calibre/recheck_series_calibre invalidate).
+CALIBRE_SNAPSHOT_TTL_SECONDS = 10.0
+
 
 class TaskManager:
     def __init__(self, db: Database, calibre_path: str, data_dir: Optional[str] = None):
@@ -101,6 +107,14 @@ class TaskManager:
         # In-process TTL cache for AniList publication metadata (format/status/
         # volumes), normalized series name -> {"data": pub, "ts": epoch}.
         self._publication_cache: Dict[str, Dict[str, Any]] = {}
+        # Lock-protected TTL cache for the Calibre library snapshot (series +
+        # books) used by the re-bind status/reconcile path. Scans are expensive;
+        # a re-bind reads the library several times but never changes it.
+        self._calibre_snapshot_lock = threading.Lock()
+        self._calibre_snapshot_refresh_lock = threading.Lock()
+        self._calibre_snapshot_cache: Dict[str, Any] = {
+            "ts": 0.0, "series": [], "books": [],
+        }
 
     def _build_media_resolver(self):
         from app.media_type import MediaTypeResolver
@@ -393,24 +407,113 @@ class TaskManager:
             cleaned.append(text)
         return cleaned
 
-    def _calibre_series_snapshot(self) -> List[dict]:
-        """Live Calibre series list with a stale-safe fallback.
+    # --- Calibre library snapshot cache (contract v5 §6) --------------------
 
-        Uses ``CalibreScanner``; when the library is unavailable or the read is
-        torn, falls back to the tracked rows that already carry a
-        ``calibre_series_id`` so identity matching never sees an empty library
-        during a transient Calibre failure.
+    def _invalidate_calibre_snapshot_cache(self) -> None:
+        """Drops the cached Calibre library snapshot.
+
+        Called at the start of ``sync_calibre`` and ``recheck_series_calibre``
+        (both must read the fresh library). Re-binds never change Calibre, so
+        their status/reconcile reads reuse the cache.
+        """
+        try:
+            with self._calibre_snapshot_lock:
+                self._calibre_snapshot_cache = {
+                    "ts": 0.0, "series": [], "books": [],
+                }
+        except Exception as exc:
+            logger.debug(f"Calibre snapshot invalidation failed: {exc}")
+
+    @staticmethod
+    def _snapshot_copies(values: Any) -> List[dict]:
+        """Defensive copies so callers can never mutate the cached snapshot."""
+        return [dict(item) for item in (values or []) if isinstance(item, dict)]
+
+    def _cached_calibre_snapshot(self):
+        """Returns fresh cached ``(series, books)`` copies, or None on a miss."""
+        try:
+            now = time.time()
+            with self._calibre_snapshot_lock:
+                cache = self._calibre_snapshot_cache
+                age = now - float(cache.get("ts") or 0.0)
+                series = cache.get("series") or []
+                if age < CALIBRE_SNAPSHOT_TTL_SECONDS and series:
+                    return (
+                        self._snapshot_copies(series),
+                        self._snapshot_copies(cache.get("books")),
+                    )
+        except Exception as exc:
+            logger.debug(f"Calibre snapshot cache lookup failed: {exc}")
+        return None
+
+    def _store_calibre_snapshot(self, series: List[dict], books: List[dict]) -> None:
+        """Caches a non-empty live Calibre read (never an empty 'live' result)."""
+        series = self._snapshot_copies(series)
+        if not series:
+            return
+        try:
+            with self._calibre_snapshot_lock:
+                self._calibre_snapshot_cache = {
+                    "ts": time.time(),
+                    "series": series,
+                    "books": self._snapshot_copies(books),
+                }
+        except Exception as exc:
+            logger.debug(f"Calibre snapshot cache store failed: {exc}")
+
+    def _read_calibre_library(self):
+        """One live scanner read: ``(series, books)`` or ``(None, None)``.
+
+        The scanner I/O deliberately runs outside the cache-state lock; the
+        single-flight refresh lock serialises concurrent refreshes so a batch of
+        re-binds cannot stampede N full Calibre scans.
         """
         try:
             calibre_dir = self.db.get_setting("calibre_path", self.calibre_path)
             scanner = CalibreScanner(calibre_dir)
-            if scanner.is_available():
-                live_series = scanner.get_all_series() or []
-                if live_series:
-                    return live_series
+            if not scanner.is_available():
+                return None, None
+            live_series = list(scanner.get_all_series() or [])
+            if not live_series:
+                return None, None
+            live_books = list(scanner.get_all_books() or [])
+            return live_series, live_books
         except Exception as exc:
-            logger.debug(f"Calibre series snapshot unavailable: {exc}")
+            logger.debug(f"Calibre library snapshot unavailable: {exc}")
+            return None, None
 
+    def _calibre_live_snapshot(self):
+        """Fresh/cached ``(series, books)`` with single-flight refresh.
+
+        Fast path: copy from the TTL cache under the short cache lock. Miss:
+        take the refresh lock, double-check the cache (another thread may have
+        refreshed), and only then perform the scanner read — other threads wait
+        on the refresh lock instead of scanning concurrently. Returns
+        ``(None, None)`` when Calibre is unavailable (callers fall back and the
+        failure is never cached as live data).
+        """
+        cached = self._cached_calibre_snapshot()
+        if cached is not None:
+            return cached
+        try:
+            with self._calibre_snapshot_refresh_lock:
+                cached = self._cached_calibre_snapshot()
+                if cached is not None:
+                    return cached
+                live_series, live_books = self._read_calibre_library()
+                if not live_series:
+                    return None, None
+                self._store_calibre_snapshot(live_series, live_books)
+                return (
+                    self._snapshot_copies(live_series),
+                    self._snapshot_copies(live_books),
+                )
+        except Exception as exc:
+            logger.debug(f"Calibre snapshot refresh failed: {exc}")
+            return None, None
+
+    def _calibre_series_fallback(self) -> List[dict]:
+        """Fallback Calibre series list built from tracked Calibre-linked rows."""
         fallback: List[dict] = []
         try:
             rows = self.db.get_all_series(monitored_only=False)
@@ -444,6 +547,22 @@ class TaskManager:
                 "authors": row.get("authors") or "",
             })
         return fallback
+
+    def _calibre_series_snapshot(self) -> List[dict]:
+        """Live Calibre series list with a stale-safe fallback.
+
+        Uses the lock-protected TTL snapshot cache (contract v5 §6); when the
+        library is unavailable or the read is torn, falls back to the tracked
+        rows that already carry a ``calibre_series_id`` so identity matching
+        never sees an empty library during a transient Calibre failure.
+        """
+        cached = self._cached_calibre_snapshot()
+        if cached is not None:
+            return cached[0]
+        live = self._calibre_live_snapshot()
+        if live is not None and live[0]:
+            return live[0]
+        return self._calibre_series_fallback()
 
     def _fallback_calibre_books(self, series_list: List[dict]) -> List[dict]:
         """Synthesizes books for a stale series snapshot from tracked rows.
@@ -493,17 +612,17 @@ class TaskManager:
         return books
 
     def _calibre_library_snapshot(self):
-        """Returns ``(series_list, books_list)`` for the current Calibre library."""
-        try:
-            calibre_dir = self.db.get_setting("calibre_path", self.calibre_path)
-            scanner = CalibreScanner(calibre_dir)
-            if scanner.is_available():
-                live_series = scanner.get_all_series() or []
-                if live_series:
-                    return live_series, scanner.get_all_books() or []
-        except Exception as exc:
-            logger.debug(f"Calibre library snapshot unavailable: {exc}")
-        series_list = self._calibre_series_snapshot()
+        """Returns ``(series_list, books_list)`` for the current Calibre library.
+
+        Fresh non-empty cached snapshots are returned as defensive copies; a miss
+        performs one single-flight scanner read and caches non-empty results.
+        The unavailable/torn fallback (tracked Calibre rows + synthesized books)
+        keeps working and is never cached as a live empty result.
+        """
+        live = self._calibre_live_snapshot()
+        if live is not None and live[0]:
+            return live[0], live[1]
+        series_list = self._calibre_series_fallback()
         return series_list, self._fallback_calibre_books(series_list)
 
     def series_identity_snapshot(self) -> dict:
@@ -2114,6 +2233,8 @@ class TaskManager:
         scanner = None
         series_list: List[dict] = []
         books: List[dict] = []
+        # A recheck must read the fresh Calibre library (contract v5 §6).
+        self._invalidate_calibre_snapshot_cache()
         try:
             calibre_dir = self.db.get_setting("calibre_path", self.calibre_path)
             scanner = CalibreScanner(calibre_dir)
@@ -2124,6 +2245,9 @@ class TaskManager:
             else:
                 series_list = list(scanner.get_all_series() or [])
                 books = list(scanner.get_all_books() or [])
+                # Fresh library read: seed the snapshot cache for the reconcile
+                # pass (and any re-bind/status call right after the recheck).
+                self._store_calibre_snapshot(series_list, books)
         except Exception as exc:
             logger.debug(f"Recheck Calibre read failed for series #{series_id_int}: {exc}")
             read_error = f"Could not read the Calibre library ({exc})"
@@ -2445,6 +2569,8 @@ class TaskManager:
 
         self.is_syncing_calibre = True
         try:
+            # A sync must read the fresh Calibre library (contract v5 §6).
+            self._invalidate_calibre_snapshot_cache()
             calibre_dir = self.db.get_setting("calibre_path", self.calibre_path)
             scanner = CalibreScanner(calibre_dir)
 
@@ -2456,6 +2582,10 @@ class TaskManager:
 
             series_list = scanner.get_all_series()
             books_list = scanner.get_all_books()
+            # The sync just read the fresh library; seed the snapshot cache so
+            # the identity/reconcile work below (and a concurrent re-bind) reuse
+            # it instead of rescanning.
+            self._store_calibre_snapshot(series_list, books_list)
 
             # Omnibus-aware owned volumes: get_series_volumes_map() expands
             # bundled omnibus titles ("Vol 1-3") into their contained volumes, so

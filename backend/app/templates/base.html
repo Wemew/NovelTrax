@@ -694,6 +694,9 @@
             onSuccess: null
         };
         let _releaseRebindSearchTimer = null;
+        let _releaseRebindAbortController = null;
+        let _releaseRebindSearchSeq = 0;
+        let _releaseRebindLastQuery = null;
         let _releaseRebindFocus = null;
         let _releaseRebindResults = [];
         let _releaseRebindResultEls = [];
@@ -761,6 +764,13 @@
             if (pinRow) pinRow.classList.add('hidden');
             _releaseRebindResults = [];
             _releaseRebindResultEls = [];
+            _releaseRebindLastQuery = null;
+            if (_releaseRebindAbortController) {
+                try {
+                    _releaseRebindAbortController.abort();
+                } catch (abortErr) {}
+                _releaseRebindAbortController = null;
+            }
             _releaseRebindError('');
             setReleaseRebindMode('bind');
             if (modal) {
@@ -782,6 +792,15 @@
             document.body.style.overflow = '';
             clearTimeout(_releaseRebindSearchTimer);
             _releaseRebindSearchTimer = null;
+            if (_releaseRebindAbortController) {
+                try {
+                    _releaseRebindAbortController.abort();
+                } catch (abortErr) {}
+                _releaseRebindAbortController = null;
+            }
+            // Invalidate any still-resolving request so a stale response cannot render.
+            _releaseRebindSearchSeq += 1;
+            _releaseRebindLastQuery = null;
             _releaseRebind.releaseId = 0;
             _releaseRebind.selectedTarget = null;
             _releaseRebind.onSuccess = null;
@@ -815,15 +834,32 @@
 
         function searchReleaseRebindSeries(query) {
             clearTimeout(_releaseRebindSearchTimer);
+            _releaseRebindSearchTimer = null;
+            const term = String(query || '').trim();
+            // Debounce at 500 ms (the tracked/Calibre picker scans are expensive) and skip
+            // an identical query whose results are already rendered.
+            if (term === _releaseRebindLastQuery && _releaseRebindResults.length > 0) {
+                return;
+            }
             _releaseRebindSearchTimer = setTimeout(async function () {
-                const term = String(query || '').trim();
+                if (_releaseRebindAbortController) {
+                    try {
+                        _releaseRebindAbortController.abort();
+                    } catch (abortErr) {}
+                }
+                _releaseRebindAbortController = new AbortController();
+                const signal = _releaseRebindAbortController.signal;
+                _releaseRebindSearchSeq += 1;
+                const seq = _releaseRebindSearchSeq;
                 try {
                     const responses = await Promise.all([
-                        fetch(`/api/series?search=${encodeURIComponent(term)}&limit=50`),
-                        fetch(`/api/calibre/series?search=${encodeURIComponent(term)}&limit=50`)
+                        fetch(`/api/series?search=${encodeURIComponent(term)}&limit=50`, { signal: signal }),
+                        fetch(`/api/calibre/series?search=${encodeURIComponent(term)}&limit=50`, { signal: signal })
                     ]);
+                    if (seq !== _releaseRebindSearchSeq) return;
                     const trackedData = responses[0] && responses[0].ok ? await responses[0].json() : {};
                     const calibreData = responses[1] && responses[1].ok ? await responses[1].json() : {};
+                    if (seq !== _releaseRebindSearchSeq) return;
                     const merged = [];
                     (trackedData.series || []).forEach(function (row) {
                         merged.push({
@@ -845,12 +881,15 @@
                             source: 'calibre'
                         });
                     });
+                    _releaseRebindLastQuery = term;
                     renderReleaseRebindResults(merged);
                 } catch (err) {
+                    if (err && err.name === 'AbortError') return; // superseded request
+                    if (seq !== _releaseRebindSearchSeq) return; // stale failure
                     renderReleaseRebindResults([]);
                     _releaseRebindError('Could not search series: ' + err);
                 }
-            }, 250);
+            }, 500);
         }
 
         function renderReleaseRebindResults(list) {

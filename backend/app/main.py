@@ -2,6 +2,7 @@ import os
 import json
 import math
 import time
+import threading
 import difflib
 import logging
 import asyncio
@@ -311,6 +312,73 @@ def _calibre_series_picker_rows() -> List[Dict[str, Any]]:
         return [dict(row) for row in db.get_all_series() or [] if row.get("calibre_series_id")]
     except Exception:
         return []
+
+
+# Picker snapshot cache (CONTRACT rebind_perf v5 §4): a process-level, short-TTL,
+# lock-protected snapshot so repeated search keystrokes (and parallel clients) do not
+# rescan the Calibre library / series_tracking on every request. The loader runs while
+# holding the lock, which makes a cache miss single-flight instead of a stampede.
+SERIES_PICKER_CACHE_TTL_SECONDS = 10.0
+_series_picker_cache_lock = threading.Lock()
+_series_picker_cache = {"ts": 0.0, "calibre": [], "tracked": []}
+
+
+def _series_picker_snapshot() -> Dict[str, List[Dict[str, Any]]]:
+    """Returns the cached ``{"calibre": [...], "tracked": [...]}`` picker snapshot.
+
+    Double-checked under ``_series_picker_cache_lock``: a fresh snapshot is returned
+    without touching Calibre/SQLite, while a cache miss loads both lists once inside
+    the lock (single-flight for concurrent keystrokes in worker threads). Never
+    raises: a failing loader degrades to an empty list for that section. Callers must
+    not mutate the returned rows/lists - the routes build their own entry lists.
+    """
+    try:
+        with _series_picker_cache_lock:
+            cached = _series_picker_cache
+            age = time.monotonic() - float(cached.get("ts") or 0.0)
+            if cached.get("ts") and age < SERIES_PICKER_CACHE_TTL_SECONDS:
+                return {
+                    "calibre": list(cached.get("calibre") or []),
+                    "tracked": list(cached.get("tracked") or []),
+                }
+
+            calibre: List[Dict[str, Any]] = []
+            tracked: List[Dict[str, Any]] = []
+            try:
+                calibre = [
+                    dict(row) for row in (_calibre_series_picker_rows() or [])
+                    if isinstance(row, dict)
+                ]
+            except Exception as exc:
+                logger.warning(f"Series picker snapshot: Calibre series unavailable: {exc}")
+                calibre = []
+            try:
+                tracked = [
+                    dict(row) for row in (db.get_all_series() or [])
+                    if isinstance(row, dict)
+                ]
+            except Exception as exc:
+                logger.warning(f"Series picker snapshot: tracked series unavailable: {exc}")
+                tracked = []
+
+            cached["ts"] = time.monotonic()
+            cached["calibre"] = calibre
+            cached["tracked"] = tracked
+            return {"calibre": list(calibre), "tracked": list(tracked)}
+    except Exception as exc:  # final containment: pickers must never 500
+        logger.warning(f"Series picker snapshot failed: {exc}")
+        return {"calibre": [], "tracked": []}
+
+
+def _invalidate_series_picker_cache() -> None:
+    """Drops the picker snapshot so the next picker request rescans (never raises)."""
+    try:
+        with _series_picker_cache_lock:
+            _series_picker_cache["ts"] = 0.0
+            _series_picker_cache["calibre"] = []
+            _series_picker_cache["tracked"] = []
+    except Exception as exc:
+        logger.warning(f"Could not invalidate the series picker cache: {exc}")
 
 
 def _series_picker_entry(
@@ -1184,6 +1252,7 @@ async def audiobooks_view(request: Request):
 @app.post("/api/calibre/sync")
 async def api_calibre_sync():
     """Trigger manual Calibre library rescan and request resolution."""
+    _invalidate_series_picker_cache()
     res = await asyncio.to_thread(task_manager.sync_calibre)
     return JSONResponse(res)
 
@@ -1511,8 +1580,9 @@ async def api_calibre_series_picker(
 ):
     """Searchable, similarity-ranked Calibre series picker used by the manual match modal."""
     try:
-        raw_rows = await asyncio.to_thread(_calibre_series_picker_rows)
-        tracked_rows = await asyncio.to_thread(db.get_all_series)
+        snapshot = await asyncio.to_thread(_series_picker_snapshot)
+        raw_rows = snapshot.get("calibre") or []
+        tracked_rows = snapshot.get("tracked") or []
     except Exception as exc:
         logger.warning(f"Calibre series picker could not load series: {exc}")
         return JSONResponse({"status": "success", "series": [], "count": 0})
@@ -1579,6 +1649,7 @@ async def api_match_series_to_calibre(series_id: int, payload: Optional[Dict[str
     except Exception as exc:
         logger.warning(f"Manual Calibre match failed for '{source_name}': {type(exc).__name__}: {exc}")
         raise HTTPException(status_code=500, detail=f"Could not match series: {exc}") from exc
+    _invalidate_series_picker_cache()
     return JSONResponse(_series_match_payload(result))
 
 @app.post("/api/discovery/match")
@@ -1607,6 +1678,7 @@ async def api_discovery_match(payload: Optional[Dict[str, Any]] = None):
     except Exception as exc:
         logger.warning(f"Discovery Calibre match failed for '{source_name}': {type(exc).__name__}: {exc}")
         raise HTTPException(status_code=500, detail=f"Could not match series: {exc}") from exc
+    _invalidate_series_picker_cache()
     return JSONResponse(_series_match_payload(result))
 
 @app.post("/api/series/{series_id}/refresh-metadata")
@@ -1662,7 +1734,8 @@ async def api_tracked_series_picker(
 ):
     """Searchable tracked-series picker for the release re-bind modal; never raises."""
     try:
-        rows = await asyncio.to_thread(db.get_all_series)
+        snapshot = await asyncio.to_thread(_series_picker_snapshot)
+        rows = snapshot.get("tracked") or []
     except Exception as exc:
         logger.warning(f"Tracked series picker could not load series: {exc}")
         return JSONResponse({"status": "success", "series": [], "count": 0})
@@ -1775,6 +1848,7 @@ async def api_rebind_release(release_id: int, payload: Optional[Dict[str, Any]] 
         logger.warning(f"Release re-bind failed for #{release_id}: {type(exc).__name__}: {exc}")
         raise HTTPException(status_code=500, detail=f"Could not re-bind release: {exc}") from exc
 
+    _invalidate_series_picker_cache()
     summary = dict(result) if isinstance(result, dict) else {}
     summary.setdefault("status", "success")
     return JSONResponse(summary)
@@ -1827,6 +1901,7 @@ async def api_reset_series_identity(series_id: int):
         logger.warning(f"Series identity reset failed for #{series_id}: {type(exc).__name__}: {exc}")
         raise HTTPException(status_code=500, detail=f"Could not reset series identity: {exc}") from exc
 
+    _invalidate_series_picker_cache()
     summary = dict(result) if isinstance(result, dict) else {}
     payload = {
         "status": summary.get("status") or "success",
@@ -1861,6 +1936,7 @@ async def api_unlink_series_calibre(series_id: int):
             detail=f"Could not unlink the series from Calibre: {exc}",
         ) from exc
 
+    _invalidate_series_picker_cache()
     payload = dict(result) if isinstance(result, dict) else {}
     # Already-unlinked is a successful 200 response, never an error.
     payload["status"] = "success"
@@ -1889,6 +1965,7 @@ async def api_recheck_series_calibre(series_id: int):
             detail=f"Could not recheck the series Calibre link: {exc}",
         ) from exc
 
+    _invalidate_series_picker_cache()
     payload = dict(result) if isinstance(result, dict) else {}
     payload.setdefault("status", "success")
     payload.setdefault("series_id", series_id)
