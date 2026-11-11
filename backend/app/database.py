@@ -270,6 +270,9 @@ class Database:
                 ("display_title", "TEXT DEFAULT ''"),
                 ("anilist_id", "INTEGER"),
                 ("anilist_meta_json", "TEXT DEFAULT ''"),
+                # Manual AniList mapping/clear locks automatic title-search
+                # enrichment so a wrong entry cannot be re-applied later.
+                ("anilist_locked", "INTEGER DEFAULT 0"),
                 ("match_source", "TEXT DEFAULT ''"),
                 # Contract v2 §2.2: a manually-created ("different series") tracker
                 # is locked so automatic linking/enrichment/merges never rewrite it.
@@ -1126,14 +1129,16 @@ class Database:
         series_id: int,
         display_title: Optional[str] = None,
         clear_anilist: bool = False,
+        anilist_locked: Optional[bool] = None,
         actor: str = "user",
     ) -> Optional[Dict[str, Any]]:
         """Edits the cosmetic series identity used in the Library tab.
 
         ``display_title`` is cosmetic: the stable ``name`` remains the matching
         key. Passing an empty string clears it so the UI falls back to the stable
-        name. ``clear_anilist`` removes a wrong AniList id/metadata pair without
-        touching the Calibre link or release identities.
+        name. ``clear_anilist`` removes a wrong AniList id/metadata pair and
+        locks automatic AniList discovery so the wrong entry cannot be pulled
+        back on the next sync. ``anilist_locked`` can explicitly unlock it again.
         """
         sid = _coerce_int(series_id)
         if sid is None:
@@ -1149,8 +1154,19 @@ class Database:
                 raise ValueError("display title must be 300 characters or fewer")
             sets.append("display_title = ?")
             params.append(clean_title)
+        lock_value = anilist_locked
         if clear_anilist:
-            sets.extend(["anilist_id = NULL", "anilist_meta_json = ''"])
+            sets.extend([
+                "anilist_id = NULL",
+                "anilist_meta_json = ''",
+                "match_source = CASE WHEN match_source IN ('anilist', 'manual-anilist') "
+                "THEN '' ELSE match_source END",
+            ])
+            if lock_value is None:
+                lock_value = True
+        if lock_value is not None:
+            sets.append("anilist_locked = ?")
+            params.append(1 if lock_value else 0)
         if not sets:
             return current
         sets.append("last_sync = CURRENT_TIMESTAMP")
@@ -1161,6 +1177,15 @@ class Database:
                 "UPDATE series_tracking SET " + ", ".join(sets) + " WHERE id = ?;",
                 params,
             )
+            if clear_anilist:
+                self._clear_series_anilist_artifacts(
+                    cur,
+                    _coerce_text(current.get("name")),
+                    [
+                        _coerce_text(current.get("name")),
+                        _coerce_text(current.get("display_title")),
+                    ],
+                )
             conn.commit()
         self.log_activity(
             "SERIES_IDENTITY_EDITED",
@@ -1169,6 +1194,7 @@ class Database:
                 "series_id": sid,
                 "display_title": display_title,
                 "clear_anilist": bool(clear_anilist),
+                "anilist_locked": lock_value,
                 "actor": actor,
             }),
         )
@@ -1377,13 +1403,15 @@ class Database:
             return existing
         return incoming
 
-    def store_series_anilist_metadata(self, series_id: int, meta: Dict[str, Any]) -> None:
+    def store_series_anilist_metadata(self, series_id: int, meta: Dict[str, Any],
+                                      force: bool = False) -> None:
         """Persist AniList metadata for a tracked series.
 
         Writes the cosmetic ``display_title``, ``anilist_id`` and
         ``anilist_meta_json`` and registers alias overrides for every AniList
         spelling, but **never changes ``name``** (the stable matching key).
-        Sets ``match_source='anilist'`` only when it is still blank.
+        Sets ``match_source='anilist'`` only when it is still blank. ``force``
+        bypasses the identity-locked guard for an explicit manual mapping.
         """
         sid = _coerce_int(series_id)
         if sid is None or not isinstance(meta, dict):
@@ -1400,7 +1428,7 @@ class Database:
         row = dict(found)
         # Contract v2 §2.2: a manually-created ("different series") tracker is
         # identity-locked; automatic AniList enrichment must not rewrite it.
-        if _coerce_int(row.get("identity_locked")) == 1:
+        if _coerce_int(row.get("identity_locked")) == 1 and not force:
             logger.info(
                 "Skipping AniList metadata store for identity-locked series %r",
                 _coerce_text(row.get("name")),
@@ -1464,6 +1492,116 @@ class Database:
                 )
             except ValueError:
                 continue
+
+    def _clear_series_anilist_artifacts(self, cur, target_name: str,
+                                        names: Optional[List[str]] = None) -> None:
+        """Deletes AniList-derived aliases and metadata-cache keys for a series.
+
+        The caller owns the transaction. Only ``origin='anilist'`` aliases are
+        removed; manual mappings and split aliases stay intact.
+        """
+        from app.parser import normalize_text
+
+        target_norm = normalize_text(target_name)
+        if target_norm:
+            cur.execute(
+                "DELETE FROM series_alias_overrides "
+                "WHERE target_norm = ? AND origin = 'anilist';",
+                (target_norm,),
+            )
+        keys: set = set()
+        for value in names or []:
+            text = _coerce_text(value)
+            if not text:
+                continue
+            keys.add(text.lower())
+            try:
+                from app.providers.metadata import NovelMetadataProvider
+                cleaned = NovelMetadataProvider.clean_search_title(text)
+                if cleaned:
+                    keys.add(cleaned.lower())
+            except Exception:
+                pass
+        for key in keys:
+            try:
+                cur.execute(
+                    "DELETE FROM novel_metadata_cache "
+                    "WHERE lower(query_key) = ? OR lower(title) = ?;",
+                    (key, key),
+                )
+            except sqlite3.OperationalError:
+                # The cache table is created lazily; an uncached install has
+                # nothing to clear.
+                break
+
+    def map_series_anilist(self, series_id: int, meta: Dict[str, Any],
+                           actor: str = "user") -> Optional[Dict[str, Any]]:
+        """Explicitly pins one series to a chosen AniList entry.
+
+        The entry is fetched by id by the caller (never by fuzzy title search),
+        old AniList aliases/cache are discarded, and ``anilist_locked`` prevents
+        automatic enrichment from replacing the mapping later.
+        """
+        from app.parser import normalize_text
+
+        sid = _coerce_int(series_id)
+        if sid is None or not isinstance(meta, dict):
+            return None
+        current = self.get_series_by_id(sid)
+        if current is None:
+            return None
+        anilist_id = _coerce_int(meta.get("anilist_id") or meta.get("id"))
+        if anilist_id is None:
+            raise ValueError("AniList metadata has no id")
+        name = _coerce_text(current.get("name"))
+        old_display = _coerce_text(current.get("display_title"))
+        new_titles = [
+            name,
+            old_display,
+            _coerce_text(meta.get("title")),
+            _coerce_text(meta.get("english_title")),
+            _coerce_text(meta.get("canonical_title")),
+        ]
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            self._clear_series_anilist_artifacts(cur, name, new_titles)
+            conn.commit()
+        self.store_series_anilist_metadata(sid, meta, force=True)
+        preferred_display = _coerce_text(
+            meta.get("english_title") or meta.get("title") or meta.get("canonical_title")
+        )
+        if preferred_display:
+            # Keep the chosen entry's exact casing/punctuation even when its
+            # normalized form equals the stable tracking key.
+            self.update_series_identity(sid, display_title=preferred_display)
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE series_tracking SET anilist_locked = 1, "
+                "match_source = 'manual-anilist', last_sync = CURRENT_TIMESTAMP "
+                "WHERE id = ?;",
+                (sid,),
+            )
+            conn.commit()
+        # Replace the stale title-search cache with the exact chosen entry.
+        try:
+            self.cache_novel_metadata(name.lower(), meta)
+            cleaned_name = normalize_text(name)
+            if cleaned_name and cleaned_name != name.lower():
+                self.cache_novel_metadata(cleaned_name, meta)
+        except Exception:
+            pass
+        self.log_activity(
+            "SERIES_ANILIST_MAPPED",
+            f"Manually mapped '{name}' to AniList #{anilist_id}",
+            json.dumps({
+                "series_id": sid,
+                "anilist_id": anilist_id,
+                "title": _coerce_text(meta.get("title")),
+                "actor": actor,
+            }),
+        )
+        return self.get_series_by_id(sid)
 
     def store_series_publication_metadata(self, series_id: int, meta: Dict[str, Any]) -> None:
         """Merge only the AniList publication keys into a series' ``anilist_meta_json``.
@@ -2752,14 +2890,20 @@ class Database:
                 cur.execute("""
                     UPDATE series_tracking SET
                         display_title = '', anilist_id = NULL, anilist_meta_json = '',
-                        match_source = '', last_sync = CURRENT_TIMESTAMP
+                        anilist_locked = 0, match_source = '',
+                        last_sync = CURRENT_TIMESTAMP
                     WHERE id = ?;
                 """, (sid,))
                 display_cleared = True
             cur.execute(
-                "UPDATE series_tracking SET identity_locked = 0, last_sync = CURRENT_TIMESTAMP WHERE id = ?;",
+                "UPDATE series_tracking SET identity_locked = 0, anilist_locked = 0, "
+                "last_sync = CURRENT_TIMESTAMP WHERE id = ?;",
                 (sid,),
             )
+            try:
+                self._clear_series_anilist_artifacts(cur, name, [name, display])
+            except Exception:
+                pass
             if pinned_ids:
                 cur.executemany("""
                     UPDATE releases SET series_pinned = 0, series_pinned_at = '',
@@ -2956,6 +3100,8 @@ class Database:
             "authors": _coerce_text(row.get("authors")),
             "calibre_series_id": row.get("calibre_series_id"),
             "identity_locked": bool(_coerce_int(row.get("identity_locked"))),
+            "anilist_locked": bool(_coerce_int(row.get("anilist_locked"))),
+            "anilist_id": row.get("anilist_id"),
             "match_source": _coerce_text(row.get("match_source")),
             "is_monitored": bool(_coerce_int(row.get("is_monitored"))),
             "book_count": _coerce_int(row.get("book_count")),

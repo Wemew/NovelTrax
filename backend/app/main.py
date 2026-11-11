@@ -1720,12 +1720,16 @@ async def api_update_series_identity(
     if display_title is not None and not isinstance(display_title, str):
         raise HTTPException(status_code=400, detail="display_title must be text")
     clear_anilist = _coerce_bool(p.get("clear_anilist"), False)
+    anilist_locked = p.get("anilist_locked")
+    if anilist_locked is not None:
+        anilist_locked = _coerce_bool(anilist_locked, False)
     try:
         row = await asyncio.to_thread(
             db.update_series_display_identity,
             series_id,
             display_title,
             clear_anilist,
+            anilist_locked,
             "user",
         )
     except ValueError as exc:
@@ -1735,6 +1739,14 @@ async def api_update_series_identity(
         raise HTTPException(status_code=500, detail="Could not update the series identity") from exc
     if not row:
         raise HTTPException(status_code=404, detail="Series not found")
+    try:
+        await asyncio.to_thread(
+            task_manager.invalidate_series_identity_cache,
+            row.get("name"),
+            row.get("display_title"),
+        )
+    except Exception:
+        pass
     _invalidate_series_picker_cache()
     return JSONResponse({
         "status": "success",
@@ -1743,6 +1755,86 @@ async def api_update_series_identity(
             "id": row.get("id"),
             "name": row.get("name"),
             "display_title": row.get("display_title") or "",
+            "calibre_series_id": row.get("calibre_series_id"),
+            "book_count": row.get("book_count"),
+            "latest_index": row.get("latest_index"),
+        },
+    })
+
+
+@app.post("/api/series/{series_id}/anilist")
+async def api_map_series_anilist(
+    series_id: int, payload: Optional[Dict[str, Any]] = None
+):
+    """Pins one series to an exact AniList entry from a URL or numeric id."""
+    from app.providers.metadata import NovelMetadataProvider
+
+    p = payload or {}
+    raw_value = (
+        p.get("url_or_id")
+        or p.get("anilist_url")
+        or p.get("url")
+        or p.get("anilist_id")
+    )
+    anilist_id = NovelMetadataProvider.parse_anilist_id(raw_value)
+    if anilist_id is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Paste an AniList manga URL or numeric AniList id",
+        )
+    series_row = await asyncio.to_thread(_find_series_row, series_id)
+    if not series_row:
+        raise HTTPException(status_code=404, detail="Series not found")
+    try:
+        meta = await asyncio.to_thread(
+            NovelMetadataProvider.query_anilist_by_id, anilist_id
+        )
+    except Exception as exc:
+        logger.warning(f"AniList id lookup failed for #{anilist_id}: {exc}")
+        meta = None
+    if not meta:
+        raise HTTPException(
+            status_code=404,
+            detail=f"AniList entry #{anilist_id} was not found as a light novel",
+        )
+    try:
+        row = await asyncio.to_thread(
+            db.map_series_anilist, series_id, meta, "user"
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.warning(f"Could not map series #{series_id} to AniList #{anilist_id}: {exc}")
+        raise HTTPException(status_code=500, detail="Could not map the AniList entry") from exc
+    if not row:
+        raise HTTPException(status_code=404, detail="Series not found")
+    try:
+        await asyncio.to_thread(
+            task_manager.invalidate_series_identity_cache,
+            row.get("name"),
+            row.get("display_title"),
+            meta.get("title"),
+            meta.get("english_title"),
+        )
+    except Exception:
+        pass
+    _invalidate_series_picker_cache()
+    return JSONResponse({
+        "status": "success",
+        "message": f"Mapped to AniList #{anilist_id}",
+        "anilist": {
+            "id": anilist_id,
+            "title": meta.get("title"),
+            "english_title": meta.get("english_title"),
+            "display_title": row.get("display_title"),
+            "synonyms": meta.get("synonyms") or [],
+        },
+        "series": {
+            "id": row.get("id"),
+            "name": row.get("name"),
+            "display_title": row.get("display_title") or "",
+            "anilist_id": row.get("anilist_id"),
+            "anilist_locked": bool(_coerce_int(row.get("anilist_locked"))),
             "calibre_series_id": row.get("calibre_series_id"),
             "book_count": row.get("book_count"),
             "latest_index": row.get("latest_index"),

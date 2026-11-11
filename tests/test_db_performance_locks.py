@@ -224,7 +224,7 @@ def test_get_all_series_equivalence():
                     ["beta series", "Delta Series"],
                     "monitored_only filters and orders by name NOCASE ASC")
         check_equal(len(rows), 4, "non-monitored get_all_series returns every row")
-        check_equal(len(by_name["Alpha Series"]), 17,
+        check_equal(len(by_name["Alpha Series"]), 18,
                     "row dict keeps the 17 tracker columns plus cover_url")
     finally:
         _cleanup_temp_dir(tmp_dir)

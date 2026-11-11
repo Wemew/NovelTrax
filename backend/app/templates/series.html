@@ -683,6 +683,7 @@
             + (series.calibre_series_id
                 ? `Calibre #${series.calibre_series_id} · ${Number(series.book_count) || 0} books · latest index ${_manageVolume(series.latest_index) || '0'}`
                 : 'not linked to Calibre')
+            + ` · ${series.anilist_locked ? 'AniList manual/locked' : (series.anilist_id ? `AniList #${series.anilist_id}` : 'AniList auto')}`
         ));
         const titleLabel = _manageEl('label', 'block text-[10px] uppercase tracking-wider text-slate-400 font-semibold', 'Display title');
         const titleInput = _manageEl('input', 'mt-1 w-full bg-slate-950/70 border border-slate-700/80 rounded-xl px-3 py-2 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-brand-500');
@@ -703,11 +704,41 @@
         clearCopy.appendChild(_manageEl('span', 'block text-[10px] text-slate-500', 'Removes the AniList id, titles and publication index for this tracker. The Calibre link and release history stay untouched.'));
         clearRow.appendChild(clearCopy);
         identitySection.appendChild(clearRow);
+        const allowRow = _manageEl('label', 'flex items-start gap-2 cursor-pointer pt-0.5');
+        const allowBox = _manageEl('input', 'mt-0.5 w-4 h-4 rounded bg-slate-950 border-slate-700 text-brand-600 focus:ring-brand-500');
+        allowBox.id = 'series-manage-allow-anilist';
+        allowBox.type = 'checkbox';
+        allowBox.checked = !series.anilist_locked;
+        allowRow.appendChild(allowBox);
+        const allowCopy = _manageEl('span', 'min-w-0');
+        allowCopy.appendChild(_manageEl('span', 'block text-[11px] font-semibold text-slate-200', 'Allow automatic AniList discovery'));
+        allowCopy.appendChild(_manageEl('span', 'block text-[10px] text-slate-500', 'Leave off after manually mapping or clearing AniList so a later sync cannot re-apply a wrong entry.'));
+        allowRow.appendChild(allowCopy);
+        identitySection.appendChild(allowRow);
+        const anilistLabel = _manageEl('label', 'block text-[10px] uppercase tracking-wider text-slate-400 font-semibold', 'AniList URL or id');
+        const anilistInput = _manageEl('input', 'mt-1 w-full bg-slate-950/70 border border-slate-700/80 rounded-xl px-3 py-2 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-brand-500 font-mono');
+        anilistInput.id = 'series-manage-anilist-input';
+        anilistInput.type = 'text';
+        anilistInput.placeholder = 'https://anilist.co/manga/123456/... or 123456';
+        anilistLabel.appendChild(anilistInput);
+        identitySection.appendChild(anilistLabel);
+        identitySection.appendChild(_manageEl(
+            'p', 'text-[10px] text-slate-500',
+            'The numeric id is exact: it overrides fuzzy title search and pins this series to that AniList entry.'
+        ));
         const identityActions = _manageEl('div', 'flex flex-wrap items-center gap-2 pt-1');
         const saveIdentity = _manageEl('button', 'nt-btn nt-btn-primary', 'Save identity');
         saveIdentity.type = 'button';
         saveIdentity.addEventListener('click', () => manageSaveIdentity(saveIdentity));
         identityActions.appendChild(saveIdentity);
+        const mapAnilist = _manageEl('button', 'nt-btn nt-btn-secondary', 'Map AniList');
+        mapAnilist.type = 'button';
+        mapAnilist.title = 'Fetch and pin the exact AniList entry from a URL or id';
+        mapAnilist.addEventListener('click', () => {
+            const field = document.getElementById('series-manage-anilist-input');
+            if (field) manageSubmitAniList(field.value, mapAnilist);
+        });
+        identityActions.appendChild(mapAnilist);
         const useStable = _manageEl('button', 'nt-btn nt-btn-secondary', 'Use stable name');
         useStable.type = 'button';
         useStable.title = `Set the display title to "${series.name || ''}"`;
@@ -805,14 +836,57 @@
         if (window.lucide) lucide.createIcons();
     }
 
+    async function manageSubmitAniList(rawValue, btn) {
+        const id = _seriesManageState.seriesId;
+        if (!id) return;
+        const value = String(rawValue || '').trim();
+        if (!value) {
+            showToast('Paste an AniList URL or numeric AniList id', 'error');
+            return;
+        }
+        if (btn) btn.disabled = true;
+        try {
+            const res = await fetch(`/api/series/${id}/anilist`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ url_or_id: value })
+            });
+            const data = await res.json();
+            if (res.ok && data.status === 'success') {
+                const title = (data.anilist && (data.anilist.english_title || data.anilist.title)) || `AniList #${data.anilist?.id || ''}`;
+                showToast(`Mapped to ${title}`, 'success');
+                setTimeout(() => location.reload(), 800);
+            } else {
+                showToast(data.detail || data.message || 'Could not map this AniList entry', 'error');
+            }
+        } catch (err) {
+            showToast(`Error: ${err}`, 'error');
+        } finally {
+            if (btn) btn.disabled = false;
+        }
+    }
+
+    async function manageMapReleaseAniList(rel) {
+        if (!rel) return;
+        const current = rel.series_name || _seriesManageState.seriesName || 'this series';
+        const proposed = prompt(
+            `AniList URL or id for "${rel.title || 'this release'}"?\n\nIt is stored on the series "${current}".`,
+            ''
+        );
+        if (proposed === null) return;
+        await manageSubmitAniList(proposed, null);
+    }
+
     async function manageSaveIdentity(btn) {
         const id = _seriesManageState.seriesId;
         if (!id) return;
         const input = document.getElementById('series-manage-display-title');
         const clearBox = document.getElementById('series-manage-clear-anilist');
+        const allowBox = document.getElementById('series-manage-allow-anilist');
         if (!input) return;
         const displayTitle = input.value.trim();
         const clearAnilist = !!(clearBox && clearBox.checked);
+        const anilistLocked = clearAnilist ? true : !(allowBox && allowBox.checked);
         if (btn) btn.disabled = true;
         try {
             const res = await fetch(`/api/series/${id}/identity`, {
@@ -820,7 +894,8 @@
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     display_title: displayTitle,
-                    clear_anilist: clearAnilist
+                    clear_anilist: clearAnilist,
+                    anilist_locked: anilistLocked
                 })
             });
             const data = await res.json();
@@ -892,6 +967,11 @@
         rebind.title = 'Move this release to another series or Calibre match';
         rebind.addEventListener('click', () => manageRebindRelease(rel));
         actions.appendChild(rebind);
+        const anilist = _manageEl('button', 'nt-btn nt-btn-secondary', 'AniList');
+        anilist.type = 'button';
+        anilist.title = 'Map this release’s series to an exact AniList URL or id';
+        anilist.addEventListener('click', () => manageMapReleaseAniList(rel));
+        actions.appendChild(anilist);
         const spin = _manageEl('button', 'nt-btn nt-btn-secondary text-amber-200 border-amber-500/30 hover:bg-amber-500/10', 'Spin out');
         spin.type = 'button';
         spin.title = 'Create a separate series from this release';

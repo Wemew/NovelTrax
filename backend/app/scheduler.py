@@ -1102,6 +1102,19 @@ class TaskManager:
         except (TypeError, ValueError):
             return bool(value)
 
+    @staticmethod
+    def _series_anilist_locked(row: Any) -> bool:
+        """True when automatic AniList enrichment is disabled for a series."""
+        if not isinstance(row, dict):
+            return False
+        value = row.get("anilist_locked")
+        if value is None:
+            return False
+        try:
+            return int(value) == 1
+        except (TypeError, ValueError):
+            return bool(value)
+
     def _release_row_by_guid(self, guid: str) -> Optional[dict]:
         """Reads the stored identity/pin state for a feed GUID (never raises).
 
@@ -1378,6 +1391,22 @@ class TaskManager:
             logger.debug(f"Bundle volume inference skipped: {exc}")
             return False
 
+    def invalidate_series_identity_cache(self, *names: Any) -> None:
+        """Drops in-process AniList/publication cache entries for these names."""
+        from app.parser import normalize_text
+        for name in names:
+            key = normalize_text(str(name or "").strip())
+            if not key:
+                continue
+            try:
+                self._series_alt_cache.pop(key, None)
+            except Exception:
+                pass
+            try:
+                self._publication_cache.pop(key, None)
+            except Exception:
+                pass
+
     def enrich_tracked_series_anilist(self, limit: int = SERIES_ANILIST_SYNC_LIMIT_DEFAULT) -> dict:
         """Fetches AniList metadata for a bounded batch of un-enriched tracked rows.
 
@@ -1408,6 +1437,8 @@ class TaskManager:
             # A manually locked/new-title tracker must never be enriched: its
             # identity is deliberately detached from the automatic graph.
             and not self._series_identity_locked(row)
+            # A manual AniList map or an explicit AniList clear must also stick.
+            and not self._series_anilist_locked(row)
         ][:batch_limit]
         if not pending:
             return result
@@ -1672,17 +1703,43 @@ class TaskManager:
             return result
 
         name = (row.get("name") or "").strip()
+        anilist_locked = self._series_anilist_locked(row)
+        stored_anilist_id = row.get("anilist_id")
+        try:
+            stored_anilist_id = int(stored_anilist_id) if stored_anilist_id else None
+        except (TypeError, ValueError):
+            stored_anilist_id = None
         meta = None
-        if name:
+        if anilist_locked and stored_anilist_id is None:
+            result["message"] = (
+                "AniList is manually cleared/pinned for this series; "
+                "map an AniList URL or id to refresh it"
+            )
+        elif name or stored_anilist_id is not None:
             try:
                 from app.providers.metadata import NovelMetadataProvider
-                meta = NovelMetadataProvider.fetch_series_metadata(name)
+                if stored_anilist_id is not None:
+                    meta = NovelMetadataProvider.query_anilist_by_id(stored_anilist_id)
+                else:
+                    meta = NovelMetadataProvider.fetch_series_metadata(name)
             except Exception as exc:
                 logger.debug(f"AniList refresh failed for '{name}': {exc}")
                 meta = None
             if meta:
                 try:
-                    self.db.store_series_anilist_metadata(series_id_int, meta)
+                    self.db.store_series_anilist_metadata(
+                        series_id_int, meta, force=anilist_locked
+                    )
+                    if stored_anilist_id is not None:
+                        preferred_display = (
+                            meta.get("english_title")
+                            or meta.get("title")
+                            or meta.get("canonical_title")
+                        )
+                        if preferred_display:
+                            self.db.update_series_identity(
+                                series_id_int, display_title=preferred_display
+                            )
                 except Exception as exc:
                     logger.debug(f"AniList refresh persist failed for '{name}': {exc}")
                     meta = None
@@ -1718,15 +1775,22 @@ class TaskManager:
             row.get("display_title") or ""
         ) or name
         anilist_id = (meta or {}).get("anilist_id") or row.get("anilist_id")
+        if anilist_locked and stored_anilist_id is None and not meta:
+            refresh_message = (
+                "AniList is manually cleared/pinned for this series; "
+                "map an AniList URL or id to refresh it"
+            )
+        else:
+            refresh_message = (
+                f"AniList metadata refreshed for '{name}'"
+                if meta else f"No AniList metadata found for '{name}'"
+            )
         result.update({
             "status": "success",
             "display_title": str(display_title or "").strip(),
             "anilist_id": anilist_id,
             "reconciled": reconciled,
-            "message": (
-                f"AniList metadata refreshed for '{name}'"
-                if meta else f"No AniList metadata found for '{name}'"
-            ),
+            "message": refresh_message,
         })
         try:
             self.db.log_activity(

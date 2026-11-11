@@ -434,44 +434,9 @@ class NovelMetadataProvider:
         return result if (result.get("title") or alternate_titles) else None
 
     @classmethod
-    def query_anilist(cls, cleaned_title: str) -> Optional[Dict[str, Any]]:
-        """Queries AniList GraphQL API for official light novel metadata.
-
-        Returns the title identity keys used by the series-identity resolver
-        (``canonical_title``, ``title``, ``english_title``, ``romaji_title``,
-        ``native_title``, ``synonyms``, ``anilist_id``, ``source``), the existing
-        synopsis/cover fields and the normalized publication keys (``format``,
-        ``format_label``, ``is_light_novel``, ``status``, ``status_label``,
-        ``volumes``, ``chapters``, ``total_volumes``).  ``format_in: [NOVEL]`` is
-        kept so the API only ever returns light-novel entries.  A missing
-        description no longer hides the titles.
-        """
-        query = """
-        query ($search: String) {
-          Media (search: $search, type: MANGA, format_in: [NOVEL]) {
-            id
-            title {
-              romaji
-              english
-              native
-            }
-            synonyms
-            format
-            status
-            volumes
-            chapters
-            description(asHtml: false)
-            coverImage {
-              large
-              extraLarge
-            }
-          }
-        }
-        """
+    def _anilist_graphql(cls, req_payload: Dict[str, Any], label: str) -> Optional[Dict[str, Any]]:
+        """POSTs one GraphQL payload to AniList with the shared rate limiter."""
         url = "https://graphql.anilist.co"
-        req_payload = {"query": query, "variables": {"search": cleaned_title}}
-        data = None
-
         _ANILIST_LIMITER.wait_if_needed()
         try:
             if httpx is not None:
@@ -483,28 +448,26 @@ class NovelMetadataProvider:
                         _ANILIST_LIMITER.handle_rate_limit_error(resp.headers)
                         return None
                     if resp.status_code == 200:
-                        data = resp.json()
-            else:
-                payload_bytes = json.dumps(req_payload).encode('utf-8')
-                req = urllib.request.Request(url, data=payload_bytes, headers={**DEFAULT_HEADERS, "Content-Type": "application/json"})
-                with urllib.request.urlopen(req, timeout=10) as resp:
-                    _ANILIST_LIMITER.handle_response_headers(resp.headers)
-                    data = json.loads(resp.read().decode('utf-8'))
+                        return resp.json()
+                    return None
+            payload_bytes = json.dumps(req_payload).encode("utf-8")
+            req = urllib.request.Request(url, data=payload_bytes, headers={**DEFAULT_HEADERS, "Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                _ANILIST_LIMITER.handle_response_headers(resp.headers)
+                return json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
             if e.code == 429:
                 _ANILIST_LIMITER.handle_rate_limit_error(e.headers)
             return None
         except Exception as e:
-            logger.debug(f"AniList query exception for '{cleaned_title}': {e}")
+            logger.debug(f"AniList query exception for '{label}': {e}")
             return None
 
-        if not data:
+    @classmethod
+    def _parse_anilist_media(cls, media: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Normalizes one AniList Media node into the provider result shape."""
+        if not isinstance(media, dict):
             return None
-
-        media = data.get("data", {}).get("Media")
-        if not media:
-            return None
-
         desc = media.get("description")
         if desc:
             # Strip any remaining HTML tags from AniList description
@@ -552,6 +515,115 @@ class NovelMetadataProvider:
         }))
         if not (result.get("title") or synonyms):
             return None
+        return result
+
+    @classmethod
+    def query_anilist(cls, cleaned_title: str) -> Optional[Dict[str, Any]]:
+        """Queries AniList GraphQL API for official light novel metadata.
+
+        Returns the title identity keys used by the series-identity resolver
+        (``canonical_title``, ``title``, ``english_title``, ``romaji_title``,
+        ``native_title``, ``synonyms``, ``anilist_id``, ``source``), the existing
+        synopsis/cover fields and the normalized publication keys (``format``,
+        ``format_label``, ``is_light_novel``, ``status``, ``status_label``,
+        ``volumes``, ``chapters``, ``total_volumes``).  ``format_in: [NOVEL]`` is
+        kept so the API only ever returns light-novel entries.  A missing
+        description no longer hides the titles.
+        """
+        query = """
+        query ($search: String) {
+          Media (search: $search, type: MANGA, format_in: [NOVEL]) {
+            id
+            title {
+              romaji
+              english
+              native
+            }
+            synonyms
+            format
+            status
+            volumes
+            chapters
+            description(asHtml: false)
+            coverImage {
+              large
+              extraLarge
+            }
+          }
+        }
+        """
+        data = cls._anilist_graphql(
+            {"query": query, "variables": {"search": cleaned_title}},
+            cleaned_title,
+        )
+        if not data:
+            return None
+        media = data.get("data", {}).get("Media")
+        return cls._parse_anilist_media(media)
+
+    @classmethod
+    def parse_anilist_id(cls, value: Any) -> Optional[int]:
+        """Extracts a numeric AniList id from a URL or bare id string."""
+        text = str(value or "").strip()
+        if not text:
+            return None
+        match = re.search(r"anilist\.co/(?:manga|anime|novel)/(\d+)", text, re.IGNORECASE)
+        if not match:
+            match = re.fullmatch(r"\s*(\d+)\s*", text)
+        if not match:
+            return None
+        try:
+            anilist_id = int(match.group(1))
+        except (TypeError, ValueError):
+            return None
+        return anilist_id if anilist_id > 0 else None
+
+    @classmethod
+    def query_anilist_by_id(cls, anilist_id: Any) -> Optional[Dict[str, Any]]:
+        """Fetches one AniList light-novel entry by its unique AniList id.
+
+        Used by the manual series mapping action, which accepts an AniList URL
+        or a bare numeric id. The id query is exact and bypasses search ranking,
+        so it cannot drift to a similarly named spin-off such as '... Alter'.
+        """
+        try:
+            target_id = int(anilist_id)
+        except (TypeError, ValueError):
+            return None
+        if target_id <= 0:
+            return None
+        query = """
+        query ($id: Int) {
+          Media (id: $id, type: MANGA, format_in: [NOVEL]) {
+            id
+            title {
+              romaji
+              english
+              native
+            }
+            synonyms
+            format
+            status
+            volumes
+            chapters
+            description(asHtml: false)
+            coverImage {
+              large
+              extraLarge
+            }
+          }
+        }
+        """
+        data = cls._anilist_graphql(
+            {"query": query, "variables": {"id": target_id}},
+            f"AniList id {target_id}",
+        )
+        if not data:
+            return None
+        media = data.get("data", {}).get("Media")
+        result = cls._parse_anilist_media(media)
+        if result is not None:
+            result["anilist_id"] = target_id
         return result
 
     @classmethod

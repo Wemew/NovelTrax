@@ -6,6 +6,7 @@ synonym split path, and alias re-mapping. Runs against a temporary SQLite DB;
 no network, Calibre library, or running app is required.
 """
 
+import asyncio
 import json
 import os
 import sys
@@ -20,6 +21,7 @@ for path in (PROJECT_ROOT, BACKEND_DIR):
 
 from app.database import Database
 import app.scheduler as scheduler_module
+import app.main as main_module
 
 
 def check(condition, message):
@@ -70,6 +72,7 @@ def test_static_contract():
     for marker in (
         '@app.get("/api/series/{series_id}/management")',
         '@app.post("/api/series/{series_id}/identity")',
+        '@app.post("/api/series/{series_id}/anilist")',
         '@app.post("/api/series/{series_id}/synonyms/spin-out")',
         '@app.post("/api/series/{series_id}/aliases/{alias_id}/retarget")',
     ):
@@ -81,6 +84,9 @@ def test_static_contract():
         "function manageSaveIdentity(",
         "series-manage-display-title",
         "series-manage-clear-anilist",
+        "series-manage-anilist-input",
+        "function manageSubmitAniList(",
+        "function manageMapReleaseAniList(",
         "function manageSpinSynonym(",
         "function manageBeginAliasRetarget(",
         "mode: 'new_title'",
@@ -278,6 +284,12 @@ def test_display_identity_edit_and_anilist_clear():
             )
             conn.commit()
         series = db.get_series_by_name("86-EIGHTY-SIX")
+        db.add_series_alias_override("86 Alter", "86-EIGHTY-SIX",
+                                     origin="anilist", actor="anilist")
+        db.cache_novel_metadata(
+            "86-eighth-six",
+            {"title": "86—EIGHTY-SIX Alter", "synopsis": "wrong", "source": "cache"},
+        )
         updated = db.update_series_display_identity(
             series["id"], "86--Eighty-Six", clear_anilist=True, actor="test"
         )
@@ -287,8 +299,231 @@ def test_display_identity_edit_and_anilist_clear():
         check(updated["anilist_id"] is None, "AniList id was not cleared")
         check(updated["anilist_meta_json"] in (None, ""),
               "AniList metadata was not cleared")
+        check(updated["anilist_locked"] == 1,
+              "explicit AniList clear did not lock automatic enrichment")
+        check(db.get_series_alias_overrides() == [],
+              "AniList-derived alias survived the clear")
+        check(db.get_cached_novel_metadata("86-eighth-six") is None,
+              "wrong metadata cache entry survived the clear")
         check(updated["name"] == "86-EIGHTY-SIX",
               "stable tracking name must never change")
+
+        mapped = db.map_series_anilist(
+            series["id"],
+            {
+                "anilist_id": 777,
+                "title": "86--Eighty-Six",
+                "english_title": "86--Eighty-Six",
+                "canonical_title": "86--Eighty-Six",
+                "synonyms": ["86--Eighty-Six", "Eighty Six"],
+                "publication": {"format": "NOVEL", "status": "RELEASING",
+                                "volumes": 13, "chapters": 0},
+                "format": "NOVEL",
+                "status": "RELEASING",
+                "volumes": 13,
+                "chapters": 0,
+            },
+            actor="test",
+        )
+        check(mapped is not None, "manual AniList mapping returned no row")
+        check(mapped["anilist_id"] == 777, "manual AniList id was not stored")
+        check(mapped["anilist_locked"] == 1, "manual mapping did not lock AniList")
+        check(mapped["display_title"] == "86--Eighty-Six",
+              "manual mapping did not apply the chosen title")
+        aliases = db.get_series_alias_overrides()
+        check(any(a["source_name"] == "Eighty Six" and a["target_name"] == "86-EIGHTY-SIX"
+                  for a in aliases), "new AniList synonyms were not registered")
+
+
+def test_anilist_url_parsing_and_id_query():
+    from app.providers.metadata import NovelMetadataProvider
+
+    check(NovelMetadataProvider.parse_anilist_id(
+        "https://anilist.co/manga/123456/86--Eighty-Six/") == 123456,
+        "AniList manga URL was not parsed")
+    check(NovelMetadataProvider.parse_anilist_id(" 42 ") == 42,
+          "bare AniList id was not parsed")
+    check(NovelMetadataProvider.parse_anilist_id("not a link") is None,
+          "invalid AniList input was accepted")
+
+    original = NovelMetadataProvider.__dict__["_anilist_graphql"]
+
+    def fake_graphql(cls, req_payload, label):
+        check(req_payload.get("variables", {}).get("id") == 42,
+              "id lookup did not send the numeric id")
+        return {
+            "data": {
+                "Media": {
+                    "id": 42,
+                    "title": {"english": "86--Eighty-Six", "romaji": "86", "native": ""},
+                    "synonyms": ["Eighty Six"],
+                    "format": "NOVEL",
+                    "status": "RELEASING",
+                    "volumes": 13,
+                    "chapters": 0,
+                    "description": "Test",
+                    "coverImage": {"large": "https://example.com/cover.jpg"},
+                }
+            }
+        }
+
+    NovelMetadataProvider._anilist_graphql = classmethod(fake_graphql)
+    try:
+        result = NovelMetadataProvider.query_anilist_by_id(42)
+    finally:
+        NovelMetadataProvider._anilist_graphql = original
+    check(result is not None, "AniList id lookup returned no metadata")
+    check(result["anilist_id"] == 42, "AniList id lookup did not preserve the id")
+    check(result["english_title"] == "86--Eighty-Six",
+          "AniList id lookup returned the wrong title")
+
+
+def test_anilist_lock_blocks_auto_refresh():
+    from app.providers.metadata import NovelMetadataProvider
+
+    with tempfile.TemporaryDirectory(prefix="noveltrax_anilist_lock_", ignore_cleanup_errors=True) as tmp:
+        db = Database(os.path.join(tmp, "test.db"))
+        with db.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "INSERT INTO series_tracking (name, anilist_locked) VALUES (?, ?);",
+                ("86-EIGHTY-SIX", 1),
+            )
+            conn.commit()
+        series = db.get_series_by_name("86-EIGHTY-SIX")
+        manager = scheduler_module.TaskManager(db, "/nonexistent", data_dir=tmp)
+        calls = []
+        original_fetch = NovelMetadataProvider.__dict__["fetch_series_metadata"]
+        original_by_id = NovelMetadataProvider.__dict__["query_anilist_by_id"]
+
+        def fake_fetch(cls, title):
+            calls.append(("search", title))
+            return None
+
+        def fake_by_id(cls, anilist_id):
+            calls.append(("id", anilist_id))
+            return None
+
+        NovelMetadataProvider.fetch_series_metadata = classmethod(fake_fetch)
+        NovelMetadataProvider.query_anilist_by_id = classmethod(fake_by_id)
+        try:
+            enrichment = manager.enrich_tracked_series_anilist(limit=5)
+            refresh = manager.refresh_series_metadata(series["id"])
+        finally:
+            NovelMetadataProvider.fetch_series_metadata = original_fetch
+            NovelMetadataProvider.query_anilist_by_id = original_by_id
+
+        check(enrichment.get("synced") == 0,
+              "locked series was synchronised by automatic enrichment")
+        check(calls == [], "locked series still queried AniList: %r" % calls)
+        check("manually cleared/pinned" in (refresh.get("message") or ""),
+              "locked refresh did not explain the manual pin: %r"
+              % refresh.get("message"))
+
+
+def test_locked_refresh_uses_stored_anilist_id():
+    from app.providers.metadata import NovelMetadataProvider
+
+    with tempfile.TemporaryDirectory(prefix="noveltrax_anilist_pin_", ignore_cleanup_errors=True) as tmp:
+        db = Database(os.path.join(tmp, "test.db"))
+        with db.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "INSERT INTO series_tracking "
+                "(name, display_title, anilist_id, anilist_locked) "
+                "VALUES (?,?,?,?)",
+                ("86-EIGHTY-SIX", "86—EIGHTY-SIX Alter", 777, 1),
+            )
+            conn.commit()
+        series = db.get_series_by_name("86-EIGHTY-SIX")
+        manager = scheduler_module.TaskManager(db, "/nonexistent", data_dir=tmp)
+        calls = []
+        original_fetch = NovelMetadataProvider.__dict__["fetch_series_metadata"]
+        original_by_id = NovelMetadataProvider.__dict__["query_anilist_by_id"]
+
+        def fake_fetch(cls, title):
+            calls.append(("search", title))
+            return {"title": "86 Alter", "english_title": "86 Alter",
+                    "synonyms": ["86 Alter"], "anilist_id": 999}
+
+        def fake_by_id(cls, anilist_id):
+            calls.append(("id", anilist_id))
+            return {
+                "anilist_id": anilist_id,
+                "title": "86--Eighty-Six",
+                "english_title": "86--Eighty-Six",
+                "canonical_title": "86--Eighty-Six",
+                "synonyms": ["Eighty Six"],
+                "format": "NOVEL",
+                "status": "RELEASING",
+                "volumes": 13,
+                "chapters": 0,
+            }
+
+        NovelMetadataProvider.fetch_series_metadata = classmethod(fake_fetch)
+        NovelMetadataProvider.query_anilist_by_id = classmethod(fake_by_id)
+        try:
+            result = manager.refresh_series_metadata(series["id"])
+        finally:
+            NovelMetadataProvider.fetch_series_metadata = original_fetch
+            NovelMetadataProvider.query_anilist_by_id = original_by_id
+
+        check(calls == [("id", 777)],
+              "pinned refresh searched by title instead of the stored id: %r" % calls)
+        updated = db.get_series_by_name("86-EIGHTY-SIX")
+        check(updated["anilist_id"] == 777, "pinned refresh lost the AniList id")
+        check(updated["display_title"] == "86--Eighty-Six",
+              "pinned refresh did not apply the exact display title")
+        check("Alter" not in (updated["anilist_meta_json"] or ""),
+              "pinned refresh retained the wrong Alter metadata")
+        check(result.get("status") == "success", "pinned refresh failed: %r" % result)
+
+
+def test_anilist_mapping_route():
+    from app.providers.metadata import NovelMetadataProvider
+
+    with tempfile.TemporaryDirectory(prefix="noveltrax_anilist_route_", ignore_cleanup_errors=True) as tmp:
+        db = Database(os.path.join(tmp, "test.db"))
+        with db.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "INSERT INTO series_tracking (name, display_title, anilist_id) "
+                "VALUES (?,?,?)",
+                ("86-EIGHTY-SIX", "86—EIGHTY-SIX Alter", 999),
+            )
+            conn.commit()
+        series = db.get_series_by_name("86-EIGHTY-SIX")
+        meta = {
+            "anilist_id": 777,
+            "title": "86--Eighty-Six",
+            "english_title": "86--Eighty-Six",
+            "canonical_title": "86--Eighty-Six",
+            "synonyms": ["Eighty Six"],
+            "format": "NOVEL",
+            "status": "RELEASING",
+            "volumes": 13,
+            "chapters": 0,
+        }
+        original_db = main_module.db
+        original_provider = NovelMetadataProvider.__dict__["query_anilist_by_id"]
+        main_module.db = db
+        NovelMetadataProvider.query_anilist_by_id = classmethod(
+            lambda cls, anilist_id: dict(meta, anilist_id=int(anilist_id))
+        )
+        try:
+            response = asyncio.run(main_module.api_map_series_anilist(
+                series["id"],
+                {"url_or_id": "https://anilist.co/manga/777/86--Eighty-Six/"},
+            ))
+        finally:
+            main_module.db = original_db
+            NovelMetadataProvider.query_anilist_by_id = original_provider
+        check(response.status_code == 200, "AniList mapping route did not return 200")
+        updated = db.get_series_by_name("86-EIGHTY-SIX")
+        check(updated["anilist_id"] == 777, "route did not store the AniList id")
+        check(updated["anilist_locked"] == 1, "route did not pin the AniList entry")
+        check(updated["display_title"] == "86--Eighty-Six",
+              "route did not apply the chosen display title")
 
 
 def main():
@@ -299,6 +534,10 @@ def main():
     test_bundle_split_status_and_identity_map()
     test_bundle_release_spin_out_status()
     test_display_identity_edit_and_anilist_clear()
+    test_anilist_url_parsing_and_id_query()
+    test_anilist_lock_blocks_auto_refresh()
+    test_locked_refresh_uses_stored_anilist_id()
+    test_anilist_mapping_route()
     print("series management regression suite PASSED")
 
 
