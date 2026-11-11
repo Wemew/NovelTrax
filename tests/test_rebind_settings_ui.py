@@ -112,7 +112,7 @@ REBIND_HELPER_TEXTS = (
     "Re-index under a new title &mdash; not this series and not any previous series",
     "Detach as a new standalone series",
     "Creates a brand-new series. It will not be linked to the current series or any previous one.",
-    "Only this release (pin)",
+    "Remember this mapping for future releases",
 )
 
 # --- CONTRACT §5.1: partials ------------------------------------------------
@@ -473,7 +473,7 @@ def check_rebind_modal_markup():
     check(remember_start != -1, "base.html: missing the #release-rebind-remember checkbox")
     check(
         "checked" not in source[max(0, remember_start - 120):remember_start + 220],
-        "base.html: the only-this-release pin checkbox must default unchecked",
+        "base.html: the remember-mapping checkbox must default unchecked (only this release)",
     )
     check(
         'id="release-rebind-new-title"' in source,
