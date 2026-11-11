@@ -526,6 +526,75 @@ def test_anilist_mapping_route():
               "route did not apply the chosen display title")
 
 
+def test_publication_metadata_respects_anilist_lock():
+    from app.providers.metadata import NovelMetadataProvider
+
+    with tempfile.TemporaryDirectory(prefix="noveltrax_publication_lock_", ignore_cleanup_errors=True) as tmp:
+        db = Database(os.path.join(tmp, "test.db"))
+        with db.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "INSERT INTO series_tracking (name, anilist_locked, anilist_meta_json) "
+                "VALUES (?,?,?)",
+                ("86 Cleared", 1, ""),
+            )
+            cur.execute(
+                "INSERT INTO series_tracking (name, anilist_locked, anilist_id, "
+                "anilist_meta_json) VALUES (?,?,?,?)",
+                ("86 Pinned", 1, 98610, ""),
+            )
+            conn.commit()
+        cleared = db.get_series_by_name("86 Cleared")
+        pinned = db.get_series_by_name("86 Pinned")
+        manager = scheduler_module.TaskManager(db, "/nonexistent", data_dir=tmp)
+        calls = []
+        original_fetch = NovelMetadataProvider.__dict__["fetch_series_metadata"]
+        original_by_id = NovelMetadataProvider.__dict__["query_anilist_by_id"]
+
+        def fake_fetch(cls, title):
+            calls.append(("search", title))
+            return {"title": "86 Alter", "english_title": "86 Alter",
+                    "synonyms": ["86 Alter"], "anilist_id": 162703,
+                    "format": "NOVEL", "status": "RELEASING", "volumes": 2,
+                    "chapters": 0}
+
+        def fake_by_id(cls, anilist_id):
+            calls.append(("id", anilist_id))
+            return {"anilist_id": anilist_id, "title": "86--Eighty-Six",
+                    "english_title": "86--Eighty-Six", "synonyms": ["Eighty Six"],
+                    "format": "NOVEL", "status": "RELEASING", "volumes": 13,
+                    "chapters": 0}
+
+        NovelMetadataProvider.fetch_series_metadata = classmethod(fake_fetch)
+        NovelMetadataProvider.query_anilist_by_id = classmethod(fake_by_id)
+        try:
+            cleared_result = manager.publication_metadata_for("86 Cleared")
+            pinned_result = manager.publication_metadata_for("86 Pinned")
+        finally:
+            NovelMetadataProvider.fetch_series_metadata = original_fetch
+            NovelMetadataProvider.query_anilist_by_id = original_by_id
+
+        check(cleared_result is None,
+              "cleared locked series returned publication metadata: %r" % cleared_result)
+        check(pinned_result is not None and pinned_result.get("volumes") == 13,
+              "pinned series did not use its exact AniList id: %r" % pinned_result)
+        check(("search", "86 Cleared") not in calls,
+              "cleared locked series fell through to a title search: %r" % calls)
+        check(("search", "86 Pinned") not in calls,
+              "pinned series fell through to a title search: %r" % calls)
+        check(("id", 98610) in calls, "pinned series did not query its stored id")
+
+        # The publication store must not overwrite a locked row's empty meta.
+        db.store_series_publication_metadata(
+            pinned["id"],
+            {"format": "MANGA", "status": "CANCELLED", "volumes": 1, "chapters": 0},
+        )
+        after = db.get_series_by_id(pinned["id"])
+        check(after["anilist_meta_json"] in (None, ""),
+              "publication store overwrote a pinned series")
+        check(cleared["anilist_id"] is None, "cleared series unexpectedly gained an id")
+
+
 def main():
     print("Series management regression suite")
     test_static_contract()
@@ -538,6 +607,7 @@ def main():
     test_anilist_lock_blocks_auto_refresh()
     test_locked_refresh_uses_stored_anilist_id()
     test_anilist_mapping_route()
+    test_publication_metadata_respects_anilist_lock()
     print("series management regression suite PASSED")
 
 

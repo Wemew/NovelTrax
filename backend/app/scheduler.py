@@ -1275,6 +1275,46 @@ class TaskManager:
                     cache[key] = {"data": stored, "ts": now}
                     return dict(stored)
 
+            # A manually pinned/cleared series must never fall through to a
+            # fuzzy title search: an exact stored AniList id is the only allowed
+            # remote lookup, and a cleared row returns no publication metadata.
+            anilist_locked = self._series_anilist_locked(row) if row is not None else False
+            if anilist_locked:
+                stored_id = row.get("anilist_id") if row is not None else None
+                try:
+                    stored_id = int(stored_id) if stored_id else None
+                except (TypeError, ValueError):
+                    stored_id = None
+                if stored_id is None:
+                    return None
+                effective_budget = budget
+                if effective_budget is None:
+                    effective_budget = {"remaining": PUBLICATION_ONE_OFF_BUDGET}
+                try:
+                    remaining = int(effective_budget.get("remaining", 0) or 0)
+                except (AttributeError, TypeError, ValueError):
+                    remaining = 0
+                if remaining <= 0:
+                    return None
+                try:
+                    effective_budget["remaining"] = remaining - 1
+                except Exception:
+                    pass
+                try:
+                    from app.providers.metadata import NovelMetadataProvider
+                    meta = NovelMetadataProvider.query_anilist_by_id(stored_id)
+                except Exception as exc:
+                    logger.debug(
+                        "Pinned publication metadata lookup failed for '%s': %s",
+                        name, exc,
+                    )
+                    meta = None
+                publication = self._publication_from_meta(meta)
+                if not self._publication_usable(publication):
+                    return None
+                cache[key] = {"data": publication, "ts": now}
+                return dict(publication)
+
             # Bounded provider lookup (one call per series per TTL at most).
             effective_budget = budget
             if effective_budget is None:

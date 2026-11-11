@@ -1625,9 +1625,12 @@ class Database:
             if found is None:
                 return
             row = dict(found)
-            if _coerce_int(row.get("identity_locked")) == 1:
+            if (
+                _coerce_int(row.get("identity_locked")) == 1
+                or _coerce_int(row.get("anilist_locked")) == 1
+            ):
                 logger.debug(
-                    "Skipping publication metadata store for identity-locked series %r",
+                    "Skipping publication metadata store for locked series %r",
                     _coerce_text(row.get("name")),
                 )
                 return
