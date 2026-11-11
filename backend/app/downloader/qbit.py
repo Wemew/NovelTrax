@@ -867,3 +867,41 @@ class QBitClient:
         except Exception as e:
             logger.warning(f"Error calling {path}: {e}")
             return False
+
+
+def qbit_client_from_settings(settings: Dict[str, Any]) -> QBitClient:
+    """Builds a QBitClient from persisted app_settings.
+
+    Shared by the HTTP layer and the background selective-download filter so
+    both use exactly the same engine configuration.
+    """
+    settings = settings if isinstance(settings, dict) else {}
+    url = str(settings.get("qbit_url", "") or "").strip()
+    host = str(settings.get("qbit_host", "") or "").strip()
+    port_str = str(settings.get("qbit_port", "") or "").strip()
+    use_ssl_str = str(settings.get("qbit_use_ssl", "false")).lower()
+    enabled_str = str(settings.get("qbit_enabled", "true")).lower()
+    is_enabled = enabled_str not in ("false", "0", "no", "off")
+
+    if url and not host:
+        parsed = urllib.parse.urlparse(url)
+        host = parsed.hostname or "localhost"
+        port = parsed.port or (443 if parsed.scheme == "https" else 8080)
+        use_ssl = parsed.scheme == "https"
+    else:
+        host = host or "localhost"
+        port = int(port_str) if port_str.isdigit() else 8080
+        use_ssl = use_ssl_str in ("true", "1", "yes")
+
+    return QBitClient(
+        host=host,
+        port=port,
+        username=settings.get("qbit_username", "admin"),
+        password=settings.get("qbit_password", ""),
+        use_ssl=use_ssl,
+        base_url=url if url else None,
+        enabled=is_enabled,
+        category=settings.get("qbit_category", "novels") or "novels",
+        tags=settings.get("qbit_tags", "noveltrax") or "noveltrax",
+        savepath=settings.get("qbit_savepath", os.getenv("DOWNLOAD_DIR", "/downloads")),
+    )

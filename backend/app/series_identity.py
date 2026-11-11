@@ -905,8 +905,8 @@ def build_alias_lookup(
         )
         if not target or not source_norm:
             continue
-        if source_norm == normalize_text(target):
-            continue
+        # A deliberate source==target row is kept: it shadows a stale display/
+        # AniList spelling after a synonym split into its own series.
         lookup[source_norm] = {
             "target_name": target,
             "target_norm": normalize_text(target),

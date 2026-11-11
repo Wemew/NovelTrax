@@ -135,9 +135,17 @@
                             {{ s.last_sync[:10] if s.last_sync else 'Never' }}
                         </td>
 
-                        <!-- Actions: manual Calibre match + AniList refresh -->
+                        <!-- Actions: manage releases/synonyms + manual Calibre match + AniList refresh -->
                         <td class="py-4 px-4 text-right nt-cell-actions" data-label="Actions">
                             <div class="flex items-center justify-end gap-1.5">
+                                <button type="button" class="series-manage-btn px-2 py-1.5 rounded-lg bg-slate-800 hover:bg-brand-500/20 text-slate-300 hover:text-brand-300 border border-slate-700 hover:border-brand-500/30 transition-colors flex items-center gap-1"
+                                        data-series-id="{{ s.id }}" data-series-name="{{ s.name }}" data-series-display="{{ s.display_title or s.name }}"
+                                        onclick="openSeriesManagement(this.dataset.seriesId, this.dataset.seriesDisplay)"
+                                        aria-label="Manage releases and synonyms for {{ s.display_title or s.name }}"
+                                        title="See registered releases and synonyms; split or re-match them">
+                                    <i data-lucide="list-tree" class="w-3.5 h-3.5"></i>
+                                    <span class="hidden sm:inline text-[11px] font-semibold">Manage</span>
+                                </button>
                                 <button type="button" class="series-match-btn p-1.5 rounded-lg bg-slate-800 hover:bg-brand-500/20 text-slate-400 hover:text-brand-300 border border-slate-700 hover:border-brand-500/30 transition-colors"
                                         data-series-id="{{ s.id }}" data-series-name="{{ s.name }}"
                                         onclick="openSeriesMatchModal(this.dataset.seriesName, this.dataset.seriesId)"
@@ -211,6 +219,45 @@
         </div>
         <div id="series-match-results" class="mt-3 max-h-72 overflow-y-auto space-y-1.5 custom-scrollbar"></div>
         <p class="text-[10px] text-slate-500 mt-3">Choosing a series links this tracker to the Calibre series, merges duplicate trackers, re-keys releases and stores an alias so future releases match automatically. Already linked? Picking another series re-links and merges the tracker again.</p>
+    </div>
+</div>
+
+<!-- Per-series management: registered releases, synonyms, split/re-map actions -->
+<div id="series-manage-modal" class="hidden fixed inset-0 z-50">
+    <div class="absolute inset-0 bg-slate-950/80 backdrop-blur-sm" onclick="closeSeriesManagement()" aria-hidden="true"></div>
+    <div class="relative z-10 w-full max-w-3xl mx-auto my-6 sm:my-10 bg-darkcard border border-slate-800/80 rounded-2xl shadow-2xl max-h-[92vh] flex flex-col overflow-hidden" role="dialog" aria-modal="true" aria-labelledby="series-manage-title">
+        <div class="flex items-start justify-between gap-3 px-5 pt-5 pb-3 border-b border-slate-800/70">
+            <div class="min-w-0">
+                <h2 id="series-manage-title" class="text-base font-display font-bold text-white flex items-center gap-2 break-words-anywhere">
+                    <i data-lucide="list-tree" class="w-4 h-4 text-brand-400 shrink-0"></i>
+                    <span id="series-manage-name">Series</span>
+                </h2>
+                <p id="series-manage-meta" class="text-[11px] text-slate-400 mt-1 font-mono break-words-anywhere"></p>
+            </div>
+            <button type="button" onclick="closeSeriesManagement()" class="p-1.5 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-white transition-colors" title="Close (Esc)" aria-label="Close series management">
+                <i data-lucide="x" class="w-4 h-4"></i>
+            </button>
+        </div>
+        <div class="flex flex-wrap items-center gap-2 px-5 py-3 border-b border-slate-800/70 bg-slate-950/30">
+            <button type="button" id="series-manage-match" onclick="manageSeriesMatch()" class="nt-btn nt-btn-primary">
+                <i data-lucide="link" class="w-3.5 h-3.5"></i>
+                Match to Calibre
+            </button>
+            <button type="button" onclick="loadSeriesManagement()" class="nt-btn nt-btn-secondary">
+                <i data-lucide="refresh-cw" class="w-3.5 h-3.5 text-brand-400"></i>
+                Refresh
+            </button>
+            <span class="ml-auto flex items-center gap-1.5 text-[10px] text-slate-400 font-mono">
+                <span id="series-manage-count-releases" class="px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700">0 releases</span>
+                <span id="series-manage-count-aliases" class="px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700">0 synonyms</span>
+            </span>
+        </div>
+        <div id="series-manage-body" class="overflow-y-auto custom-scrollbar p-5 space-y-6">
+            <div class="flex items-center justify-center gap-2 py-10 text-xs text-slate-400">
+                <i data-lucide="loader" class="w-4 h-4 animate-spin text-brand-400"></i>
+                Loading series details…
+            </div>
+        </div>
     </div>
 </div>
 
@@ -502,4 +549,607 @@
     document.addEventListener('keydown', (evt) => {
         if (evt.key === 'Escape') closeSeriesMatchModal();
     });</script>
+
+<script>
+    // Per-series management: registered releases + synonyms, split and re-map.
+    let _seriesManageState = {
+        seriesId: null,
+        seriesName: '',
+        data: null,
+        targetAlias: null,
+        targetTimer: null,
+        targetSeq: 0,
+        opener: null
+    };
+
+    function _manageEl(tag, className, text) {
+        const el = document.createElement(tag);
+        if (className) el.className = className;
+        if (text !== undefined) el.textContent = text == null ? '' : String(text);
+        return el;
+    }
+
+    function _manageChip(text, className) {
+        return _manageEl('span', 'inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold border ' + (className || 'bg-slate-800 text-slate-300 border-slate-700'), text);
+    }
+
+    function _manageVolume(value) {
+        if (value === null || value === undefined || value === '') return '';
+        const num = Number(value);
+        if (!Number.isFinite(num)) return String(value);
+        return Number.isInteger(num) ? String(num) : String(num);
+    }
+
+    function _manageStatusChip(status) {
+        const value = String(status || '').toUpperCase();
+        if (value === 'REQUESTED') return _manageChip('REQUESTED', 'bg-amber-500/15 text-amber-300 border-amber-500/30');
+        if (value === 'IN_CALIBRE') return _manageChip('IN CALIBRE', 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30');
+        if (value === 'IGNORED') return _manageChip('IGNORED', 'bg-slate-800 text-slate-400 border-slate-700');
+        if (value === 'NEW') return _manageChip('NEW', 'bg-sky-500/15 text-sky-300 border-sky-500/30');
+        return _manageChip(value || 'UNKNOWN', 'bg-slate-800 text-slate-300 border-slate-700');
+    }
+
+    function openSeriesManagement(seriesId, displayName) {
+        const id = Number(seriesId) || 0;
+        if (!id) return;
+        _seriesManageState.seriesId = id;
+        _seriesManageState.seriesName = displayName || 'Series';
+        _seriesManageState.data = null;
+        _seriesManageState.targetAlias = null;
+        _seriesManageState.opener = document.activeElement;
+        const modal = document.getElementById('series-manage-modal');
+        if (!modal) return;
+        modal.classList.remove('hidden');
+        document.getElementById('series-manage-name').textContent = _seriesManageState.seriesName;
+        document.getElementById('series-manage-meta').textContent = 'Loading…';
+        document.getElementById('series-manage-body').innerHTML =
+            '<div class="flex items-center justify-center gap-2 py-10 text-xs text-slate-400">' +
+            '<i data-lucide="loader" class="w-4 h-4 animate-spin text-brand-400"></i>Loading series details…</div>';
+        if (window.lucide) lucide.createIcons();
+        loadSeriesManagement();
+    }
+
+    function closeSeriesManagement() {
+        const modal = document.getElementById('series-manage-modal');
+        if (modal) modal.classList.add('hidden');
+        if (_seriesManageState.targetTimer) {
+            clearTimeout(_seriesManageState.targetTimer);
+            _seriesManageState.targetTimer = null;
+        }
+        _seriesManageState.targetSeq += 1;
+        _seriesManageState.targetAlias = null;
+        const opener = _seriesManageState.opener;
+        _seriesManageState.opener = null;
+        if (opener && document.contains(opener) && typeof opener.focus === 'function') {
+            try { opener.focus(); } catch (err) {}
+        }
+    }
+
+    async function loadSeriesManagement() {
+        const id = _seriesManageState.seriesId;
+        if (!id) return;
+        try {
+            const res = await fetch(`/api/series/${id}/management`);
+            const data = await res.json();
+            if (!res.ok || data.status !== 'success') {
+                throw new Error(data.detail || data.message || 'Could not load series details');
+            }
+            _seriesManageState.data = data;
+            renderSeriesManagement(data);
+        } catch (err) {
+            const body = document.getElementById('series-manage-body');
+            if (!body) return;
+            body.textContent = '';
+            const box = _manageEl('div', 'rounded-xl border border-rose-500/30 bg-rose-500/10 p-4 text-xs text-rose-200');
+            box.textContent = `Could not load series details: ${err}`;
+            body.appendChild(box);
+        }
+    }
+
+    function renderSeriesManagement(data) {
+        const series = data.series || {};
+        const aliases = Array.isArray(data.aliases) ? data.aliases : [];
+        const releases = Array.isArray(data.releases) ? data.releases : [];
+        const anilistTitles = Array.isArray(data.anilist_titles) ? data.anilist_titles : [];
+        const nameEl = document.getElementById('series-manage-name');
+        const metaEl = document.getElementById('series-manage-meta');
+        if (nameEl) nameEl.textContent = series.display_title || series.name || 'Series';
+        if (metaEl) {
+            const parts = [series.name || ''];
+            if (series.authors) parts.push(series.authors);
+            parts.push(series.calibre_series_id ? `Calibre #${series.calibre_series_id}` : 'Not linked to Calibre');
+            metaEl.textContent = parts.filter(Boolean).join(' · ');
+        }
+        const countReleases = document.getElementById('series-manage-count-releases');
+        const countAliases = document.getElementById('series-manage-count-aliases');
+        if (countReleases) countReleases.textContent = `${releases.length} release${releases.length === 1 ? '' : 's'}`;
+        if (countAliases) countAliases.textContent = `${aliases.length} synonym${aliases.length === 1 ? '' : 's'}`;
+
+        const body = document.getElementById('series-manage-body');
+        if (!body) return;
+        body.textContent = '';
+
+        // --- Display identity ---------------------------------------------
+        const identitySection = _manageEl('section', 'rounded-xl border border-slate-800/70 bg-slate-900/60 p-3 space-y-2');
+        const identityHead = _manageEl('h3', 'text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-2');
+        const identityIcon = _manageEl('i', 'w-4 h-4 text-brand-400');
+        identityIcon.setAttribute('data-lucide', 'badge');
+        identityHead.appendChild(identityIcon);
+        identityHead.appendChild(document.createTextNode('Display identity'));
+        identitySection.appendChild(identityHead);
+        identitySection.appendChild(_manageEl(
+            'p', 'text-[11px] text-slate-500',
+            `Stable matching key: ${series.name || '—'} · `
+            + (series.calibre_series_id
+                ? `Calibre #${series.calibre_series_id} · ${Number(series.book_count) || 0} books · latest index ${_manageVolume(series.latest_index) || '0'}`
+                : 'not linked to Calibre')
+        ));
+        const titleLabel = _manageEl('label', 'block text-[10px] uppercase tracking-wider text-slate-400 font-semibold', 'Display title');
+        const titleInput = _manageEl('input', 'mt-1 w-full bg-slate-950/70 border border-slate-700/80 rounded-xl px-3 py-2 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-brand-500');
+        titleInput.id = 'series-manage-display-title';
+        titleInput.type = 'text';
+        titleInput.maxLength = 300;
+        titleInput.value = series.display_title || series.name || '';
+        titleInput.placeholder = series.name || 'Series display title';
+        titleLabel.appendChild(titleInput);
+        identitySection.appendChild(titleLabel);
+        const clearRow = _manageEl('label', 'flex items-start gap-2 cursor-pointer pt-1');
+        const clearBox = _manageEl('input', 'mt-0.5 w-4 h-4 rounded bg-slate-950 border-slate-700 text-brand-600 focus:ring-brand-500');
+        clearBox.id = 'series-manage-clear-anilist';
+        clearBox.type = 'checkbox';
+        clearRow.appendChild(clearBox);
+        const clearCopy = _manageEl('span', 'min-w-0');
+        clearCopy.appendChild(_manageEl('span', 'block text-[11px] font-semibold text-slate-200', 'Clear wrong AniList metadata'));
+        clearCopy.appendChild(_manageEl('span', 'block text-[10px] text-slate-500', 'Removes the AniList id, titles and publication index for this tracker. The Calibre link and release history stay untouched.'));
+        clearRow.appendChild(clearCopy);
+        identitySection.appendChild(clearRow);
+        const identityActions = _manageEl('div', 'flex flex-wrap items-center gap-2 pt-1');
+        const saveIdentity = _manageEl('button', 'nt-btn nt-btn-primary', 'Save identity');
+        saveIdentity.type = 'button';
+        saveIdentity.addEventListener('click', () => manageSaveIdentity(saveIdentity));
+        identityActions.appendChild(saveIdentity);
+        const useStable = _manageEl('button', 'nt-btn nt-btn-secondary', 'Use stable name');
+        useStable.type = 'button';
+        useStable.title = `Set the display title to "${series.name || ''}"`;
+        useStable.addEventListener('click', () => {
+            const input = document.getElementById('series-manage-display-title');
+            if (input) input.value = series.name || '';
+        });
+        identityActions.appendChild(useStable);
+        if (series.calibre_series_id) {
+            const recheck = _manageEl('button', 'nt-btn nt-btn-secondary', 'Recheck Calibre');
+            recheck.type = 'button';
+            recheck.title = 'Re-read Calibre ownership and latest index for this series';
+            recheck.addEventListener('click', () => manageRecheckCalibre(recheck));
+            identityActions.appendChild(recheck);
+        }
+        identitySection.appendChild(identityActions);
+        body.appendChild(identitySection);
+
+        // --- Releases -----------------------------------------------------
+        const relSection = _manageEl('section', 'space-y-3');
+        const relHead = _manageEl('div', 'flex items-center justify-between gap-2');
+        const relTitle = _manageEl('h3', 'text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-2');
+        relTitle.appendChild(_manageEl('i', 'w-4 h-4 text-brand-400'));
+        relTitle.lastChild.setAttribute('data-lucide', 'library');
+        relTitle.appendChild(document.createTextNode(`Registered releases (${releases.length})`));
+        relHead.appendChild(relTitle);
+        relSection.appendChild(relHead);
+        if (!releases.length) {
+            relSection.appendChild(_manageEl('p', 'text-[11px] text-slate-500 rounded-xl border border-slate-800/70 bg-slate-900/60 p-3', 'No releases are currently registered to this series.'));
+        } else {
+            const list = _manageEl('div', 'space-y-2');
+            releases.forEach((rel) => list.appendChild(_manageReleaseCard(rel)));
+            relSection.appendChild(list);
+        }
+        body.appendChild(relSection);
+
+        // --- Synonyms -----------------------------------------------------
+        const synSection = _manageEl('section', 'space-y-3');
+        const synHead = _manageEl('div', 'flex items-center justify-between gap-2');
+        const synTitle = _manageEl('h3', 'text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-2');
+        const synIcon = _manageEl('i', 'w-4 h-4 text-amber-400');
+        synIcon.setAttribute('data-lucide', 'tags');
+        synTitle.appendChild(synIcon);
+        synTitle.appendChild(document.createTextNode(`Registered synonyms (${aliases.length})`));
+        synHead.appendChild(synTitle);
+        synSection.appendChild(synHead);
+        synSection.appendChild(_manageEl('p', 'text-[11px] text-slate-500', 'Alias mappings are used by automatic matching. Split one out to give it its own series identity, or re-map it to another tracked/Calibre series.'));
+
+        if (!aliases.length) {
+            synSection.appendChild(_manageEl('p', 'text-[11px] text-slate-500 rounded-xl border border-slate-800/70 bg-slate-900/60 p-3', 'No alias mappings are registered for this series.'));
+        } else {
+            const aliasList = _manageEl('div', 'space-y-2');
+            aliases.forEach((alias) => aliasList.appendChild(_manageAliasCard(alias)));
+            synSection.appendChild(aliasList);
+        }
+
+        if (anilistTitles.length) {
+            const anilistHead = _manageEl('p', 'pt-1 text-[10px] uppercase tracking-wider text-slate-400 font-semibold', `AniList titles (${anilistTitles.length})`);
+            synSection.appendChild(anilistHead);
+            const chips = _manageEl('div', 'flex flex-wrap gap-1.5');
+            anilistTitles.forEach((title) => {
+                const chip = _manageEl('span', 'inline-flex items-center gap-1.5 px-2 py-1 rounded-lg bg-slate-900/70 border border-slate-700 text-[11px] text-slate-300');
+                chip.appendChild(document.createTextNode(title));
+                const split = _manageEl('button', 'text-[10px] font-semibold text-amber-300 hover:text-amber-200 underline underline-offset-2');
+                split.type = 'button';
+                split.textContent = 'Split';
+                split.title = `Create a separate series from the AniList title "${title}"`;
+                split.addEventListener('click', () => manageSpinSynonym(null, title, false));
+                chip.appendChild(split);
+                chips.appendChild(chip);
+            });
+            synSection.appendChild(chips);
+        }
+        body.appendChild(synSection);
+
+        // --- Alias re-map picker -----------------------------------------
+        const picker = _manageEl('div', 'hidden rounded-xl border border-brand-500/30 bg-brand-500/5 p-3 space-y-2');
+        picker.id = 'series-manage-target-picker';
+        const pickerTitle = _manageEl('p', 'text-[11px] text-slate-300 font-semibold', '');
+        pickerTitle.id = 'series-manage-target-title';
+        picker.appendChild(pickerTitle);
+        const pickerInput = _manageEl('input', 'w-full bg-slate-950/70 border border-slate-700/80 rounded-xl px-3 py-2 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-brand-500');
+        pickerInput.id = 'series-manage-target-search';
+        pickerInput.type = 'text';
+        pickerInput.autocomplete = 'off';
+        pickerInput.placeholder = 'Search tracked or Calibre series…';
+        pickerInput.addEventListener('input', () => manageTargetSearchInput());
+        picker.appendChild(pickerInput);
+        const pickerResults = _manageEl('div', 'max-h-56 overflow-y-auto custom-scrollbar space-y-1');
+        pickerResults.id = 'series-manage-target-results';
+        picker.appendChild(pickerResults);
+        body.appendChild(picker);
+
+        body.appendChild(_manageEl('div', 'h-1'));
+        if (window.lucide) lucide.createIcons();
+    }
+
+    async function manageSaveIdentity(btn) {
+        const id = _seriesManageState.seriesId;
+        if (!id) return;
+        const input = document.getElementById('series-manage-display-title');
+        const clearBox = document.getElementById('series-manage-clear-anilist');
+        if (!input) return;
+        const displayTitle = input.value.trim();
+        const clearAnilist = !!(clearBox && clearBox.checked);
+        if (btn) btn.disabled = true;
+        try {
+            const res = await fetch(`/api/series/${id}/identity`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    display_title: displayTitle,
+                    clear_anilist: clearAnilist
+                })
+            });
+            const data = await res.json();
+            if (res.ok && data.status === 'success') {
+                showToast(clearAnilist
+                    ? 'Display identity saved and wrong AniList metadata cleared'
+                    : 'Display identity saved', 'success');
+                setTimeout(() => location.reload(), 700);
+            } else {
+                showToast(data.detail || data.message || 'Could not update the series identity', 'error');
+            }
+        } catch (err) {
+            showToast(`Error: ${err}`, 'error');
+        } finally {
+            if (btn) btn.disabled = false;
+        }
+    }
+
+    async function manageRecheckCalibre(btn) {
+        const id = _seriesManageState.seriesId;
+        if (!id) return;
+        if (btn) btn.disabled = true;
+        try {
+            const res = await fetch(`/api/series/${id}/recheck-calibre`, { method: 'POST' });
+            const data = await res.json();
+            if (res.ok && (data.status === 'success' || data.status === 'ok')) {
+                showToast(data.message || 'Calibre ownership and latest index refreshed', 'success');
+                setTimeout(() => location.reload(), 700);
+            } else {
+                showToast(data.detail || data.message || 'Could not recheck Calibre', 'error');
+            }
+        } catch (err) {
+            showToast(`Error: ${err}`, 'error');
+        } finally {
+            if (btn) btn.disabled = false;
+        }
+    }
+
+    function _manageReleaseCard(rel) {
+        const card = _manageEl('div', 'rounded-xl border border-slate-800/70 bg-slate-900/60 p-3 space-y-2');
+        const top = _manageEl('div', 'flex items-start justify-between gap-2');
+        const left = _manageEl('div', 'min-w-0');
+        const title = _manageEl('p', 'text-xs font-semibold text-white break-words-anywhere', rel.title || 'Untitled release');
+        left.appendChild(title);
+        const metaParts = [];
+        if (rel.volume !== null && rel.volume !== undefined) metaParts.push(`Vol. ${_manageVolume(rel.volume)}`);
+        if (rel.pub_date) metaParts.push(String(rel.pub_date).slice(0, 10));
+        if (rel.source_feed_name) metaParts.push(rel.source_feed_name);
+        left.appendChild(_manageEl('p', 'text-[10px] text-slate-500 font-mono mt-0.5 break-words-anywhere', metaParts.join(' · ') || 'No volume metadata'));
+        top.appendChild(left);
+        const chips = _manageEl('div', 'flex flex-wrap items-center justify-end gap-1.5 shrink-0');
+        chips.appendChild(_manageStatusChip(rel.status));
+        if (rel.series_pinned) {
+            chips.appendChild(_manageChip('PINNED', 'bg-cyan-500/10 text-cyan-300 border-cyan-500/30'));
+        }
+        if (rel.download_state && rel.download_state.state && rel.download_state.state !== 'not_downloaded' && rel.download_state.state !== 'in_calibre') {
+            const ds = rel.download_state;
+            const cls = ds.state === 'downloaded' ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+                : ds.state === 'downloading' ? 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30'
+                : ds.state === 'failed' ? 'bg-rose-500/15 text-rose-300 border-rose-500/30'
+                : 'bg-slate-800 text-slate-300 border-slate-700';
+            chips.appendChild(_manageChip(ds.label || ds.state, cls));
+        }
+        top.appendChild(chips);
+        card.appendChild(top);
+        const actions = _manageEl('div', 'flex flex-wrap items-center gap-2 pt-0.5');
+        const rebind = _manageEl('button', 'nt-btn nt-btn-secondary', 'Re-bind');
+        rebind.type = 'button';
+        rebind.title = 'Move this release to another series or Calibre match';
+        rebind.addEventListener('click', () => manageRebindRelease(rel));
+        actions.appendChild(rebind);
+        const spin = _manageEl('button', 'nt-btn nt-btn-secondary text-amber-200 border-amber-500/30 hover:bg-amber-500/10', 'Spin out');
+        spin.type = 'button';
+        spin.title = 'Create a separate series from this release';
+        spin.addEventListener('click', () => manageSpinRelease(rel));
+        actions.appendChild(spin);
+        card.appendChild(actions);
+        return card;
+    }
+
+    function _manageAliasCard(alias) {
+        const card = _manageEl('div', 'rounded-xl border border-slate-800/70 bg-slate-900/60 p-3 space-y-2');
+        const top = _manageEl('div', 'flex items-start justify-between gap-2');
+        const left = _manageEl('div', 'min-w-0');
+        left.appendChild(_manageEl('p', 'text-xs font-semibold text-white break-words-anywhere', alias.source_name || 'Unnamed synonym'));
+        const origin = alias.origin === 'manual' ? 'manual mapping' : (alias.origin || 'learned mapping');
+        const selfMapped = !!alias.self_mapped;
+        const meta = [
+            selfMapped ? 'identity mapping (shadows the old spelling)' : `→ ${alias.target_name || 'this series'}`,
+            origin
+        ];
+        if (alias.calibre_series_id) meta.push(`Calibre #${alias.calibre_series_id}`);
+        left.appendChild(_manageEl('p', 'text-[10px] text-slate-500 font-mono mt-0.5 break-words-anywhere', meta.join(' · ')));
+        if (selfMapped) {
+            const shadow = _manageEl('span', 'inline-flex items-center px-1.5 py-0.5 rounded bg-brand-500/10 text-brand-300 border border-brand-500/30 text-[9px] font-semibold mt-1', 'SHADOW MAP');
+            left.appendChild(shadow);
+        }
+        top.appendChild(left);
+        const actions = _manageEl('div', 'flex flex-wrap items-center justify-end gap-1.5 shrink-0');
+        const spin = _manageEl('button', 'nt-btn nt-btn-secondary text-amber-200 border-amber-500/30 hover:bg-amber-500/10', 'Split out');
+        spin.type = 'button';
+        spin.title = `Give "${alias.source_name}" its own series identity`;
+        spin.addEventListener('click', () => manageSpinSynonym(alias.id, alias.source_name, true));
+        actions.appendChild(spin);
+        const remap = _manageEl('button', 'nt-btn nt-btn-secondary', 'Re-map');
+        remap.type = 'button';
+        remap.title = 'Point this synonym at another tracked or Calibre series';
+        remap.addEventListener('click', () => manageBeginAliasRetarget(alias.id, alias.source_name));
+        actions.appendChild(remap);
+        top.appendChild(actions);
+        card.appendChild(top);
+        return card;
+    }
+
+    function manageRebindRelease(rel) {
+        const sourceSeries = (_seriesManageState.data && _seriesManageState.data.series && _seriesManageState.data.series.name) || _seriesManageState.seriesName;
+        const releaseId = Number(rel && rel.id) || 0;
+        if (!releaseId) return;
+        closeSeriesManagement();
+        if (typeof openReleaseRebindModal === 'function') {
+            openReleaseRebindModal({
+                releaseId,
+                releaseTitle: rel.title || '',
+                seriesName: sourceSeries
+            });
+        }
+    }
+
+    async function manageSpinRelease(rel) {
+        const releaseId = Number(rel && rel.id) || 0;
+        if (!releaseId) return;
+        const currentSeries = rel.series_name || _seriesManageState.seriesName || 'Series';
+        const proposed = prompt(
+            `Spin "${rel.title || 'this release'}" out into its own series.\n\nNew series title:`,
+            `${currentSeries} (split)`
+        );
+        if (proposed === null) return;
+        const newName = proposed.trim();
+        if (!newName) {
+            showToast('A new series title is required', 'error');
+            return;
+        }
+        try {
+            const res = await fetch(`/api/releases/${releaseId}/rebind`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ mode: 'new_title', target_name: newName })
+            });
+            const data = await res.json();
+            if (res.ok && data.status === 'success') {
+                showToast(data.message || `Release split into "${data.series_name || newName}"`, 'success');
+                setTimeout(() => location.reload(), 700);
+            } else {
+                showToast(data.detail || data.message || 'Could not split this release', 'error');
+            }
+        } catch (err) {
+            showToast(`Error: ${err}`, 'error');
+        }
+    }
+
+    async function manageSpinSynonym(aliasId, sourceName, fromAlias) {
+        const source = String(sourceName || '').trim();
+        if (!source) return;
+        const current = (_seriesManageState.data && _seriesManageState.data.series && _seriesManageState.data.series.name) || _seriesManageState.seriesName;
+        const proposed = prompt(`Split "${source}" out of "${current}" into its own series.\n\nNew series name:`, source);
+        if (proposed === null) return;
+        const newName = proposed.trim();
+        if (!newName) {
+            showToast('A new series name is required', 'error');
+            return;
+        }
+        const moveReleases = confirm('Also move releases whose titles match this synonym to the new series?');
+        try {
+            const res = await fetch(`/api/series/${_seriesManageState.seriesId}/synonyms/spin-out`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    alias_id: fromAlias ? aliasId : null,
+                    source_name: source,
+                    new_name: newName,
+                    move_matching_releases: moveReleases
+                })
+            });
+            const data = await res.json();
+            if (res.ok && data.status === 'success') {
+                showToast(`Split "${source}" into "${data.series_name}"${data.moved_releases ? ` (${data.moved_releases} release(s) moved)` : ''}`, 'success');
+                setTimeout(() => location.reload(), 800);
+            } else {
+                showToast(data.detail || data.message || 'Could not split this synonym', 'error');
+            }
+        } catch (err) {
+            showToast(`Error: ${err}`, 'error');
+        }
+    }
+
+    function manageBeginAliasRetarget(aliasId, sourceName) {
+        const picker = document.getElementById('series-manage-target-picker');
+        const title = document.getElementById('series-manage-target-title');
+        const input = document.getElementById('series-manage-target-search');
+        const results = document.getElementById('series-manage-target-results');
+        if (!picker || !input || !results) return;
+        _seriesManageState.targetAlias = { id: aliasId, source: sourceName };
+        if (title) title.textContent = `Re-map "${sourceName}" to another series`;
+        picker.classList.remove('hidden');
+        input.value = '';
+        results.textContent = '';
+        picker.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        input.focus();
+        manageSearchTargets('');
+    }
+
+    function manageTargetSearchInput() {
+        const input = document.getElementById('series-manage-target-search');
+        if (!input) return;
+        if (_seriesManageState.targetTimer) clearTimeout(_seriesManageState.targetTimer);
+        _seriesManageState.targetTimer = setTimeout(() => manageSearchTargets(input.value.trim()), 250);
+    }
+
+    async function manageSearchTargets(query) {
+        const results = document.getElementById('series-manage-target-results');
+        if (!results) return;
+        const seq = ++_seriesManageState.targetSeq;
+        results.textContent = '';
+        results.appendChild(_manageEl('p', 'text-[11px] text-slate-500 px-2 py-1.5', 'Searching…'));
+        const params = new URLSearchParams();
+        if (query) params.set('search', query);
+        params.set('limit', '25');
+        try {
+            const [trackedRes, calibreRes] = await Promise.all([
+                fetch(`/api/series?${params.toString()}`),
+                fetch(`/api/calibre/series?${params.toString()}`)
+            ]);
+            if (seq !== _seriesManageState.targetSeq) return;
+            const trackedData = trackedRes.ok ? await trackedRes.json() : {};
+            const calibreData = calibreRes.ok ? await calibreRes.json() : {};
+            if (seq !== _seriesManageState.targetSeq) return;
+            const merged = [];
+            const seenCalibre = new Set();
+            const currentSeriesId = Number(_seriesManageState.seriesId) || 0;
+            const currentCalibreId = Number((_seriesManageState.data && _seriesManageState.data.series || {}).calibre_series_id) || 0;
+            (trackedData.series || []).forEach((row) => {
+                if (Number(row.id) === currentSeriesId) return;
+                const cid = Number(row.calibre_series_id) || 0;
+                if (cid && cid === currentCalibreId) return;
+                if (cid) seenCalibre.add(cid);
+                merged.push({
+                    kind: 'tracked',
+                    name: row.name || '',
+                    display: row.display_title || row.name || '',
+                    calibreId: cid || null,
+                    bookCount: Number(row.book_count) || 0
+                });
+            });
+            (calibreData.series || []).forEach((row) => {
+                const cid = Number(row.id) || 0;
+                if (cid && cid === currentCalibreId) return;
+                if (cid && seenCalibre.has(cid)) return;
+                merged.push({
+                    kind: 'calibre',
+                    name: row.name || '',
+                    display: row.display_title || row.name || '',
+                    calibreId: cid || null,
+                    bookCount: Number(row.book_count) || 0
+                });
+            });
+            results.textContent = '';
+            if (!merged.length) {
+                results.appendChild(_manageEl('p', 'text-[11px] text-slate-500 px-2 py-1.5', 'No tracked or Calibre series match this search.'));
+                return;
+            }
+            merged.slice(0, 30).forEach((item) => {
+                const btn = _manageEl('button', 'w-full text-left px-3 py-2 rounded-lg bg-slate-950/50 hover:bg-brand-500/10 border border-slate-800 hover:border-brand-500/30 transition-colors');
+                btn.type = 'button';
+                btn.appendChild(_manageEl('span', 'block text-xs font-semibold text-white break-words-anywhere', item.display || item.name || 'Unnamed series'));
+                const meta = `${item.kind === 'calibre' ? 'Calibre' : 'Tracked'}${item.calibreId ? ` · #${item.calibreId}` : ''}${item.bookCount ? ` · ${item.bookCount} books` : ''}`;
+                btn.appendChild(_manageEl('span', 'block text-[10px] text-slate-500 font-mono mt-0.5', meta));
+                btn.addEventListener('click', () => manageApplyRetarget(item));
+                results.appendChild(btn);
+            });
+        } catch (err) {
+            if (seq !== _seriesManageState.targetSeq) return;
+            results.textContent = '';
+            results.appendChild(_manageEl('p', 'text-[11px] text-rose-300 px-2 py-1.5', `Could not search series: ${err}`));
+        }
+    }
+
+    async function manageApplyRetarget(item) {
+        const alias = _seriesManageState.targetAlias;
+        if (!alias || !item) return;
+        const moveReleases = confirm(`Re-map "${alias.source}" to "${item.name}".\n\nAlso move releases whose titles match this synonym to the target series?`);
+        try {
+            const res = await fetch(`/api/series/${_seriesManageState.seriesId}/aliases/${alias.id}/retarget`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    target_name: item.name,
+                    calibre_series_id: item.calibreId,
+                    move_matching_releases: moveReleases
+                })
+            });
+            const data = await res.json();
+            if (res.ok && data.status === 'success') {
+                showToast(`Re-mapped "${alias.source}" to "${data.series_name}"${data.moved_releases ? ` (${data.moved_releases} release(s) moved)` : ''}`, 'success');
+                const picker = document.getElementById('series-manage-target-picker');
+                if (picker) picker.classList.add('hidden');
+                _seriesManageState.targetAlias = null;
+                loadSeriesManagement();
+            } else {
+                showToast(data.detail || data.message || 'Could not re-map this synonym', 'error');
+            }
+        } catch (err) {
+            showToast(`Error: ${err}`, 'error');
+        }
+    }
+
+    function manageSeriesMatch() {
+        const data = _seriesManageState.data || {};
+        const series = data.series || {};
+        const seriesId = _seriesManageState.seriesId;
+        const seriesName = series.name || _seriesManageState.seriesName;
+        if (!seriesId) return;
+        closeSeriesManagement();
+        if (typeof openSeriesMatchModal === 'function') {
+            openSeriesMatchModal(seriesName, seriesId);
+        }
+    }
+
+    document.addEventListener('keydown', (evt) => {
+        if (evt.key === 'Escape') closeSeriesManagement();
+    });
+</script>
 {% endblock %}

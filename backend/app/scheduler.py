@@ -35,6 +35,7 @@ from app.providers.catchup import (
 )
 from app.notifier.webhook import NotificationService
 from app.covers import CoverCache
+from app.downloader.qbit import qbit_client_from_settings
 
 logger = logging.getLogger("noveltrax.scheduler")
 
@@ -50,6 +51,10 @@ ACTIVITY_MAX_ROWS_KEY = "activity_max_rows"
 ACTIVITY_RETENTION_DAYS_DEFAULT = 90
 ACTIVITY_MAX_ROWS_DEFAULT = 50000
 ACTIVITY_PRUNE_INTERVAL_MINUTES = 360
+
+#: qBittorrent selective file-priority refresh cadence. Torrent metadata can
+#: arrive after submit; the pass retries until file names can be mapped.
+SELECTIVE_FILTER_INTERVAL_SECONDS = 30
 
 #: Webhook event toggles (contract v2 §6.5). Read once per scan/loop; the
 #: default is enabled so existing installs keep sending notifications.
@@ -115,6 +120,11 @@ class TaskManager:
         self._calibre_snapshot_cache: Dict[str, Any] = {
             "ts": 0.0, "series": [], "books": [],
         }
+        # Releases whose qBittorrent file priorities were already resolved, keyed
+        # by (release_id, torrent_hash, wanted tuple). Metadata can take a few
+        # seconds to resolve, so the 30 s pass retries until it can decide, then
+        # stops re-calling the filePrio endpoint for the same wanted set.
+        self._selective_filter_done: set = set()
 
     def _build_media_resolver(self):
         from app.media_type import MediaTypeResolver
@@ -1877,7 +1887,13 @@ class TaskManager:
                 volume_value = float(volume) if volume is not None else None
             except (TypeError, ValueError):
                 volume_value = None
-            new_status = "REQUESTED" if (volume_value is not None and volume_value > 1.0) else "NEW"
+            bundle_volumes = self._volume_list(release.get("volumes_json"))
+            if bundle_volumes:
+                # A bundle has no single volume column; keep it wanted when any
+                # contained volume is beyond the first.
+                new_status = "REQUESTED" if any(v > 1.0 for v in bundle_volumes) else "NEW"
+            else:
+                new_status = "REQUESTED" if (volume_value is not None and volume_value > 1.0) else "NEW"
 
         if stored_status in ("IGNORED", "BLACKLISTED"):
             # Explicit user veto data: a re-bind must not lift it.
@@ -2419,6 +2435,110 @@ class TaskManager:
         )
         return summary
 
+    @staticmethod
+    def _volume_list(raw: Any) -> List[float]:
+        """Parses a release volume JSON column into a rounded float list."""
+        values: Any = raw
+        if isinstance(raw, str):
+            text = raw.strip()
+            if not text:
+                return []
+            try:
+                values = json.loads(text)
+            except (TypeError, ValueError):
+                return []
+        if not isinstance(values, (list, tuple, set)):
+            return []
+        clean: List[float] = []
+        for value in values:
+            try:
+                clean.append(round(float(value), 2))
+            except (TypeError, ValueError):
+                continue
+        return sorted(set(clean))
+
+    def check_and_filter_active_downloads(self) -> int:
+        """Deselects already-owned volume files in active qBittorrent bundles.
+
+        The manual/auto submit applies selection immediately, but torrent
+        metadata (file names) often resolves only after the torrent is added.
+        This periodic pass retries until the files can be mapped, then records
+        the release/wanted signature and stops calling qBittorrent for it.
+        """
+        try:
+            rows = self.db.get_active_qbit_bundle_downloads()
+        except Exception as exc:
+            logger.debug("Selective filter could not load active downloads: %s", exc)
+            return 0
+        if not rows:
+            return 0
+
+        try:
+            qbit = qbit_client_from_settings(self.db.get_all_settings())
+        except Exception as exc:
+            logger.debug("Selective filter could not build qBittorrent client: %s", exc)
+            return 0
+        if not getattr(qbit, "enabled", True):
+            return 0
+
+        filtered = 0
+        for row in rows:
+            release_id = int(row.get("id") or 0)
+            torrent_hash = str(row.get("torrent_hash") or "").strip()
+            if not release_id or not torrent_hash:
+                continue
+            wanted = self._volume_list(row.get("download_wanted_json"))
+            if not wanted:
+                wanted = self._volume_list(row.get("missing_vols_json"))
+            if not wanted:
+                continue
+            volumes = self._volume_list(row.get("volumes_json"))
+            if volumes and len(wanted) >= len(volumes):
+                # Nothing owned inside this bundle; no file needs deselecting.
+                continue
+            signature = (release_id, torrent_hash, tuple(wanted))
+            if signature in self._selective_filter_done:
+                continue
+            try:
+                result = qbit.apply_selective_volume_download(
+                    torrent_hash,
+                    wanted_volumes=wanted,
+                    series_name=str(row.get("series_name") or "").strip() or None,
+                ) or {}
+            except Exception as exc:
+                logger.debug(
+                    "Selective filter failed for release #%s (%s): %s",
+                    release_id, torrent_hash[:10], exc,
+                )
+                continue
+
+            status = str(result.get("status") or "")
+            if status == "pending_metadata":
+                # Metadata is not available yet; retry on the next pass.
+                continue
+            if status in ("filtered", "all_owned"):
+                skipped = result.get("skipped_volumes") or []
+                kept = result.get("kept_volumes") or []
+                self.db.log_activity(
+                    "SELECTIVE_DOWNLOAD",
+                    f"Selective download for release #{release_id}: "
+                    f"downloading {len(kept)} missing volume file(s), "
+                    f"skipped {len(skipped)} owned file(s).",
+                    json.dumps({
+                        "release_id": release_id,
+                        "torrent_hash": torrent_hash,
+                        "wanted_volumes": wanted,
+                        "skipped_volumes": skipped,
+                        "kept_volumes": kept,
+                        "status": status,
+                    }),
+                )
+                filtered += 1
+            elif status == "disabled":
+                return filtered
+            self._selective_filter_done.add(signature)
+        return filtered
+
     def start(self):
         calibre_min = int(self.db.get_setting("calibre_sync_interval_minutes", "15"))
         feed_min = int(self.db.get_setting("feed_check_interval_minutes", "60"))
@@ -2438,6 +2558,19 @@ class TaskManager:
             id="feed_check",
             replace_existing=True
         )
+        # qBittorrent file priorities can only be set once torrent metadata has
+        # resolved; retry until each active bundle is filtered, then stop.
+        try:
+            self.scheduler.add_job(
+                self.check_and_filter_active_downloads,
+                "interval",
+                seconds=SELECTIVE_FILTER_INTERVAL_SECONDS,
+                id="qbit_selective_filter",
+                replace_existing=True,
+                max_instances=1,
+            )
+        except Exception as exc:
+            logger.warning(f"Could not schedule qbit_selective_filter: {exc}")
         # Automatic activity-log pruning (settings activity_retention_days /
         # activity_max_rows). A database hiccup must never break startup, so both
         # the immediate catch-up call and the recurring job are guarded.

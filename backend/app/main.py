@@ -25,7 +25,7 @@ from app.providers.registry import create_provider
 from app.scheduler import TaskManager
 from app.covers import CoverCache
 from app.security import is_safe_public_url, sanitize_calibre_path
-from app.downloader.qbit import QBitClient
+from app.downloader.qbit import QBitClient, qbit_client_from_settings
 from app.download_state import release_download_state
 from app.torbox_manager import TorBoxManager
 
@@ -55,37 +55,7 @@ torbox_manager = TorBoxManager(db)
 
 def get_qbit_client() -> QBitClient:
     """Instantiates QBitClient configured from current app_settings in database."""
-    settings = db.get_all_settings()
-    url = settings.get("qbit_url", "").strip()
-    host = settings.get("qbit_host", "").strip()
-    port_str = settings.get("qbit_port", "").strip()
-    use_ssl_str = str(settings.get("qbit_use_ssl", "false")).lower()
-    enabled_str = str(settings.get("qbit_enabled", "true")).lower()
-    is_enabled = enabled_str not in ("false", "0", "no", "off")
-
-    if url and not host:
-        from urllib.parse import urlparse
-        p = urlparse(url)
-        host = p.hostname or "localhost"
-        port = p.port or (443 if p.scheme == "https" else 8080)
-        use_ssl = (p.scheme == "https")
-    else:
-        host = host or "localhost"
-        port = int(port_str) if port_str.isdigit() else 8080
-        use_ssl = (use_ssl_str in ("true", "1", "yes"))
-
-    return QBitClient(
-        host=host,
-        port=port,
-        username=settings.get("qbit_username", "admin"),
-        password=settings.get("qbit_password", ""),
-        use_ssl=use_ssl,
-        base_url=url if url else None,
-        enabled=is_enabled,
-        category=settings.get("qbit_category", "novels") or "novels",
-        tags=settings.get("qbit_tags", "noveltrax") or "noveltrax",
-        savepath=settings.get("qbit_savepath", os.getenv("DOWNLOAD_DIR", "/downloads"))
-    )
+    return qbit_client_from_settings(db.get_all_settings())
 
 def _active_downloader_engine() -> str:
     """Resolves the configured download engine, falling back to qBittorrent."""
@@ -1723,7 +1693,124 @@ async def api_delete_series_alias(override_id: int):
         raise HTTPException(status_code=500, detail="Could not delete the alias override") from exc
     if not deleted:
         raise HTTPException(status_code=404, detail="Alias override not found")
-    return JSONResponse({"status": "success"})
+    _invalidate_series_picker_cache()
+    return JSONResponse({"status": "success", "deleted": True})
+
+
+@app.get("/api/series/{series_id}/management")
+async def api_series_management(series_id: int):
+    """Series detail panel: registered releases, aliases and AniList titles."""
+    try:
+        result = await asyncio.to_thread(db.get_series_management, series_id)
+    except Exception as exc:
+        logger.warning(f"Could not load series #{series_id} management: {exc}")
+        raise HTTPException(status_code=500, detail="Could not load series details") from exc
+    if not result:
+        raise HTTPException(status_code=404, detail="Series not found")
+    return JSONResponse({"status": "success", **result})
+
+
+@app.post("/api/series/{series_id}/identity")
+async def api_update_series_identity(
+    series_id: int, payload: Optional[Dict[str, Any]] = None
+):
+    """Edits the cosmetic display title and clears a wrong AniList match."""
+    p = payload or {}
+    display_title = p.get("display_title") if "display_title" in p else None
+    if display_title is not None and not isinstance(display_title, str):
+        raise HTTPException(status_code=400, detail="display_title must be text")
+    clear_anilist = _coerce_bool(p.get("clear_anilist"), False)
+    try:
+        row = await asyncio.to_thread(
+            db.update_series_display_identity,
+            series_id,
+            display_title,
+            clear_anilist,
+            "user",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.warning(f"Could not update series #{series_id} identity: {exc}")
+        raise HTTPException(status_code=500, detail="Could not update the series identity") from exc
+    if not row:
+        raise HTTPException(status_code=404, detail="Series not found")
+    _invalidate_series_picker_cache()
+    return JSONResponse({
+        "status": "success",
+        "message": "Series identity updated",
+        "series": {
+            "id": row.get("id"),
+            "name": row.get("name"),
+            "display_title": row.get("display_title") or "",
+            "calibre_series_id": row.get("calibre_series_id"),
+            "book_count": row.get("book_count"),
+            "latest_index": row.get("latest_index"),
+        },
+    })
+
+
+@app.post("/api/series/{series_id}/synonyms/spin-out")
+async def api_spin_out_series_synonym(
+    series_id: int, payload: Optional[Dict[str, Any]] = None
+):
+    """Splits one registered synonym into its own tracked series."""
+    p = payload or {}
+    alias_id = _coerce_int(p.get("alias_id"))
+    source_name = str(p.get("source_name") or "").strip()
+    new_name = str(p.get("new_name") or "").strip()
+    move_matching = _coerce_bool(p.get("move_matching_releases"), True)
+    try:
+        result = await asyncio.to_thread(
+            db.spin_out_series_synonym,
+            series_id,
+            source_name or None,
+            new_name or None,
+            alias_id,
+            move_matching,
+            "user",
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.warning(f"Could not spin out synonym for series #{series_id}: {exc}")
+        raise HTTPException(status_code=500, detail="Could not split the synonym") from exc
+    _invalidate_series_picker_cache()
+    return JSONResponse(result)
+
+
+@app.post("/api/series/{series_id}/aliases/{alias_id}/retarget")
+async def api_retarget_series_alias(
+    series_id: int, alias_id: int, payload: Optional[Dict[str, Any]] = None
+):
+    """Re-maps one registered synonym to another tracked or Calibre series."""
+    p = payload or {}
+    target_name = str(p.get("target_name") or "").strip() or None
+    calibre_series_id = _coerce_int(p.get("calibre_series_id"))
+    move_matching = _coerce_bool(p.get("move_matching_releases"), False)
+    try:
+        result = await asyncio.to_thread(
+            db.retarget_series_alias,
+            series_id,
+            alias_id,
+            target_name,
+            calibre_series_id,
+            move_matching,
+            "user",
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.warning(
+            f"Could not retarget alias #{alias_id} for series #{series_id}: {exc}"
+        )
+        raise HTTPException(status_code=500, detail="Could not re-map the synonym") from exc
+    _invalidate_series_picker_cache()
+    return JSONResponse(result)
 
 # --- Release re-bind / per-series identity reset ---
 
@@ -2466,6 +2553,38 @@ async def api_release_download(release_id: int):
     savepath = db.get_setting("qbit_savepath", "/downloads")
     category = db.get_setting("qbit_category", "novels")
 
+    # Resolve wanted volumes once: they are persisted with the download handle
+    # so the periodic file-priority pass can reapply selection after metadata
+    # resolves, and so retries target the same subset.
+    missing = target.get("missing_volumes")
+    if missing is None:
+        try:
+            missing = json.loads(target.get("missing_vols_json") or "[]")
+        except (TypeError, ValueError):
+            missing = []
+    elif isinstance(missing, str):
+        try:
+            missing = json.loads(missing)
+        except (TypeError, ValueError):
+            missing = []
+    try:
+        wanted_volumes = sorted({
+            round(float(v), 2) for v in (missing or [])
+        })
+    except (TypeError, ValueError):
+        wanted_volumes = []
+    vols = target.get("volumes")
+    if vols is None:
+        try:
+            vols = json.loads(target.get("volumes_json") or "[]")
+        except (TypeError, ValueError):
+            vols = []
+    elif isinstance(vols, str):
+        try:
+            vols = json.loads(vols)
+        except (TypeError, ValueError):
+            vols = []
+
     success = await asyncio.to_thread(
         qbit.add_torrent_url,
         url=download_url,
@@ -2475,20 +2594,44 @@ async def api_release_download(release_id: int):
 
     if success:
         torrent_h = qbit.extract_torrent_hash(download_url)
-        db.update_download_status(release_id, "DOWNLOADING", torrent_h)
+        db.update_download_handle(
+            release_id,
+            "qbit",
+            downloader_id=torrent_h or "",
+            torrent_hash=torrent_h,
+            wanted_volumes=wanted_volumes,
+        )
         db.log_activity("MANUAL_DOWNLOAD", f"Sent to downloader: '{target['title']}'", f"URL: {download_url[:60]}...")
 
-        # Trigger selective volume unchecking if bundle
-        missing = target.get("missing_volumes") or json.loads(target.get("missing_vols_json") or "[]")
-        vols = target.get("volumes") or json.loads(target.get("volumes_json") or "[]")
-        if torrent_h and target.get("is_bundle") and missing and len(missing) < len(vols):
-            sel_count = await asyncio.to_thread(
+        # Deselect files whose volumes are already owned. Metadata may still be
+        # resolving; the 30 s scheduler pass retries until file names are known.
+        if torrent_h and target.get("is_bundle") and wanted_volumes and (
+            not vols or len(wanted_volumes) < len(vols)
+        ):
+            selection = await asyncio.to_thread(
                 qbit.apply_selective_volume_download,
                 torrent_h,
-                wanted_volumes=[float(v) for v in missing],
+                wanted_volumes=wanted_volumes,
                 series_name=target.get("series_name")
             )
-            db.log_activity("SELECTIVE_DOWNLOAD", f"Selective download applied for '{target['title']}': skipped {int(sel_count)} owned volume files.")
+            status = (selection or {}).get("status")
+            if status in ("filtered", "all_owned"):
+                skipped = (selection or {}).get("skipped_volumes") or []
+                kept = (selection or {}).get("kept_volumes") or []
+                db.log_activity(
+                    "SELECTIVE_DOWNLOAD",
+                    f"Selective download applied for '{target['title']}': "
+                    f"downloading {len(kept)} missing volume file(s), "
+                    f"skipped {len(skipped)} owned file(s).",
+                    json.dumps({
+                        "release_id": release_id,
+                        "torrent_hash": torrent_h,
+                        "wanted_volumes": wanted_volumes,
+                        "skipped_volumes": skipped,
+                        "kept_volumes": kept,
+                        "status": status,
+                    }),
+                )
 
         return JSONResponse({"status": "success", "engine": "qbit", "message": "Sent to downloader successfully"})
     else:

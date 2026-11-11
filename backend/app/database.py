@@ -1077,6 +1077,17 @@ class Database:
             row = cur.fetchone()
             return dict(row) if row else None
 
+    def get_series_by_id(self, series_id: int) -> Optional[Dict[str, Any]]:
+        """Tracked series row by primary key."""
+        sid = _coerce_int(series_id)
+        if sid is None:
+            return None
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT * FROM series_tracking WHERE id = ? LIMIT 1;", (sid,))
+            row = cur.fetchone()
+            return dict(row) if row else None
+
     def update_series_identity(self, series_id: int, display_title: Optional[str] = None,
                                anilist_id: Optional[int] = None,
                                anilist_meta_json: Optional[str] = None,
@@ -1109,6 +1120,59 @@ class Database:
                 sid,
             ))
             conn.commit()
+
+    def update_series_display_identity(
+        self,
+        series_id: int,
+        display_title: Optional[str] = None,
+        clear_anilist: bool = False,
+        actor: str = "user",
+    ) -> Optional[Dict[str, Any]]:
+        """Edits the cosmetic series identity used in the Library tab.
+
+        ``display_title`` is cosmetic: the stable ``name`` remains the matching
+        key. Passing an empty string clears it so the UI falls back to the stable
+        name. ``clear_anilist`` removes a wrong AniList id/metadata pair without
+        touching the Calibre link or release identities.
+        """
+        sid = _coerce_int(series_id)
+        if sid is None:
+            return None
+        current = self.get_series_by_id(sid)
+        if current is None:
+            return None
+        sets: List[str] = []
+        params: List[Any] = []
+        if display_title is not None:
+            clean_title = _coerce_text(display_title)
+            if len(clean_title) > 300:
+                raise ValueError("display title must be 300 characters or fewer")
+            sets.append("display_title = ?")
+            params.append(clean_title)
+        if clear_anilist:
+            sets.extend(["anilist_id = NULL", "anilist_meta_json = ''"])
+        if not sets:
+            return current
+        sets.append("last_sync = CURRENT_TIMESTAMP")
+        params.append(sid)
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE series_tracking SET " + ", ".join(sets) + " WHERE id = ?;",
+                params,
+            )
+            conn.commit()
+        self.log_activity(
+            "SERIES_IDENTITY_EDITED",
+            f"Series identity updated for '{_coerce_text(current.get('name'))}'",
+            json.dumps({
+                "series_id": sid,
+                "display_title": display_title,
+                "clear_anilist": bool(clear_anilist),
+                "actor": actor,
+            }),
+        )
+        return self.get_series_by_id(sid)
 
     def get_series_alias_overrides(self) -> List[Dict[str, Any]]:
         """All persistent alias overrides, newest first."""
@@ -2812,6 +2876,424 @@ class Database:
                 break
         return overview
 
+    def get_series_management(self, series_id: int) -> Optional[Dict[str, Any]]:
+        """Series row plus its registered releases, aliases and titles.
+
+        Used by the Library tab's per-series management panel. Releases are
+        matched on the stable ``series_name``; aliases are mappings whose
+        ``target_norm`` resolves to this series' stable name.
+        """
+        from app.parser import normalize_text
+        from app.series_identity import anilist_title_list
+
+        row = self.get_series_by_id(series_id)
+        if row is None:
+            return None
+        name = _coerce_text(row.get("name"))
+        name_norm = normalize_text(name)
+        display = _coerce_text(row.get("display_title"))
+        aliases: List[Dict[str, Any]] = []
+        releases: List[Dict[str, Any]] = []
+        anilist_titles: List[str] = []
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT id, source_name, target_name, calibre_series_id,
+                       origin, actor, created_at
+                FROM series_alias_overrides
+                WHERE target_norm = ?
+                ORDER BY CASE WHEN origin = 'manual' THEN 0 ELSE 1 END,
+                         source_name COLLATE NOCASE ASC;
+                """,
+                (name_norm,),
+            )
+            aliases = [dict(item) for item in cur.fetchall()]
+            for item in aliases:
+                item["self_mapped"] = (
+                    normalize_text(item.get("source_name"))
+                    == normalize_text(item.get("target_name"))
+                    and bool(normalize_text(item.get("source_name")))
+                )
+            cur.execute(
+                """
+                SELECT id, title, series_name, volume, status, series_pinned,
+                       series_pinned_at, pub_date, source_feed_name,
+                       download_url, link, download_status, download_error,
+                       download_attempts, downloader, torrent_hash,
+                       download_wanted_json, torbox_progress_json, downloaded_at
+                FROM releases
+                WHERE lower(trim(COALESCE(series_name, ''))) = lower(trim(?))
+                ORDER BY COALESCE(volume, 0) ASC, COALESCE(pub_date, '') DESC, id DESC;
+                """,
+                (name,),
+            )
+            for item in cur.fetchall():
+                release = dict(item)
+                release["download_state"] = release_download_state(release)
+                releases.append(release)
+
+        meta: Any = row.get("anilist_meta_json")
+        if isinstance(meta, str) and meta.strip():
+            try:
+                meta = json.loads(meta)
+            except (TypeError, ValueError):
+                meta = {}
+        if isinstance(meta, dict):
+            seen_norms = {name_norm, normalize_text(display)}
+            for title in anilist_title_list(meta):
+                clean = _coerce_text(title)
+                title_norm = normalize_text(clean)
+                if not clean or not title_norm or title_norm in seen_norms:
+                    continue
+                seen_norms.add(title_norm)
+                anilist_titles.append(clean)
+
+        series = {
+            "id": row.get("id"),
+            "name": name,
+            "display_title": display,
+            "authors": _coerce_text(row.get("authors")),
+            "calibre_series_id": row.get("calibre_series_id"),
+            "identity_locked": bool(_coerce_int(row.get("identity_locked"))),
+            "match_source": _coerce_text(row.get("match_source")),
+            "is_monitored": bool(_coerce_int(row.get("is_monitored"))),
+            "book_count": _coerce_int(row.get("book_count")),
+            "latest_index": row.get("latest_index"),
+            "owned_volumes": _coerce_owned_volumes(row.get("owned_volumes_json")),
+            "website_url": _coerce_text(row.get("website_url")),
+        }
+        return {
+            "series": series,
+            "aliases": aliases,
+            "releases": releases,
+            "anilist_titles": anilist_titles,
+            "counts": {
+                "releases": len(releases),
+                "aliases": len(aliases),
+                "anilist_titles": len(anilist_titles),
+            },
+        }
+
+    def _move_releases_matching_synonym(
+        self,
+        cur,
+        previous_series: str,
+        source_norm: str,
+        new_series: str,
+        new_norm: str = "",
+    ) -> List[int]:
+        """Moves releases whose parsed title spelling matches a synonym.
+
+        The caller owns the transaction. Only current releases of
+        ``previous_series`` are considered; matched releases are pinned to the
+        new series so later automatic matching cannot silently undo the split.
+        """
+        from app.parser import extract_series_and_volume, normalize_text
+        from app.series_identity import clean_series_for_matching
+
+        moved: List[int] = []
+        if not source_norm:
+            return moved
+        target_owned: Set[float] = set()
+        try:
+            cur.execute(
+                "SELECT owned_volumes_json FROM series_tracking "
+                "WHERE lower(trim(name)) = lower(trim(?)) LIMIT 1;",
+                (new_series,),
+            )
+            target_row = cur.fetchone()
+            if target_row is not None:
+                target_owned = set(_coerce_owned_volumes(target_row["owned_volumes_json"]))
+        except Exception:
+            target_owned = set()
+        cur.execute(
+            """
+            SELECT id, title, volume, status, volumes_json FROM releases
+            WHERE lower(trim(COALESCE(series_name, ''))) = lower(trim(?));
+            """,
+            (previous_series,),
+        )
+        for item in cur.fetchall():
+            release_id = _coerce_int(item["id"])
+            title = _coerce_text(item["title"])
+            if release_id is None:
+                continue
+            parsed_name = ""
+            try:
+                parsed = extract_series_and_volume(title) or {}
+                parsed_name = _coerce_text(parsed.get("series_name"))
+            except Exception:
+                parsed_name = ""
+            if not parsed_name:
+                try:
+                    parsed_name = _coerce_text(clean_series_for_matching(title))
+                except Exception:
+                    parsed_name = ""
+            parsed_norm = normalize_text(parsed_name)
+            if parsed_norm not in {source_norm, new_norm}:
+                continue
+            stored_status = _coerce_text(item["status"]).upper()
+            try:
+                volume_value = float(item["volume"]) if item["volume"] is not None else None
+            except (TypeError, ValueError):
+                volume_value = None
+            release_volumes = _coerce_owned_volumes(item["volumes_json"])
+            if volume_value is not None:
+                release_volumes = sorted(
+                    set(release_volumes) | {round(volume_value, 2)}
+                )
+            missing_volumes = sorted(
+                volume for volume in release_volumes
+                if round(volume, 2) not in target_owned
+            )
+            if stored_status in ("IGNORED", "BLACKLISTED"):
+                new_status = stored_status
+            elif release_volumes and all(
+                round(volume, 2) in target_owned for volume in release_volumes
+            ):
+                new_status = "IN_CALIBRE"
+            elif any(volume > 1.0 for volume in release_volumes):
+                new_status = "REQUESTED"
+            else:
+                new_status = "NEW"
+            cur.execute(
+                """
+                UPDATE releases
+                SET series_name = ?, series_pinned = 1,
+                    series_pinned_at = CURRENT_TIMESTAMP,
+                    status = ?, calibre_matched_book_id = NULL,
+                    missing_vols_json = ?,
+                    revision = COALESCE(revision, 0) + 1,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?;
+                """,
+                (new_series, new_status, json.dumps(missing_volumes), release_id),
+            )
+            moved.append(release_id)
+        return moved
+
+    def spin_out_series_synonym(
+        self,
+        series_id: int,
+        source_name: Optional[str] = None,
+        new_name: Optional[str] = None,
+        alias_id: Optional[int] = None,
+        move_matching_releases: bool = True,
+        actor: str = "user",
+    ) -> Dict[str, Any]:
+        """Creates a new tracked series from one registered synonym.
+
+        When ``alias_id`` is supplied its mapping is retargeted to the new
+        series and its ``source_name`` is used. AniList-only synonyms can be
+        passed directly as ``source_name`` and receive a new alias row, so
+        future releases resolve to the split series. Matching releases are
+        re-keyed and pinned only when ``move_matching_releases`` is true.
+        """
+        from app.parser import normalize_text
+        from urllib.parse import quote_plus
+
+        sid = _coerce_int(series_id)
+        if sid is None:
+            raise ValueError("series_id is required")
+        current = self.get_series_by_id(sid)
+        if current is None:
+            raise KeyError(f"series {sid} not found")
+        current_name = _coerce_text(current.get("name"))
+        current_norm = normalize_text(current_name)
+        alias: Optional[Dict[str, Any]] = None
+        if alias_id is not None:
+            aid = _coerce_int(alias_id)
+            if aid is None:
+                raise ValueError("alias_id is invalid")
+            with self.get_connection() as conn:
+                cur = conn.cursor()
+                cur.execute("SELECT * FROM series_alias_overrides WHERE id = ?;", (aid,))
+                found = cur.fetchone()
+            if found is None:
+                raise KeyError(f"alias {aid} not found")
+            alias = dict(found)
+            alias_target_norm = _coerce_text(alias.get("target_norm")) or normalize_text(
+                alias.get("target_name")
+            )
+            if alias_target_norm != current_norm:
+                raise ValueError("alias does not belong to this series")
+            source = _coerce_text(alias.get("source_name"))
+        else:
+            source = _coerce_text(source_name)
+        if not source:
+            raise ValueError("source_name or alias_id is required")
+        source_norm = normalize_text(source)
+        if not source_norm:
+            raise ValueError("the synonym must contain letters or digits")
+
+        target_name = _coerce_text(new_name) or source
+        target_norm = normalize_text(target_name)
+        if len(target_name) < 2 or len(target_name) > 300 or not target_norm:
+            raise ValueError("new series title must be between 2 and 300 characters")
+        if target_norm == current_norm:
+            raise ValueError("that title already belongs to the current series")
+        if self.get_series_by_name(target_name) is not None:
+            raise ValueError("a tracked series with that title already exists")
+        known = self._known_series_title_norms()
+        known.pop(source_norm, None)
+        if target_norm in known:
+            raise ValueError("that title is already registered to another series or synonym")
+
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            try:
+                cur.execute(
+                    """
+                    INSERT INTO series_tracking (
+                        name, book_count, latest_index, is_monitored, website_url,
+                        owned_volumes_json, identity_locked, match_source, last_sync
+                    ) VALUES (?, 0, 0.0, 1, ?, '[]', 1, 'synonym-spinout', CURRENT_TIMESTAMP);
+                    """,
+                    (target_name, f"https://jnovels.com/?s={quote_plus(target_name)}"),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise ValueError("a tracked series with that title already exists") from exc
+            new_series_id = int(cur.lastrowid)
+            # Keep the synonym mapping alive and point it at the new series; a
+            # split that merely deletes the mapping lets future releases fall
+            # back to the old series' display/AniList title.
+            cur.execute(
+                """
+                UPDATE series_alias_overrides
+                SET target_name = ?, target_norm = ?, calibre_series_id = NULL,
+                    origin = 'manual', actor = ?, created_at = CURRENT_TIMESTAMP
+                WHERE source_norm = ?;
+                """,
+                (target_name, target_norm, actor, source_norm),
+            )
+            aliases_retargeted = max(0, int(cur.rowcount or 0))
+            if aliases_retargeted == 0:
+                cur.execute(
+                    """
+                    INSERT INTO series_alias_overrides
+                        (source_name, source_norm, target_name, target_norm,
+                         calibre_series_id, origin, actor, created_at)
+                    VALUES (?, ?, ?, ?, NULL, 'manual', ?, CURRENT_TIMESTAMP);
+                    """,
+                    (source, source_norm, target_name, target_norm, actor),
+                )
+                aliases_retargeted = 1
+            moved: List[int] = []
+            if move_matching_releases:
+                moved = self._move_releases_matching_synonym(
+                    cur, current_name, source_norm, target_name, target_norm
+                )
+            conn.commit()
+
+        self.log_activity(
+            "SERIES_SYNONYM_SPLIT",
+            f"Split synonym '{source}' out of '{current_name}' into new series '{target_name}'",
+            json.dumps({
+                "source_series": current_name,
+                "new_series": target_name,
+                "new_series_id": new_series_id,
+                "alias_id": alias.get("id") if alias else None,
+                "aliases_retargeted": aliases_retargeted,
+                "moved_releases": moved,
+                "actor": actor,
+            }),
+        )
+        return {
+            "status": "success",
+            "series_id": new_series_id,
+            "series_name": target_name,
+            "source_name": source,
+            "previous_series": current_name,
+            "aliases_retargeted": aliases_retargeted,
+            "moved_releases": len(moved),
+            "moved_release_ids": moved,
+        }
+
+    def retarget_series_alias(
+        self,
+        series_id: int,
+        alias_id: int,
+        target_name: Optional[str] = None,
+        calibre_series_id: Optional[int] = None,
+        move_matching_releases: bool = False,
+        actor: str = "user",
+    ) -> Dict[str, Any]:
+        """Points one alias mapping at another tracked or Calibre series."""
+        from app.parser import normalize_text
+
+        sid = _coerce_int(series_id)
+        aid = _coerce_int(alias_id)
+        if sid is None or aid is None:
+            raise ValueError("series_id and alias_id are required")
+        current = self.get_series_by_id(sid)
+        if current is None:
+            raise KeyError(f"series {sid} not found")
+        current_name = _coerce_text(current.get("name"))
+        current_norm = normalize_text(current_name)
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT * FROM series_alias_overrides WHERE id = ?;", (aid,))
+            found = cur.fetchone()
+        if found is None:
+            raise KeyError(f"alias {aid} not found")
+        alias = dict(found)
+        alias_target_norm = _coerce_text(alias.get("target_norm")) or normalize_text(
+            alias.get("target_name")
+        )
+        if alias_target_norm != current_norm:
+            raise ValueError("alias does not belong to this series")
+        source = _coerce_text(alias.get("source_name"))
+        source_norm = normalize_text(source)
+        new_series_name, new_calibre_id, created = self._resolve_bind_target(
+            target_name, calibre_series_id, actor=actor
+        )
+        new_norm = normalize_text(new_series_name)
+        if new_norm == current_norm:
+            raise ValueError("the alias already maps to this series")
+
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                UPDATE series_alias_overrides
+                SET target_name = ?, target_norm = ?, calibre_series_id = ?,
+                    origin = 'manual', actor = ?, created_at = CURRENT_TIMESTAMP
+                WHERE id = ?;
+                """,
+                (new_series_name, new_norm, new_calibre_id, actor, aid),
+            )
+            moved: List[int] = []
+            if move_matching_releases and source_norm:
+                moved = self._move_releases_matching_synonym(
+                    cur, current_name, source_norm, new_series_name, new_norm
+                )
+            conn.commit()
+
+        self.log_activity(
+            "SERIES_ALIAS_RETARGETED",
+            f"Alias '{source}' re-mapped from '{current_name}' to '{new_series_name}'",
+            json.dumps({
+                "source_series": current_name,
+                "source_name": source,
+                "new_series": new_series_name,
+                "calibre_series_id": new_calibre_id,
+                "moved_releases": moved,
+                "actor": actor,
+            }),
+        )
+        return {
+            "status": "success",
+            "alias_id": aid,
+            "source_name": source,
+            "previous_series": current_name,
+            "series_name": new_series_name,
+            "calibre_series_id": new_calibre_id,
+            "created_series": created,
+            "moved_releases": len(moved),
+            "moved_release_ids": moved,
+        }
+
     def get_release_series_identity(self, release_id: int) -> Optional[Dict[str, Any]]:
         """Release + current tracked-series identity, for the re-bind modal."""
         rid = _coerce_int(release_id)
@@ -3879,6 +4361,27 @@ class Database:
             cur.execute(
                 "SELECT * FROM releases WHERE download_status = 'DOWNLOADING' "
                 "AND downloader = 'torbox' ORDER BY downloader_started_at ASC, id ASC;"
+            )
+            return [dict(row) for row in cur.fetchall()]
+
+    def get_active_qbit_bundle_downloads(self) -> List[Dict[str, Any]]:
+        """qBittorrent bundle releases still downloading, for periodic volume filtering.
+
+        Rows submitted before engine provenance was persisted have an empty
+        ``downloader`` column; they are treated as qBittorrent unless explicitly
+        marked ``torbox``.
+        """
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT * FROM releases
+                WHERE download_status = 'DOWNLOADING'
+                  AND COALESCE(is_bundle, 0) = 1
+                  AND COALESCE(downloader, '') != 'torbox'
+                  AND COALESCE(torrent_hash, '') != ''
+                ORDER BY downloader_started_at ASC, id ASC;
+                """
             )
             return [dict(row) for row in cur.fetchall()]
 
