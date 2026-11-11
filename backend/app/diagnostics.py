@@ -308,6 +308,39 @@ def _attribution_release_rows(db: Any, scan_limit: int) -> List[Dict[str, Any]]:
     return []
 
 
+#: Tokens that, when they are the ONLY thing following the stored series name in a
+#: release title, cannot change the attribution (volume/format noise).  Anything else
+#: (e.g. "short story collection", a spin-off suffix, publisher words) forces the
+#: expensive parser path so the audit cannot miss a real drift.
+_ATTRIBUTION_SUFFIX_NOISE_TOKENS = frozenset({
+    "vol", "volume", "vols", "v", "book", "books", "part", "parts",
+    "epub", "pdf", "mobi", "azw3", "azw", "fb2", "txt", "html",
+    "light", "novel", "novels", "ln", "wn", "complete", "completed",
+    "series", "edition", "digital", "official", "retail", "rip", "batch",
+    "pack", "box", "set", "omnibus", "all", "the", "a", "of",
+})
+
+
+def _attribution_title_noise_only(title_norm: str, stored_norm: str) -> bool:
+    """True when the stored series spelling is present and only volume/format noise remains.
+
+    Used as the audit's cheap fast path: a release title that is just
+    `<stored series> Vol N` / format tags cannot have a different parsed series, so the
+    parser/resolver can be skipped.  A suffix like "Short Story Collection" is not noise
+    and forces the full check.
+    """
+    if not title_norm or not stored_norm or stored_norm not in title_norm:
+        return False
+    remainder = title_norm.replace(stored_norm, " ", 1)
+    for token in remainder.split():
+        if token.isdigit():
+            continue
+        if token in _ATTRIBUTION_SUFFIX_NOISE_TOKENS:
+            continue
+        return False
+    return True
+
+
 def _parsed_release_series(title: Any) -> str:
     """Best-effort series spelling derived from a release title."""
     raw_title = str(title or "").strip()
@@ -349,9 +382,33 @@ def _stored_calibre_series_id(stored_name: Any, series_rows: List[Dict[str, Any]
     return None
 
 
-def series_attribution_audit(db: Any, limit: int = 200, scan_limit: int = 50000) -> dict:
-    """Read-only audit: releases whose stored series disagrees with the identity resolver."""
-    result: Dict[str, Any] = {"checked": 0, "count": 0, "items": [], "error": ""}
+#: Hard wall-clock budget for one attribution audit request.  The audit is a read-only
+#: diagnostic: it must return quickly enough for the UI (and any reverse proxy in front of
+#: the app) instead of scanning an unbounded release table and timing out as an HTML error
+#: page.  The response marks ``truncated`` when the budget was hit so the operator knows to
+#: narrow the audit (e.g. lower the scan limit or re-run after the library settles).
+ATTRIBUTION_TIME_BUDGET_SECONDS = 8.0
+
+
+def series_attribution_audit(db: Any, limit: int = 200, scan_limit: int = 50000,
+                            time_budget: Optional[float] = None) -> dict:
+    """Read-only audit: releases whose stored series disagrees with the identity resolver.
+
+    Performance: ``resolve_series_title`` builds its alias/row lookups from the tracked
+    series list on every call, so resolving every release independently is O(releases x
+    series) and can take long enough for a reverse proxy to time out (the browser then
+    receives an HTML gateway page instead of JSON).  The audit therefore:
+    * precomputes the stored-name -> Calibre-id map once;
+    * memoises resolver results per normalised parsed-series spelling (releases of one
+      series share the same resolution);
+    * enforces a hard time budget (default 8 s) and reports ``truncated`` when it is hit,
+      so the request always returns JSON promptly.
+    """
+    started = time.monotonic()
+    result: Dict[str, Any] = {
+        "checked": 0, "count": 0, "items": [], "error": "",
+        "truncated": False, "elapsed_ms": 0,
+    }
     try:
         cap = int(limit)
     except (TypeError, ValueError):
@@ -362,6 +419,11 @@ def series_attribution_audit(db: Any, limit: int = 200, scan_limit: int = 50000)
     except (TypeError, ValueError):
         scan_cap = 50000
     scan_cap = max(1, min(scan_cap, 500000))
+    try:
+        budget = float(time_budget) if time_budget is not None else ATTRIBUTION_TIME_BUDGET_SECONDS
+    except (TypeError, ValueError):
+        budget = ATTRIBUTION_TIME_BUDGET_SECONDS
+    budget = max(0.25, min(budget, 60.0))
 
     try:
         series_rows = db.get_series_identity_rows() or []
@@ -374,14 +436,37 @@ def series_attribution_audit(db: Any, limit: int = 200, scan_limit: int = 50000)
         logger.debug("Series alias overrides unavailable for attribution audit: %s", exc)
         aliases = []
 
+    # One pass over the tracked rows: stored-name -> Calibre id.  The old code looped the
+    # whole series list for every release.
+    stored_calibre_by_name: Dict[str, Optional[int]] = {}
+    for row in series_rows:
+        if not isinstance(row, dict):
+            continue
+        norm = _norm_series(row.get("name"))
+        if not norm or norm in stored_calibre_by_name:
+            continue
+        calibre_id = row.get("calibre_series_id")
+        try:
+            stored_calibre_by_name[norm] = (
+                int(calibre_id) if calibre_id not in (None, "") else None
+            )
+        except (TypeError, ValueError):
+            stored_calibre_by_name[norm] = None
+
     try:
         rows = _attribution_release_rows(db, scan_cap)
     except Exception as exc:
         result["error"] = str(exc)[:300]
+        result["elapsed_ms"] = int((time.monotonic() - started) * 1000)
         return result
 
+    deadline = started + budget
+    resolution_cache: Dict[str, Any] = {}
     items: List[Dict[str, Any]] = []
     for row in rows:
+        if time.monotonic() >= deadline:
+            result["truncated"] = True
+            break
         result["checked"] += 1
         status = str(row.get("status") or "").strip().upper()
         if status in ("IGNORED", "BLACKLISTED"):
@@ -394,14 +479,27 @@ def series_attribution_audit(db: Any, limit: int = 200, scan_limit: int = 50000)
 
         title = str(row.get("title") or "").strip()
         stored_series = str(row.get("series_name") or "").strip()
+        # Cheap fast path: when the release title still contains the stored series
+        # spelling, parsing cannot reveal a different attribution; skip the expensive
+        # parser/resolver entirely.  This keeps large audits (tens of thousands of
+        # correctly-attributed releases) well inside the time budget.
+        norm_title = _norm_series(title)
+        norm_stored = _norm_series(stored_series)
+        if _attribution_title_noise_only(norm_title, norm_stored):
+            continue
         parsed_series = _parsed_release_series(title) or stored_series
         suggested_series = parsed_series
         suggested_calibre_id = None
-        if resolve_series_title is not None and parsed_series:
-            try:
-                resolution = resolve_series_title(parsed_series, series_rows, aliases)
-            except Exception:
-                resolution = None
+        parsed_key = _norm_series(parsed_series)
+        if resolve_series_title is not None and parsed_series and parsed_key:
+            if parsed_key in resolution_cache:
+                resolution = resolution_cache[parsed_key]
+            else:
+                try:
+                    resolution = resolve_series_title(parsed_series, series_rows, aliases)
+                except Exception:
+                    resolution = None
+                resolution_cache[parsed_key] = resolution
             if resolution is not None:
                 canonical = str(getattr(resolution, "canonical_name", "") or "").strip()
                 if canonical:
@@ -414,7 +512,7 @@ def series_attribution_audit(db: Any, limit: int = 200, scan_limit: int = 50000)
                 except (TypeError, ValueError):
                     suggested_calibre_id = None
 
-        stored_calibre_id = _stored_calibre_series_id(stored_series, series_rows)
+        stored_calibre_id = stored_calibre_by_name.get(_norm_series(stored_series))
         name_differs = (
             bool(stored_series)
             and bool(suggested_series)
@@ -442,6 +540,7 @@ def series_attribution_audit(db: Any, limit: int = 200, scan_limit: int = 50000)
 
     result["items"] = items
     result["count"] = len(items)
+    result["elapsed_ms"] = int((time.monotonic() - started) * 1000)
     return result
 
 

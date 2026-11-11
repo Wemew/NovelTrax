@@ -424,69 +424,82 @@
     </form>
 
     <!-- Series Identity & Overrides (per-series reset) -->
-    <div class="bg-slate-900/90 border border-slate-800 rounded-2xl p-6 space-y-4 shadow-xl">
-        <div class="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
-            <div class="min-w-0">
-                <h3 class="text-sm font-bold uppercase tracking-wider text-slate-300 border-b border-slate-800 pb-2 flex items-center gap-2">
-                    <i data-lucide="git-branch" class="w-4 h-4 text-cyan-400"></i>
-                    Series identity &amp; overrides
-                </h3>
-                <p class="text-xs text-slate-400 mt-2 leading-relaxed">
-                    Reset forgets manual/learned aliases, AniList display data, manual locks and per-release pins for this series, then lets automatic matching take over again. Release titles are not changed.
+    <div class="bg-slate-900/90 border border-slate-800 rounded-2xl p-6 space-y-4 shadow-xl" id="series-identity-section">
+        <button type="button" id="series-identity-toggle" onclick="toggleSettingsSection('series-identity')" aria-expanded="false" aria-controls="series-identity-body" class="w-full flex items-center justify-between gap-3 text-left group">
+            <h3 class="text-sm font-bold uppercase tracking-wider text-slate-300 flex items-center gap-2">
+                <i data-lucide="git-branch" class="w-4 h-4 text-cyan-400"></i>
+                Series identity &amp; overrides
+            </h3>
+            <i data-lucide="chevron-down" id="series-identity-chevron" class="w-4 h-4 text-slate-400 transition-transform duration-200"></i>
+        </button>
+
+        <div id="series-identity-body" class="hidden space-y-4">
+            <p class="text-xs text-slate-400 leading-relaxed">
+                Reset forgets manual/learned aliases, AniList display data, manual locks and per-release pins for this series, then lets automatic matching take over again. Release titles are not changed.
+            </p>
+
+            <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <label for="series-identity-search" class="block text-xs font-semibold text-slate-300">Search tracked series</label>
+                <button type="button" onclick="loadSeriesIdentityOverview(document.getElementById('series-identity-search').value)" id="series-identity-refresh" class="px-3.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-slate-200 flex items-center gap-1.5 transition-colors flex-shrink-0 self-start">
+                    <i data-lucide="refresh-cw" class="w-3.5 h-3.5 text-cyan-400"></i>
+                    Refresh
+                </button>
+            </div>
+            <div>
+                <input type="text" id="series-identity-search" autocomplete="off" placeholder="Search by series name, display title or author..." oninput="debounceSeriesIdentitySearch()" class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-brand-500">
+                <p class="text-[11px] text-slate-500 mt-1">Resets are per series. A global destructive reset is intentionally not offered.</p>
+            </div>
+
+            <div id="series-identity-results" class="space-y-2">
+                <p class="text-xs text-slate-500">Expand this section to load the series identity overview.</p>
+            </div>
+
+            <!-- Global alias overrides (collapsible, closed by default) -->
+            <div class="pt-4 border-t border-slate-800">
+                <button type="button" id="series-alias-toggle" onclick="toggleSettingsSection('series-alias')" aria-expanded="false" aria-controls="series-alias-body" class="w-full flex items-center justify-between gap-2 text-left">
+                    <h4 class="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-2">
+                        <i data-lucide="tags" class="w-3.5 h-3.5 text-amber-400"></i>
+                        Global alias overrides
+                    </h4>
+                    <i data-lucide="chevron-down" id="series-alias-chevron" class="w-4 h-4 text-slate-400 transition-transform duration-200"></i>
+                </button>
+                <div id="series-alias-body" class="hidden space-y-2 pt-3">
+                    <div class="flex justify-end">
+                        <button type="button" onclick="loadSeriesAliasOverrides()" id="btn-refresh-series-aliases" class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-[11px] font-semibold flex items-center gap-1.5 transition-colors">
+                            <i data-lucide="refresh-cw" class="w-3 h-3 w-3 text-amber-400"></i>
+                            Refresh aliases
+                        </button>
+                    </div>
+                    <p class="text-[11px] text-slate-500">
+                        Manual and learned title mappings applied to every release. Deleting one lets automatic matching resolve that title spelling again.
+                    </p>
+                    <div>
+                        <label for="series-alias-search" class="block text-xs font-semibold text-slate-300 mb-1">Search alias overrides</label>
+                        <input type="text" id="series-alias-search" autocomplete="off" placeholder="Search old title, new title or origin..." oninput="debounceSeriesAliasSearch()" class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-brand-500">
+                    </div>
+                    <div id="series-alias-list" class="space-y-1.5">
+                        <p class="text-xs text-slate-500">Expand this section to load the global alias overrides.</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Attribution audit -->
+            <div class="pt-4 border-t border-slate-800 space-y-2">
+                <div class="flex items-center justify-between gap-2">
+                    <h4 class="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-2">
+                        <i data-lucide="search-check" class="w-3.5 h-3.5 text-emerald-400"></i>
+                        Attribution audit
+                    </h4>
+                    <button type="button" onclick="runSeriesAttributionAudit()" id="btn-series-attribution-audit" class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-[11px] font-semibold flex items-center gap-1.5 transition-colors">
+                        <i data-lucide="play" class="w-3 h-3 text-emerald-400"></i>
+                        Run attribution audit
+                    </button>
+                </div>
+                <p class="text-[11px] text-slate-500">
+                    Finds releases whose stored series no longer matches what automatic parsing suggests (read-only). Re-bind one directly from a row.
                 </p>
+                <div id="series-attribution-result" class="space-y-1.5"></div>
             </div>
-            <button type="button" onclick="loadSeriesIdentityOverview(document.getElementById('series-identity-search').value)" id="series-identity-refresh" class="px-3.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-slate-200 flex items-center gap-1.5 transition-colors flex-shrink-0">
-                <i data-lucide="refresh-cw" class="w-3.5 h-3.5 text-cyan-400"></i>
-                Refresh
-            </button>
-        </div>
-
-        <div>
-            <label for="series-identity-search" class="block text-xs font-semibold text-slate-300 mb-1">Search tracked series</label>
-            <input type="text" id="series-identity-search" autocomplete="off" placeholder="Search by series name, display title or author..." oninput="debounceSeriesIdentitySearch()" class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-brand-500">
-            <p class="text-[11px] text-slate-500 mt-1">Resets are per series. A global destructive reset is intentionally not offered.</p>
-        </div>
-
-        <div id="series-identity-results" class="space-y-2">
-            <p class="text-xs text-slate-500">Loading series identity overview...</p>
-        </div>
-
-        <!-- Global alias overrides -->
-        <div class="pt-4 border-t border-slate-800 space-y-2">
-            <div class="flex items-center justify-between gap-2">
-                <h4 class="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-2">
-                    <i data-lucide="tags" class="w-3.5 h-3.5 text-amber-400"></i>
-                    Global alias overrides
-                </h4>
-                <button type="button" onclick="loadSeriesAliasOverrides()" id="btn-refresh-series-aliases" class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-[11px] font-semibold flex items-center gap-1.5 transition-colors">
-                    <i data-lucide="refresh-cw" class="w-3 h-3 w-3 text-amber-400"></i>
-                    Refresh aliases
-                </button>
-            </div>
-            <p class="text-[11px] text-slate-500">
-                Manual and learned title mappings applied to every release. Deleting one lets automatic matching resolve that title spelling again.
-            </p>
-            <div id="series-alias-list" class="space-y-1.5">
-                <p class="text-xs text-slate-500">Loading alias overrides...</p>
-            </div>
-        </div>
-
-        <!-- Attribution audit -->
-        <div class="pt-4 border-t border-slate-800 space-y-2">
-            <div class="flex items-center justify-between gap-2">
-                <h4 class="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-2">
-                    <i data-lucide="search-check" class="w-3.5 h-3.5 text-emerald-400"></i>
-                    Attribution audit
-                </h4>
-                <button type="button" onclick="runSeriesAttributionAudit()" id="btn-series-attribution-audit" class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-[11px] font-semibold flex items-center gap-1.5 transition-colors">
-                    <i data-lucide="play" class="w-3 h-3 text-emerald-400"></i>
-                    Run attribution audit
-                </button>
-            </div>
-            <p class="text-[11px] text-slate-500">
-                Finds releases whose stored series no longer matches what automatic parsing suggests (read-only). Re-bind one directly from a row.
-            </p>
-            <div id="series-attribution-result" class="space-y-1.5"></div>
         </div>
     </div>
 
@@ -889,6 +902,29 @@
         }
     }
     // ------------------------------------------------------------------
+    // Collapsible settings sections (closed by default, lazily loaded)
+    // ------------------------------------------------------------------
+    function toggleSettingsSection(section) {
+        const body = document.getElementById(section + '-body');
+        if (!body) return;
+        const toggle = document.getElementById(section + '-toggle');
+        const chevron = document.getElementById(section + '-chevron');
+        const opening = body.classList.contains('hidden');
+        body.classList.toggle('hidden', !opening);
+        if (toggle) toggle.setAttribute('aria-expanded', opening ? 'true' : 'false');
+        if (chevron) chevron.classList.toggle('rotate-180', opening);
+        if (!opening) return;
+        // Lazy first load: a closed section performs no network work until expanded.
+        if (body.dataset.loaded === '1') return;
+        body.dataset.loaded = '1';
+        if (section === 'series-identity') {
+            loadSeriesIdentityOverview('');
+        } else if (section === 'series-alias') {
+            loadSeriesAliasOverrides();
+        }
+    }
+
+    // ------------------------------------------------------------------
     // Series identity & overrides (per-series reset, aliases, attribution)
     // ------------------------------------------------------------------
     let _seriesIdentitySearchTimer = null;
@@ -1061,6 +1097,72 @@
         }
     }
 
+    let _seriesAliasRows = [];
+    let _seriesAliasSearchTimer = null;
+
+    function _seriesAliasCurrentQuery() {
+        const input = document.getElementById('series-alias-search');
+        return input ? String(input.value || '').trim() : '';
+    }
+
+    function debounceSeriesAliasSearch() {
+        clearTimeout(_seriesAliasSearchTimer);
+        _seriesAliasSearchTimer = setTimeout(function () {
+            renderSeriesAliasOverrides();
+        }, 250);
+    }
+
+    function renderSeriesAliasOverrides() {
+        const box = document.getElementById('series-alias-list');
+        if (!box) return;
+        const term = _seriesAliasCurrentQuery().toLowerCase();
+        const aliases = _seriesAliasRows.filter(function (alias) {
+            if (!term) return true;
+            const source = String(alias.source_name || alias.source || '').toLowerCase();
+            const target = String(alias.target_name || alias.target || '').toLowerCase();
+            const origin = String(alias.origin || alias.match_source || alias.source_type || 'manual').toLowerCase();
+            return source.indexOf(term) !== -1 || target.indexOf(term) !== -1 || origin.indexOf(term) !== -1;
+        });
+        box.textContent = '';
+        if (!Array.isArray(_seriesAliasRows) || _seriesAliasRows.length === 0) {
+            _identityMessage(box, 'No global alias overrides are stored.');
+            return;
+        }
+        if (aliases.length === 0) {
+            _identityMessage(box, 'No alias overrides match this search.');
+            return;
+        }
+        aliases.forEach(function (alias) {
+            const overrideId = Number(alias.id || alias.override_id) || 0;
+            const source = String(alias.source_name || alias.source || '');
+            const target = String(alias.target_name || alias.target || '');
+            const row = document.createElement('div');
+            row.className = 'p-2 rounded-xl border border-slate-800 bg-slate-950/60 flex flex-col sm:flex-row sm:items-center justify-between gap-2';
+            const mapping = document.createElement('p');
+            mapping.className = 'text-[11px] text-slate-300 break-words-anywhere';
+            mapping.textContent = (source || '(unknown)') + '  →  ' + (target || '(unknown)');
+            const meta = document.createElement('p');
+            meta.className = 'text-[10px] text-slate-500';
+            meta.textContent = (alias.origin || alias.match_source || alias.source_type || 'manual') + (alias.created_at ? ' · ' + alias.created_at : '');
+            const textWrap = document.createElement('div');
+            textWrap.className = 'min-w-0';
+            textWrap.appendChild(mapping);
+            textWrap.appendChild(meta);
+            row.appendChild(textWrap);
+
+            const deleteBtn = document.createElement('button');
+            deleteBtn.type = 'button';
+            deleteBtn.className = 'series-alias-delete-btn px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-rose-500/20 text-rose-300 border border-slate-700 text-[11px] font-semibold flex items-center justify-center gap-1.5 transition-colors flex-shrink-0';
+            deleteBtn.setAttribute('data-override-id', String(overrideId));
+            deleteBtn.textContent = 'Delete alias';
+            deleteBtn.addEventListener('click', function () {
+                deleteSeriesAlias(overrideId);
+            });
+            row.appendChild(deleteBtn);
+            box.appendChild(row);
+        });
+    }
+
     async function loadSeriesAliasOverrides() {
         const box = document.getElementById('series-alias-list');
         if (!box) return;
@@ -1068,40 +1170,8 @@
             const res = await fetch('/api/series/aliases');
             const data = await res.json();
             const aliases = (data && (data.aliases || data.overrides)) || [];
-            box.textContent = '';
-            if (!Array.isArray(aliases) || aliases.length === 0) {
-                _identityMessage(box, 'No global alias overrides are stored.');
-                return;
-            }
-            aliases.forEach(function (alias) {
-                const overrideId = Number(alias.id || alias.override_id) || 0;
-                const source = String(alias.source_name || alias.source || '');
-                const target = String(alias.target_name || alias.target || '');
-                const row = document.createElement('div');
-                row.className = 'p-2 rounded-xl border border-slate-800 bg-slate-950/60 flex flex-col sm:flex-row sm:items-center justify-between gap-2';
-                const mapping = document.createElement('p');
-                mapping.className = 'text-[11px] text-slate-300 break-words-anywhere';
-                mapping.textContent = (source || '(unknown)') + '  →  ' + (target || '(unknown)');
-                const meta = document.createElement('p');
-                meta.className = 'text-[10px] text-slate-500';
-                meta.textContent = (alias.origin || alias.match_source || alias.source_type || 'manual') + (alias.created_at ? ' · ' + alias.created_at : '');
-                const textWrap = document.createElement('div');
-                textWrap.className = 'min-w-0';
-                textWrap.appendChild(mapping);
-                textWrap.appendChild(meta);
-                row.appendChild(textWrap);
-
-                const deleteBtn = document.createElement('button');
-                deleteBtn.type = 'button';
-                deleteBtn.className = 'series-alias-delete-btn px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-rose-500/20 text-rose-300 border border-slate-700 text-[11px] font-semibold flex items-center justify-center gap-1.5 transition-colors flex-shrink-0';
-                deleteBtn.setAttribute('data-override-id', String(overrideId));
-                deleteBtn.textContent = 'Delete alias';
-                deleteBtn.addEventListener('click', function () {
-                    deleteSeriesAlias(overrideId);
-                });
-                row.appendChild(deleteBtn);
-                box.appendChild(row);
-            });
+            _seriesAliasRows = Array.isArray(aliases) ? aliases : [];
+            renderSeriesAliasOverrides();
         } catch (err) {
             _identityMessage(box, 'Could not load alias overrides: ' + err, 'text-xs text-rose-300');
         }
@@ -1130,14 +1200,28 @@
         const box = document.getElementById('series-attribution-result');
         const btn = document.getElementById('btn-series-attribution-audit');
         if (btn) btn.disabled = true;
+        _identityMessage(box, 'Running attribution audit… (large libraries may take a few seconds; the audit stops early and reports truncation rather than timing out).');
+        const controller = new AbortController();
+        const timeoutId = setTimeout(function () { controller.abort(); }, 60000);
         try {
-            const res = await fetch('/api/maintenance/series-attribution?limit=200');
+            const res = await fetch('/api/maintenance/series-attribution?limit=200', { signal: controller.signal });
+            // A reverse proxy timeout / SPA fallback returns an HTML page, which would
+            // otherwise surface as "Unexpected token '<'".  Detect it and explain.
+            const contentType = String(res.headers.get('content-type') || '').toLowerCase();
+            if (!contentType.includes('application/json')) {
+                throw new Error('the server returned an HTML page instead of JSON' + (res.status ? ' (HTTP ' + res.status + ')' : '') + '. This usually means the request timed out at a reverse proxy; check the app logs and retry.');
+            }
             const data = await res.json();
+            if (!res.ok) {
+                throw new Error((data && (data.detail || data.message || data.error)) || ('HTTP ' + res.status));
+            }
             const items = (data && data.items) || [];
             if (box) {
                 box.textContent = '';
                 if (!items.length) {
-                    _identityMessage(box, 'No attribution drift found: stored series match the automatic parse.');
+                    _identityMessage(box, data && data.truncated
+                        ? 'No attribution drift found in the scanned portion (the audit stopped early after ' + Number(data.elapsed_ms || 0) + ' ms).'
+                        : 'No attribution drift found: stored series match the automatic parse.');
                 }
                 items.forEach(function (item) {
                     const row = document.createElement('div');
@@ -1178,10 +1262,18 @@
             }
             const checked = Number((data && data.checked) || 0);
             const flagged = Number((data && data.count) || items.length);
-            showToast('Attribution audit: ' + checked + ' release(s) checked, ' + flagged + ' flagged.', 'info');
+            const suffix = data && data.truncated
+                ? ' (partial scan, ' + Number(data.elapsed_ms || 0) + ' ms)'
+                : '';
+            showToast('Attribution audit: ' + checked + ' release(s) checked, ' + flagged + ' flagged' + suffix + '.', data && data.truncated ? 'info' : 'success');
         } catch (err) {
-            _identityMessage(box, 'Attribution audit failed: ' + err, 'text-xs text-rose-300');
+            if (err && err.name === 'AbortError') {
+                _identityMessage(box, 'Attribution audit timed out after 60 seconds. The audit stops early server-side; retry, or run it after a feed scan finishes.', 'text-xs text-rose-300');
+            } else {
+                _identityMessage(box, 'Attribution audit failed: ' + (err && err.message ? err.message : err), 'text-xs text-rose-300');
+            }
         } finally {
+            clearTimeout(timeoutId);
             if (btn) btn.disabled = false;
         }
     }
@@ -1426,8 +1518,7 @@
         });
     })();
 
-    // Initial loads for the live settings sections.
-    loadSeriesIdentityOverview('');
-    loadSeriesAliasOverrides();
+    // The Series identity and Global alias override sections are collapsed by default
+    // and load their data lazily when the operator expands them.
 </script>
 {% endblock %}

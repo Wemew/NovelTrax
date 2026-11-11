@@ -116,6 +116,15 @@ def test_attribution_audit_refreshes_in_place():
     check_in("Attribution audit: ", audit_source, "audit still reports checked/flagged counts")
     check_in("_identityMessage(box, 'Attribution audit failed: '", audit_source,
              "audit still contains its failure message")
+    # Resilience against an HTML reverse-proxy error page (the reported
+    # "Unexpected token '<' ... is not valid JSON" crash).
+    check_in("content-type", audit_source.lower(), "audit inspects the response content-type")
+    check_in("application/json", audit_source, "audit requires a JSON response")
+    check_in("HTML page instead of JSON", audit_source, "audit explains an HTML/proxy error")
+    check_in("AbortController", audit_source, "audit uses a client-side timeout")
+    check_in("60000", audit_source, "audit timeout is 60 seconds")
+    check_in("truncated", audit_source, "audit surfaces server-side truncation")
+    check_in("elapsed_ms", audit_source, "audit surfaces server elapsed time")
 
 
 def test_other_callers_keep_reload_and_pinned_literals():

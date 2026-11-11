@@ -185,6 +185,11 @@ SETTINGS_IDENTITY_IDS = (
     "btn-series-attribution-audit",
     "series-identity-refresh",
     "btn-refresh-series-aliases",
+    "series-identity-toggle",
+    "series-identity-body",
+    "series-alias-toggle",
+    "series-alias-body",
+    "series-alias-search",
 )
 
 SETTINGS_IDENTITY_JS = (
@@ -195,6 +200,9 @@ SETTINGS_IDENTITY_JS = (
     "async function loadSeriesAliasOverrides(",
     "async function deleteSeriesAlias(",
     "async function runSeriesAttributionAudit(",
+    "function toggleSettingsSection(",
+    "function debounceSeriesAliasSearch(",
+    "function renderSeriesAliasOverrides(",
 )
 
 SETTINGS_IDENTITY_ENDPOINTS = (
@@ -756,6 +764,96 @@ def check_settings_identity_card():
     )
 
 
+def check_settings_collapsible_sections():
+    source = read_text(SETTINGS_TEMPLATE)
+    # Both sections start collapsed.
+    identity_toggle = source.find('id="series-identity-toggle"')
+    alias_toggle = source.find('id="series-alias-toggle"')
+    check(identity_toggle != -1, "settings.html: missing the Series identity toggle")
+    check(alias_toggle != -1, "settings.html: missing the Global alias overrides toggle")
+    check(
+        'aria-expanded="false"' in source[identity_toggle:identity_toggle + 260],
+        "settings.html: the Series identity section must start collapsed (aria-expanded=false)",
+    )
+    check(
+        'aria-expanded="false"' in source[alias_toggle:alias_toggle + 260],
+        "settings.html: the Global alias overrides section must start collapsed (aria-expanded=false)",
+    )
+    check(
+        'id="series-identity-body" class="hidden' in source,
+        "settings.html: the Series identity body must be hidden by default",
+    )
+    check(
+        'id="series-alias-body" class="hidden' in source,
+        "settings.html: the Global alias overrides body must be hidden by default",
+    )
+    check(
+        "onclick=\"toggleSettingsSection('series-identity')\"" in source,
+        "settings.html: Series identity toggle is not wired",
+    )
+    check(
+        "onclick=\"toggleSettingsSection('series-alias')\"" in source,
+        "settings.html: Global alias overrides toggle is not wired",
+    )
+    toggle_body = isolate(
+        source,
+        "function toggleSettingsSection(",
+        "function _identityBadge(",
+        "settings.html toggleSettingsSection",
+    )
+    for marker in (
+        "classList.toggle('hidden'",
+        "aria-expanded",
+        "rotate-180",
+        "dataset.loaded",
+        "loadSeriesIdentityOverview('')",
+        "loadSeriesAliasOverrides()",
+    ):
+        check(marker in toggle_body, "settings.html: toggleSettingsSection is missing %r" % marker)
+    check(
+        "Initial loads for the live settings sections." not in source,
+        "settings.html: the collapsed sections must not eager-load their data",
+    )
+
+    # Global alias overrides are searchable like the identity list.
+    check(
+        'id="series-alias-search"' in source,
+        "settings.html: missing the alias search input",
+    )
+    check(
+        'oninput="debounceSeriesAliasSearch()"' in source,
+        "settings.html: alias search is not wired to its debounce",
+    )
+    check(
+        "}, 250);" in isolate(
+            source,
+            "function debounceSeriesAliasSearch(",
+            "async function loadSeriesAliasOverrides(",
+            "settings.html debounceSeriesAliasSearch",
+        ),
+        "settings.html: the alias search must be debounced by 250 ms",
+    )
+    render_body = isolate(
+        source,
+        "function renderSeriesAliasOverrides(",
+        "async function loadSeriesAliasOverrides(",
+        "settings.html renderSeriesAliasOverrides",
+    )
+    for marker in (
+        "source_name",
+        "target_name",
+        "origin",
+        "No alias overrides match this search.",
+        "No global alias overrides are stored.",
+        "series-alias-delete-btn",
+    ):
+        check(marker in render_body, "settings.html: alias render is missing %r" % marker)
+    check(
+        "_seriesAliasRows" in source and "_seriesAliasSearchTimer" in source,
+        "settings.html: alias search state is missing",
+    )
+
+
 def check_settings_display_card():
     source = read_text(SETTINGS_TEMPLATE)
     for element_id in DISPLAY_IDS:
@@ -1084,6 +1182,7 @@ def main():
     check_release_partials_preserved()
 
     check_settings_identity_card()
+    check_settings_collapsible_sections()
     check_settings_display_card()
     check_settings_storage_card()
     check_settings_save_payload()
