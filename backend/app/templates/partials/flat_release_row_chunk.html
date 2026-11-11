@@ -1,16 +1,16 @@
 {% for r in releases %}
-<tr class="release-row hover:bg-slate-800/40 transition-colors" data-search="{{ r.title|lower }} {{ (r.series_name or '')|lower }}">
+<tr class="release-row hover:bg-slate-850/50 transition-colors" data-search="{{ r.title|lower }} {{ (r.series_name or '')|lower }}">
     <!-- Title & Cover -->
-    <td class="py-3.5 px-4 sm:px-6 font-medium text-white flex items-center gap-3">
+    <td class="py-3.5 px-4 sm:px-6 font-medium text-white flex items-center gap-3" data-label="Release">
         {% if r.cover_url %}
-        <img src="/api/covers?url={{ r.cover_url|urlencode }}" alt="Cover" loading="lazy" decoding="async" onclick="openImageModal(this.src, '{{ (r.series_name or r.title)|escape }}')" class="w-10 h-14 object-cover rounded shadow flex-shrink-0 border border-slate-800 cursor-pointer hover:opacity-80 hover:scale-105 transition-all cover-placeholder" title="Click to enlarge thumbnail">
+        <img src="/api/covers?url={{ r.cover_url|urlencode }}" alt="Cover" loading="lazy" decoding="async" onclick="openImageModal(this.src, '{{ (r.series_name or r.title)|escape }}')" class="w-10 h-14 object-cover rounded flex-shrink-0 border border-slate-700/60 cursor-pointer hover:opacity-90 transition-all cover-placeholder" title="Click to enlarge thumbnail">
         {% else %}
         <div class="w-10 h-14 rounded bg-slate-800 border border-slate-700 flex items-center justify-center flex-shrink-0 text-slate-500">
             <i data-lucide="book" class="w-4 h-4"></i>
         </div>
         {% endif %}
         <div class="min-w-0">
-            <a href="{{ r.link }}" target="_blank" rel="noopener noreferrer" class="font-bold text-white hover:text-brand-400 transition-colors line-clamp-1">
+            <a href="{{ r.link }}" target="_blank" rel="noopener noreferrer" class="font-bold text-white hover:text-brand-400 transition-colors line-clamp-2 leading-snug">
                 {{ r.title }}
             </a>
             {% if r.author %}
@@ -33,7 +33,7 @@
     </td>
 
     <!-- Series & Volume -->
-    <td class="py-3.5 px-4">
+    <td class="py-3.5 px-4" data-label="Series &amp; Volume">
         {% if r.series_link %}
         <a href="{{ r.series_link }}" target="_blank" rel="noopener noreferrer" class="font-bold text-white hover:text-brand-400 transition-colors inline-flex items-center gap-1 group/slink" title="Open Series page on website">
             <span>{{ r.series_name or '—' }}</span>
@@ -55,14 +55,14 @@
             </span>
             {% if r.missing_volumes and r.missing_volumes|length > 0 %}
             <span class="block text-[10px] text-amber-400 font-semibold">
-                Missing: Vol {{ r.missing_volumes|join(', ') }}
+                Missing: Vol {% for mv in r.missing_volumes %}{{ mv|int if mv == mv|int else mv }}{% if not loop.last %}, {% endif %}{% endfor %}
             </span>
             {% endif %}
         </span>
         {% elif r.volume is not none %}
         <span class="block mt-0.5">
-            <span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-slate-800 text-amber-300 border border-slate-700">
-                Vol. {{ r.volume }}
+            <span class="vol-badge vol-spine vol-spine-wanted px-1.5 py-0.5 text-[10px] font-bold border">
+                Vol. {{ r.volume|int if r.volume == r.volume|int else r.volume }}
             </span>
         </span>
         {% else %}
@@ -82,7 +82,7 @@
     </td>
 
     <!-- Source Feed -->
-    <td class="py-3.5 px-4 text-slate-400">
+    <td class="py-3.5 px-4 text-slate-400" data-label="Feed Source">
         <span class="inline-flex items-center gap-1">
             <i data-lucide="radio" class="w-3 h-3 text-slate-500"></i>
             {{ r.source_feed_name or 'Web Scraper' }}
@@ -90,7 +90,7 @@
     </td>
 
     <!-- Status Badge -->
-    <td class="py-3.5 px-4 text-center">
+    <td class="py-3.5 px-4 text-center" data-label="Status">
         {% if r.status == 'REQUESTED' %}
         <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/15 text-amber-300 border border-amber-500/30">
             REQUESTED
@@ -104,7 +104,7 @@
             IGNORED
         </span>
         {% else %}
-        <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-medium bg-blue-500/15 text-blue-300 border border-blue-500/30">
+        <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-medium bg-sky-500/15 text-sky-300 border border-sky-500/30">
             NEW
         </span>
         {% endif %}
@@ -114,12 +114,12 @@
     </td>
 
     <!-- Date -->
-    <td class="py-3.5 px-4 text-center text-slate-500 font-mono text-[11px]">
+    <td class="py-3.5 px-4 text-center text-slate-500 font-mono text-[11px] whitespace-nowrap" data-label="Published">
         {{ r.pub_date[:10] if r.pub_date else r.created_at[:10] }}
     </td>
 
     <!-- Action Buttons -->
-    <td class="py-3.5 px-4 text-right">
+    <td class="py-3.5 px-4 text-right nt-cell-actions" data-label="Actions">
         <div class="flex items-center justify-end gap-1.5">
             {% set dl_target = (r.download_url or r.link or '')|string %}
             {% set dl_lower = dl_target|lower %}

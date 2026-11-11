@@ -5,87 +5,123 @@
 {% block content %}
 <div class="space-y-8">
 
-    <!-- Top Status & Stats Grid -->
+    <!-- Page Header -->
+    <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div>
+            <h1 class="text-2xl font-display font-bold tracking-tight text-white flex items-center gap-2.5">
+                <i data-lucide="layout-dashboard" class="w-6 h-6 text-brand-400"></i>
+                NovelTrax Dashboard
+            </h1>
+            <p class="text-xs text-slate-400 mt-1">
+                Automated novel release tracking across your feeds, with Calibre library monitoring that never locks your catalog.
+            </p>
+        </div>
+
+        <div class="flex flex-wrap items-center gap-2">
+            <span class="inline-flex items-center gap-2 px-3 py-1.5 rounded-xl border text-xs font-semibold {% if calibre_status.available %}bg-emerald-500/10 text-emerald-400 border-emerald-500/30{% else %}bg-rose-500/10 text-rose-400 border-rose-500/30{% endif %}" title="Calibre library status">
+                <span class="w-1.5 h-1.5 rounded-full {% if calibre_status.available %}bg-emerald-400{% else %}bg-rose-400{% endif %}"></span>
+                Calibre {% if calibre_status.available %}Connected{% else %}Unavailable{% endif %}
+            </span>
+            <a href="/series" class="nt-btn nt-btn-secondary">
+                <i data-lucide="layers" class="w-3.5 h-3.5"></i>
+                View Series
+            </a>
+        </div>
+    </div>
+
+    <!-- KPI Grid -->
     <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <!-- Stat: Pending Requests -->
-        <div class="bg-slate-900/90 border border-amber-500/30 rounded-2xl p-5 shadow-lg relative overflow-hidden group">
-            <div class="absolute -right-2 -bottom-2 w-24 h-24 bg-amber-500/10 rounded-full blur-xl group-hover:bg-amber-500/20 transition-all"></div>
-            <div class="flex items-center justify-between">
-                <div>
-                    <p class="text-xs font-semibold uppercase tracking-wider text-amber-400">Pending Requests</p>
-                    <h3 class="text-3xl font-black text-white mt-1">{{ stats.pending_requests }}</h3>
-                    <p class="text-xs text-slate-400 mt-1">Novel releases missing from Calibre</p>
+        <a href="/releases?status=REQUESTED" class="bg-darkcard border border-slate-800/80 rounded-2xl p-5 shadow-lg hover:border-slate-700 transition-colors group">
+            <div class="flex items-start justify-between gap-3">
+                <div class="min-w-0">
+                    <p class="text-[10px] uppercase tracking-wider text-slate-400 font-semibold">Pending Requests</p>
+                    <p class="kpi-number font-mono text-3xl font-bold text-white mt-2 leading-none">{{ stats.pending_requests }}</p>
                 </div>
-                <div class="w-12 h-12 rounded-xl bg-amber-500/20 border border-amber-500/30 flex items-center justify-center text-amber-400">
-                    <i data-lucide="bookmark-check" class="w-6 h-6"></i>
+                <div class="w-10 h-10 rounded-xl bg-amber-500/10 border border-amber-500/25 flex items-center justify-center text-amber-400 flex-shrink-0">
+                    <i data-lucide="bookmark-check" class="w-5 h-5"></i>
                 </div>
             </div>
-        </div>
+            <p class="text-xs text-slate-400 mt-3">Novel releases missing from Calibre</p>
+            <span class="mt-3 inline-flex items-center gap-1 text-[11px] font-semibold text-brand-400 group-hover:text-brand-300 transition-colors">
+                View pending
+                <i data-lucide="arrow-right" class="w-3 h-3"></i>
+            </span>
+        </a>
 
         <!-- Stat: Monitored Series -->
-        <div class="bg-slate-900/90 border border-slate-800 rounded-2xl p-5 shadow-lg relative overflow-hidden group">
-            <div class="absolute -right-2 -bottom-2 w-24 h-24 bg-brand-500/10 rounded-full blur-xl group-hover:bg-brand-500/20 transition-all"></div>
-            <div class="flex items-center justify-between">
-                <div>
-                    <p class="text-xs font-semibold uppercase tracking-wider text-slate-400">Tracked Series</p>
-                    <h3 class="text-3xl font-black text-white mt-1">{{ stats.monitored_series }}</h3>
-                    <p class="text-xs text-slate-400 mt-1">Auto-populated from Calibre</p>
+        <a href="/series" class="bg-darkcard border border-slate-800/80 rounded-2xl p-5 shadow-lg hover:border-slate-700 transition-colors group">
+            <div class="flex items-start justify-between gap-3">
+                <div class="min-w-0">
+                    <p class="text-[10px] uppercase tracking-wider text-slate-400 font-semibold">Tracked Series</p>
+                    <p class="kpi-number font-mono text-3xl font-bold text-white mt-2 leading-none">{{ stats.monitored_series }}</p>
                 </div>
-                <div class="w-12 h-12 rounded-xl bg-brand-500/20 border border-brand-500/30 flex items-center justify-center text-brand-400">
-                    <i data-lucide="library" class="w-6 h-6"></i>
+                <div class="w-10 h-10 rounded-xl bg-brand-500/10 border border-brand-500/25 flex items-center justify-center text-brand-400 flex-shrink-0">
+                    <i data-lucide="library" class="w-5 h-5"></i>
                 </div>
             </div>
-        </div>
+            <p class="text-xs text-slate-400 mt-3">Auto-populated from Calibre</p>
+            <span class="mt-3 inline-flex items-center gap-1 text-[11px] font-semibold text-brand-400 group-hover:text-brand-300 transition-colors">
+                View tracked
+                <i data-lucide="arrow-right" class="w-3 h-3"></i>
+            </span>
+        </a>
 
         <!-- Stat: Acquired in Library -->
-        <div class="bg-slate-900/90 border border-slate-800 rounded-2xl p-5 shadow-lg relative overflow-hidden group">
-            <div class="absolute -right-2 -bottom-2 w-24 h-24 bg-emerald-500/10 rounded-full blur-xl group-hover:bg-emerald-500/20 transition-all"></div>
-            <div class="flex items-center justify-between">
-                <div>
-                    <p class="text-xs font-semibold uppercase tracking-wider text-slate-400">Acquired / Resolved</p>
-                    <h3 class="text-3xl font-black text-white mt-1">{{ stats.acquired_books }}</h3>
-                    <p class="text-xs text-slate-400 mt-1">Automatically cleared via Calibre</p>
+        <a href="/releases?status=IN_CALIBRE" class="bg-darkcard border border-slate-800/80 rounded-2xl p-5 shadow-lg hover:border-slate-700 transition-colors group">
+            <div class="flex items-start justify-between gap-3">
+                <div class="min-w-0">
+                    <p class="text-[10px] uppercase tracking-wider text-slate-400 font-semibold">Acquired / Resolved</p>
+                    <p class="kpi-number font-mono text-3xl font-bold text-white mt-2 leading-none">{{ stats.acquired_books }}</p>
                 </div>
-                <div class="w-12 h-12 rounded-xl bg-emerald-500/20 border border-emerald-500/30 flex items-center justify-center text-emerald-400">
-                    <i data-lucide="check-circle-2" class="w-6 h-6"></i>
+                <div class="w-10 h-10 rounded-xl bg-emerald-500/10 border border-emerald-500/25 flex items-center justify-center text-emerald-400 flex-shrink-0">
+                    <i data-lucide="check-circle-2" class="w-5 h-5"></i>
                 </div>
             </div>
-        </div>
+            <p class="text-xs text-slate-400 mt-3">Automatically cleared via Calibre</p>
+            <span class="mt-3 inline-flex items-center gap-1 text-[11px] font-semibold text-brand-400 group-hover:text-brand-300 transition-colors">
+                View acquired
+                <i data-lucide="arrow-right" class="w-3 h-3"></i>
+            </span>
+        </a>
 
         <!-- Stat: Active Feeds -->
-        <div class="bg-slate-900/90 border border-slate-800 rounded-2xl p-5 shadow-lg relative overflow-hidden group">
-            <div class="absolute -right-2 -bottom-2 w-24 h-24 bg-blue-500/10 rounded-full blur-xl group-hover:bg-blue-500/20 transition-all"></div>
-            <div class="flex items-center justify-between">
-                <div>
-                    <p class="text-xs font-semibold uppercase tracking-wider text-slate-400">Active Feeds</p>
-                    <h3 class="text-3xl font-black text-white mt-1">{{ stats.active_feeds }}</h3>
-                    <p class="text-xs text-slate-400 mt-1">J-Novels & LN scrapers active</p>
+        <a href="/feeds" class="bg-darkcard border border-slate-800/80 rounded-2xl p-5 shadow-lg hover:border-slate-700 transition-colors group">
+            <div class="flex items-start justify-between gap-3">
+                <div class="min-w-0">
+                    <p class="text-[10px] uppercase tracking-wider text-slate-400 font-semibold">Active Feeds</p>
+                    <p class="kpi-number font-mono text-3xl font-bold text-white mt-2 leading-none">{{ stats.active_feeds }}</p>
                 </div>
-                <div class="w-12 h-12 rounded-xl bg-blue-500/20 border border-blue-500/30 flex items-center justify-center text-blue-400">
-                    <i data-lucide="radio" class="w-6 h-6"></i>
+                <div class="w-10 h-10 rounded-xl bg-cyan-500/10 border border-cyan-500/25 flex items-center justify-center text-cyan-400 flex-shrink-0">
+                    <i data-lucide="radio" class="w-5 h-5"></i>
                 </div>
             </div>
-        </div>
+            <p class="text-xs text-slate-400 mt-3">J-Novels &amp; LN scrapers active</p>
+            <span class="mt-3 inline-flex items-center gap-1 text-[11px] font-semibold text-brand-400 group-hover:text-brand-300 transition-colors">
+                View feeds
+                <i data-lucide="arrow-right" class="w-3 h-3"></i>
+            </span>
+        </a>
     </div>
 
     <!-- New Series Discovery Alert Banner (if any) -->
     {% if stats.discovered_count > 0 %}
-    <div class="bg-gradient-to-r from-amber-950/40 via-slate-900 to-slate-900 border border-amber-500/30 rounded-2xl p-4 sm:p-5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 shadow-lg">
+    <div class="bg-amber-500/10 border border-amber-500/30 rounded-2xl p-4 sm:p-5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 shadow-lg">
         <div class="flex items-center space-x-3.5">
-            <div class="w-10 h-10 rounded-xl bg-amber-500/20 border border-amber-500/30 text-amber-400 flex items-center justify-center flex-shrink-0">
+            <div class="w-10 h-10 rounded-xl bg-amber-500/15 border border-amber-500/30 text-amber-400 flex items-center justify-center flex-shrink-0">
                 <i data-lucide="compass" class="w-5 h-5"></i>
             </div>
             <div>
-                <div class="flex items-center gap-2">
-                    <h4 class="font-bold text-white text-sm">New Series & Volume 1 Releases Discovered</h4>
-                    <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30">{{ stats.discovered_count }} Awaiting Review</span>
+                <div class="flex items-center gap-2 flex-wrap">
+                    <h4 class="font-display font-bold text-white text-sm">New Series &amp; Volume 1 Releases Discovered</h4>
+                    <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30 font-mono">{{ stats.discovered_count }} Awaiting Review</span>
                 </div>
                 <p class="text-xs text-slate-400 mt-0.5">
                     Newly detected Volume 1 or unnumbered releases found on your feeds. Easily 1-click Track or Blacklist them.
                 </p>
             </div>
         </div>
-        <a href="/discovery" class="text-xs px-3.5 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold flex items-center gap-1.5 transition-all shadow-md shadow-amber-500/20 whitespace-nowrap">
+        <a href="/discovery" class="text-xs px-3.5 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold flex items-center gap-1.5 transition-colors shadow-md shadow-amber-500/20 whitespace-nowrap">
             <span>Review New Series</span>
             <i data-lucide="arrow-right" class="w-3.5 h-3.5"></i>
         </a>
@@ -93,21 +129,21 @@
     {% endif %}
 
     <!-- Calibre Library Status Banner -->
-    <div class="bg-[#111827] border border-slate-800 rounded-2xl p-4 sm:p-5 flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+    <div class="bg-darkcard border border-slate-800/80 rounded-2xl p-4 sm:p-5 flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
         <div class="flex items-center space-x-3.5">
             <div class="w-10 h-10 rounded-xl {% if calibre_status.available %}bg-emerald-500/15 border border-emerald-500/30 text-emerald-400{% else %}bg-rose-500/15 border border-rose-500/30 text-rose-400{% endif %} flex items-center justify-center flex-shrink-0">
                 <i data-lucide="database" class="w-5 h-5"></i>
             </div>
-            <div>
-                <div class="flex items-center gap-2">
-                    <h4 class="font-semibold text-white text-sm">Calibre Library (Zero-Lock Storage)</h4>
+            <div class="min-w-0">
+                <div class="flex items-center gap-2 flex-wrap">
+                    <h4 class="font-display font-semibold text-white text-sm">Calibre Library (Zero-Lock Storage)</h4>
                     {% if calibre_status.available %}
                         <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-500/15 text-emerald-400 border border-emerald-500/20">Connected (Read-Only)</span>
                     {% else %}
                         <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold bg-rose-500/15 text-rose-400 border border-rose-500/20">Not Found</span>
                     {% endif %}
                 </div>
-                <p class="text-xs text-slate-400 mt-0.5 font-mono">
+                <p class="text-xs text-slate-400 mt-0.5 font-mono break-words-anywhere">
                     {{ calibre_status.db_path or 'Path: /calibre/metadata.db' }}
                     {% if calibre_status.available %}
                         &bull; <span class="text-slate-300 font-sans">{{ calibre_status.total_books }} Books, {{ calibre_status.total_series }} Series</span>
@@ -116,11 +152,11 @@
             </div>
         </div>
         <div class="flex items-center gap-2 w-full md:w-auto">
-            <a href="/series" class="text-xs px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 flex items-center gap-1.5 transition-colors">
+            <a href="/series" class="text-xs px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 flex items-center gap-1.5 transition-colors">
                 <i data-lucide="layers" class="w-3.5 h-3.5"></i>
                 View All Series
             </a>
-            <button onclick="triggerCalibreSync()" class="text-xs px-3 py-1.5 rounded-lg bg-brand-600/20 hover:bg-brand-600/30 text-brand-400 border border-brand-500/30 flex items-center gap-1.5 transition-colors">
+            <button onclick="triggerCalibreSync()" class="text-xs px-3 py-1.5 rounded-xl bg-brand-600/20 hover:bg-brand-600/30 text-brand-400 border border-brand-500/30 flex items-center gap-1.5 transition-colors">
                 <i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i>
                 Rescan Calibre
             </button>
@@ -131,14 +167,14 @@
     <div class="space-y-4">
         <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
             <div>
-                <h2 class="text-xl font-bold text-white flex items-center gap-2">
+                <h2 class="text-xl font-display font-bold tracking-tight text-white flex items-center gap-2">
                     <span>Pending Novel Requests</span>
-                    <span class="text-xs px-2.5 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30 font-semibold">{{ pending_requests|length }} Wanted</span>
+                    <span class="text-xs px-2.5 py-0.5 rounded-full bg-amber-500/15 text-amber-300 border border-amber-500/30 font-semibold font-mono">{{ pending_requests|length }} Wanted</span>
                 </h2>
                 <p class="text-xs text-slate-400">Releases detected from your feeds for tracked series that are not yet in your Calibre library.</p>
             </div>
             <div class="flex items-center gap-2">
-                <a href="/releases?status=REQUESTED" class="text-xs text-brand-400 hover:text-brand-300 flex items-center gap-1 font-medium">
+                <a href="/releases?status=REQUESTED" class="text-xs text-brand-400 hover:text-brand-300 flex items-center gap-1 font-medium transition-colors">
                     View all in full table <i data-lucide="chevron-right" class="w-4 h-4"></i>
                 </a>
             </div>
@@ -147,16 +183,16 @@
         {% if pending_requests %}
         <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
             {% for req in pending_requests[:9] %}
-            <div class="bg-slate-900/90 border border-slate-800 hover:border-slate-700 rounded-2xl p-4 flex flex-col justify-between transition-all hover:shadow-xl group">
+            <div class="bg-darkcard border border-slate-800/80 hover:border-slate-700 rounded-2xl p-4 flex flex-col justify-between transition-all hover:shadow-xl group">
                 <div>
                     <!-- Top series & volume badge -->
                     <div class="flex items-start justify-between gap-2 mb-2">
-                        <span class="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-medium bg-brand-500/10 text-brand-400 border border-brand-500/20">
+                        <span class="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-medium bg-brand-500/10 text-brand-400 border border-brand-500/20 break-words-anywhere">
                             {{ req.series_name or 'Novel' }}
                         </span>
                         {% if req.volume is not none %}
-                        <span class="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-bold bg-amber-500/15 text-amber-300 border border-amber-500/30">
-                            Vol. {{ req.volume }}
+                        <span class="vol-badge vol-spine vol-spine-wanted inline-flex items-center px-2 py-0.5 text-[11px] font-bold flex-shrink-0">
+                            Vol. {{ req.volume|int if req.volume == req.volume|int else req.volume }}
                         </span>
                         {% endif %}
                     </div>
@@ -166,21 +202,21 @@
                         {% if req.cover_url %}
                         <img src="/api/covers?url={{ req.cover_url|urlencode }}" alt="Cover" loading="lazy" onclick="openImageModal(this.src, '{{ (req.series_name or req.title)|escape }}')" class="w-16 h-24 object-cover rounded-lg border border-slate-800 flex-shrink-0 shadow-md cursor-pointer hover:opacity-85 hover:scale-[1.03] transition-all" title="Click to enlarge thumbnail">
                         {% else %}
-                        <div class="w-16 h-24 rounded-lg bg-slate-800/80 border border-slate-700 flex flex-col items-center justify-center flex-shrink-0 text-slate-500">
+                        <div class="w-16 h-24 rounded-lg bg-slate-900/60 border border-slate-800/70 flex flex-col items-center justify-center flex-shrink-0 text-slate-500">
                             <i data-lucide="book" class="w-6 h-6"></i>
                             <span class="text-[9px] mt-1 font-semibold">EPUB</span>
                         </div>
                         {% endif %}
 
                         <div class="min-w-0 flex-1">
-                            <h3 class="text-sm font-bold text-white line-clamp-2 group-hover:text-brand-400 transition-colors" title="{{ req.title }}">
+                            <h3 class="text-sm font-display font-bold text-white line-clamp-2 break-words-anywhere group-hover:text-brand-400 transition-colors" title="{{ req.title }}">
                                 {{ req.title }}
                             </h3>
                             <p class="text-[11px] text-slate-400 mt-1 flex items-center gap-1">
                                 <i data-lucide="globe" class="w-3 h-3 text-slate-500"></i>
                                 {{ req.source_feed_name or 'Web Feed' }}
                             </p>
-                            <p class="text-[11px] text-slate-500 mt-0.5 flex items-center gap-1">
+                            <p class="text-[11px] text-slate-500 mt-0.5 flex items-center gap-1 font-mono">
                                 <i data-lucide="calendar" class="w-3 h-3 text-slate-500"></i>
                                 {{ req.pub_date[:10] if req.pub_date else 'Recent' }}
                             </p>
@@ -189,7 +225,7 @@
 
                     <!-- Synopsis / Description preview (Scrollable) -->
                     {% if req.description %}
-                    <div class="max-h-24 overflow-y-auto pr-1 text-xs text-slate-300/90 mt-2.5 leading-relaxed bg-slate-950/50 p-2.5 rounded-xl border border-slate-800/60 whitespace-pre-line custom-scrollbar" title="{{ req.description }}">{{ req.description.strip() }}</div>
+                    <div class="max-h-24 overflow-y-auto pr-1 text-xs text-slate-300/90 mt-2.5 leading-relaxed bg-slate-950/50 p-2.5 rounded-xl border border-slate-800/70 whitespace-pre-line break-words-anywhere custom-scrollbar" title="{{ req.description }}">{{ req.description.strip() }}</div>
                     {% endif %}
                 </div>
 
@@ -220,16 +256,16 @@
             {% endfor %}
         </div>
         {% else %}
-        <div class="bg-slate-900/60 border border-slate-800/80 rounded-2xl p-12 text-center">
+        <div class="bg-darkcard border border-slate-800/80 rounded-2xl p-12 text-center">
             <div class="w-14 h-14 rounded-2xl bg-brand-500/10 text-brand-400 border border-brand-500/20 flex items-center justify-center mx-auto mb-3">
                 <i data-lucide="check-check" class="w-7 h-7"></i>
             </div>
-            <h3 class="text-base font-bold text-white">All caught up!</h3>
+            <h3 class="text-base font-display font-bold text-white">All caught up!</h3>
             <p class="text-xs text-slate-400 max-w-md mx-auto mt-1">
                 You have no pending novel requests. Whenever a new volume of your tracked series appears on J-Novels or your configured feeds, it will be listed right here.
             </p>
             <div class="mt-4 flex items-center justify-center gap-3">
-                <button onclick="triggerFeedCheck()" class="btn-feed-check text-xs px-3.5 py-2 rounded-lg bg-brand-600 hover:bg-brand-500 text-white font-medium flex items-center gap-1.5 transition-colors shadow-sm active:scale-95">
+                <button onclick="triggerFeedCheck()" class="btn-feed-check text-xs px-3.5 py-2 rounded-xl bg-brand-600 hover:bg-brand-500 text-white font-medium flex items-center gap-1.5 transition-colors shadow-md shadow-brand-600/20 active:scale-95">
                     <i data-lucide="radio" class="icon-feed-check w-3.5 h-3.5"></i>
                     Check Feeds Now
                 </button>
@@ -241,13 +277,13 @@
     <!-- Recent Activity Log Section -->
     <div class="space-y-4">
         <div class="flex items-center justify-between">
-            <h2 class="text-base font-bold text-white flex items-center gap-2">
+            <h2 class="text-xl font-display font-bold tracking-tight text-white flex items-center gap-2">
                 <i data-lucide="activity" class="w-4 h-4 text-brand-400"></i>
-                Recent Activity & Auto-Resolutions
+                Recent Activity &amp; Auto-Resolutions
             </h2>
-            <a href="/logs" class="text-xs text-slate-400 hover:text-white">View full log &rarr;</a>
+            <a href="/logs" class="text-xs text-slate-400 hover:text-white transition-colors">View full log &rarr;</a>
         </div>
-        <div class="bg-slate-900/80 border border-slate-800 rounded-2xl overflow-hidden divide-y divide-slate-800/60">
+        <div class="bg-darkcard border border-slate-800/80 rounded-2xl overflow-hidden divide-y divide-slate-800/60">
             {% for log in recent_logs[:5] %}
             <div class="p-3.5 sm:px-5 flex items-center justify-between text-xs">
                 <div class="flex items-center space-x-3 min-w-0">

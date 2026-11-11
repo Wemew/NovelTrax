@@ -1,9 +1,9 @@
 {% for item in discovered_releases %}
-<div class="discovery-card bg-slate-900/90 border border-slate-800 hover:border-slate-700 rounded-2xl p-4 flex flex-col justify-between transition-all hover:shadow-xl group" data-title="{{ item.title|lower }}" data-series="{{ (item.series_name or '')|lower }}">
+<div class="discovery-card card-accent bg-darkcard border border-slate-800/80 rounded-2xl p-4 flex flex-col justify-between transition-all group" data-title="{{ item.title|lower }}" data-series="{{ (item.series_name or '')|lower }}">
     <div>
         <!-- Top series & volume badge -->
         <div class="flex items-start justify-between gap-2 mb-2">
-            <span id="series-badge-{{ item.id }}" class="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-bold bg-amber-500/10 text-amber-400 border border-amber-500/20">
+            <span id="series-badge-{{ item.id }}" class="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-bold bg-slate-800/80 text-slate-300 border border-slate-700">
                 {{ item.series_name or 'Standalone Novel' }}
             </span>
             <span class="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-bold {% if item.is_bundle %}bg-purple-500/15 text-purple-300 border border-purple-500/30{% elif item.volume == 1.0 %}bg-brand-500/15 text-brand-300 border border-brand-500/30{% else %}bg-slate-800 text-slate-300 border border-slate-700{% endif %}">
@@ -23,7 +23,7 @@
             {% endif %}
 
             <div class="min-w-0 flex-1">
-                <h3 id="title-heading-{{ item.id }}" class="text-sm font-bold text-white line-clamp-2 group-hover:text-brand-400 transition-colors" title="{{ item.title }}">
+                <h3 id="title-heading-{{ item.id }}" class="text-sm font-bold text-white line-clamp-2 break-words-anywhere group-hover:text-brand-400 transition-colors" title="{{ item.title }}">
                     {{ item.title }}
                 </h3>
                 <p class="text-[11px] text-slate-400 mt-1 flex items-center gap-1">
@@ -39,9 +39,9 @@
 
         <!-- Synopsis / Description preview (Scrollable) -->
         {% if item.description %}
-        <div class="max-h-28 overflow-y-auto pr-1 text-xs text-slate-300/90 mt-2.5 leading-relaxed bg-slate-950/50 p-2.5 rounded-xl border border-slate-800/60 whitespace-pre-line custom-scrollbar" title="{{ item.description }}">{{ item.description.strip() }}</div>
+        <div class="max-h-28 overflow-y-auto pr-1 text-xs text-slate-400 mt-2.5 leading-relaxed border-l-2 border-slate-700 pl-2.5 whitespace-pre-line custom-scrollbar" title="{{ item.description }}">{{ item.description.strip() }}</div>
         {% else %}
-        <div class="mt-2.5 flex items-center justify-between text-[11px] text-slate-500 bg-slate-950/30 px-2.5 py-1.5 rounded-xl border border-slate-800/40" id="synopsis-box-{{ item.id }}">
+        <div class="mt-2.5 flex items-center justify-between text-[11px] text-slate-500 border-l-2 border-slate-800 pl-2.5 py-0.5" id="synopsis-box-{{ item.id }}">
             <span class="italic text-[10px]">No description loaded</span>
             <button data-release-id="{{ item.id }}" onclick="handleFetchSynopsis(this)" class="text-brand-400 hover:text-brand-300 font-semibold flex items-center gap-1 hover:underline text-[10px]">
                 <i data-lucide="sparkles" class="w-3 h-3"></i> Load Description

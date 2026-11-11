@@ -226,6 +226,11 @@ services:
 | **Logs** | Chronological audit trail of all background checks, sync runs, downloader actions, ignore/restore actions and auto-resolutions, with timestamps rendered in the configured timezone (raw UTC on hover). |
 | **Settings** | Calibre container path, sync/check intervals, backfill limits and delays, official-translation-only toggle, **display & logging** (timezone, log level, activity-log retention/max rows + prune now), Discord/generic webhooks, **download engine selector + TorBox engine settings** (API key, enable, delete-after-download, strict selective volume fetch, delete-on-failure, concurrency/chunk/size limits, poll floor, max concurrent, timeout, local downloads folder), **series identity & overrides** (per-series reset, global alias list, attribution audit), **storage & diagnostics** (storage health, network diagnostics, database backup, VACUUM) and maintenance tools. The qBittorrent connection settings live in the **Downloads** tab. |
 
+The interface uses the **Sumi Ink & Ai-iro** visual language: blue-ink carbon surfaces, an indigo
+seal accent (distinct from MangaTrax's crimson), Space Grotesk display type, JetBrains Mono for
+index data, hairline borders, book-spine volume badges, mobile card tables and a fixed bottom tab
+bar on phones.
+
 ---
 
 ## 🛠️ How Series & Volume Matching Works

@@ -8,7 +8,7 @@
     <!-- Header & Controls -->
     <div class="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
         <div>
-            <h1 class="text-2xl font-bold text-white tracking-tight flex items-center gap-2">
+            <h1 class="text-2xl font-display font-bold tracking-tight text-white flex items-center gap-2.5">
                 <i data-lucide="star" class="w-6 h-6 text-amber-400"></i>
                 Prioritized Releases & Groups
             </h1>
@@ -20,39 +20,39 @@
         <!-- View Switcher & Status Filters -->
         <div class="flex flex-wrap items-center gap-3">
             <!-- View Mode Switcher -->
-            <div class="flex items-center bg-slate-900 border border-slate-800 rounded-xl p-1 text-xs font-semibold">
+            <div class="flex items-center bg-slate-900 border border-slate-800 rounded-xl p-1 text-xs font-semibold shrink-0">
                 <a href="/prioritized?view=series{% if current_status %}&status={{ current_status }}{% endif %}" 
-                   class="px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition-colors {% if current_view != 'flat' %}bg-brand-600 text-white shadow-sm{% else %}text-slate-400 hover:text-white{% endif %}">
+                   class="px-3 py-1.5 rounded-lg flex items-center gap-1.5 whitespace-nowrap transition-colors {% if current_view != 'flat' %}bg-brand-600 text-white shadow-sm{% else %}text-slate-400 hover:text-white{% endif %}">
                     <i data-lucide="layers" class="w-3.5 h-3.5"></i>
                     Group by Series
                 </a>
                 <a href="/prioritized?view=flat{% if current_status %}&status={{ current_status }}{% endif %}" 
-                   class="px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition-colors {% if current_view == 'flat' %}bg-brand-600 text-white shadow-sm{% else %}text-slate-400 hover:text-white{% endif %}">
+                   class="px-3 py-1.5 rounded-lg flex items-center gap-1.5 whitespace-nowrap transition-colors {% if current_view == 'flat' %}bg-brand-600 text-white shadow-sm{% else %}text-slate-400 hover:text-white{% endif %}">
                     <i data-lucide="list" class="w-3.5 h-3.5"></i>
                     All Releases (Flat)
                 </a>
             </div>
 
             <!-- Status Filter Pills -->
-            <div class="flex items-center gap-1.5 bg-slate-900/60 p-1 rounded-xl border border-slate-800">
+            <div class="flex flex-wrap items-center gap-1.5 bg-slate-900/60 p-1 rounded-xl border border-slate-800 shrink-0 max-w-full">
                 <a href="/prioritized?view={{ current_view }}" 
-                   class="px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors {% if not current_status %}bg-slate-700 text-white{% else %}text-slate-400 hover:text-white{% endif %}">
+                   class="px-2.5 py-1 rounded-lg text-xs font-semibold whitespace-nowrap transition-colors {% if not current_status %}bg-slate-700 text-white{% else %}text-slate-400 hover:text-white{% endif %}">
                     All
                 </a>
                 <a href="/prioritized?view={{ current_view }}&status=REQUESTED" 
-                   class="px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors {% if current_status == 'REQUESTED' %}bg-amber-600 text-white{% else %}text-slate-400 hover:text-amber-400{% endif %}">
+                   class="px-2.5 py-1 rounded-lg text-xs font-semibold whitespace-nowrap transition-colors {% if current_status == 'REQUESTED' %}bg-amber-600 text-white{% else %}text-slate-400 hover:text-amber-400{% endif %}">
                     Wanted
                 </a>
                 <a href="/prioritized?view={{ current_view }}&status=IN_CALIBRE" 
-                   class="px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors {% if current_status == 'IN_CALIBRE' %}bg-emerald-600 text-white{% else %}text-slate-400 hover:text-emerald-400{% endif %}">
+                   class="px-2.5 py-1 rounded-lg text-xs font-semibold whitespace-nowrap transition-colors {% if current_status == 'IN_CALIBRE' %}bg-emerald-600 text-white{% else %}text-slate-400 hover:text-emerald-400{% endif %}">
                     In Calibre
                 </a>
                 <a href="/prioritized?view={{ current_view }}&status=NEW" 
-                   class="px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors {% if current_status == 'NEW' %}bg-blue-600 text-white{% else %}text-slate-400 hover:text-blue-400{% endif %}">
-                    New / Discovery
+                   class="px-2.5 py-1 rounded-lg text-xs font-semibold whitespace-nowrap transition-colors {% if current_status == 'NEW' %}bg-amber-500/20 text-amber-300 border border-amber-500/40{% else %}text-slate-400 hover:text-amber-300{% endif %}">
+                    <span class="sm:hidden">New</span><span class="hidden sm:inline">New / Discovery</span>
                 </a>
                 <a href="/prioritized?view={{ current_view }}&status=IGNORED" 
-                   class="px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors {% if current_status == 'IGNORED' %}bg-slate-700 text-amber-300 border border-amber-500/40{% else %}text-slate-400 hover:text-amber-300{% endif %}" title="View ignored releases">
+                   class="px-2.5 py-1 rounded-lg text-xs font-semibold whitespace-nowrap transition-colors {% if current_status == 'IGNORED' %}bg-slate-700 text-amber-300 border border-amber-500/40{% else %}text-slate-400 hover:text-amber-300{% endif %}" title="View ignored releases">
                     Ignored
                 </a>
             </div>
@@ -60,7 +60,7 @@
     </div>
 
     <!-- Prioritized Groups Management Card -->
-    <div class="bg-slate-900/90 border border-amber-500/20 rounded-2xl p-4 shadow-xl">
+    <div class="bg-darkcard border border-amber-500/20 rounded-2xl p-4 shadow-lg">
         <div class="flex flex-col md:flex-row items-start md:items-center justify-between gap-3 mb-3">
             <div class="flex items-center gap-2">
                 <span class="w-2.5 h-2.5 rounded-full bg-amber-400 animate-pulse"></span>
@@ -72,10 +72,10 @@
             <!-- Quick Add Group Form -->
             <form onsubmit="addPrioritizedGroup(event)" class="flex items-center gap-2 w-full md:w-auto">
                 <input type="text" id="newGroupName" placeholder="Group / publisher name (e.g. Yen Press)" required
-                       class="bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-amber-400 w-full sm:w-48">
+                       class="bg-slate-950 border border-slate-700 rounded-xl px-2.5 py-1 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-amber-400 w-full sm:w-48">
                 <input type="text" id="newGroupNotes" placeholder="Notes (optional)" 
-                       class="hidden sm:inline-block bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-amber-400 w-36">
-                <button type="submit" class="px-3 py-1 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs flex items-center gap-1 transition-colors whitespace-nowrap shadow-sm">
+                       class="hidden sm:inline-block bg-slate-950 border border-slate-700 rounded-xl px-2.5 py-1 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-amber-400 w-36">
+                <button type="submit" class="px-3 py-1 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs flex items-center gap-1 transition-colors whitespace-nowrap shadow-sm">
                     <i data-lucide="plus" class="w-3.5 h-3.5"></i>
                     Add Group
                 </button>
@@ -104,7 +104,7 @@
     </div>
 
     <!-- Quick Search Filter Bar -->
-    <div class="bg-slate-900/90 border border-slate-800 rounded-xl p-3 flex items-center gap-3 shadow-md">
+    <div class="bg-darkcard border border-slate-800/80 rounded-2xl p-3 shadow-lg flex items-center gap-3">
         <i data-lucide="search" class="w-4 h-4 text-slate-400"></i>
         <input type="text" id="prioritizedSearchInput" onkeyup="filterPrioritized()" placeholder="Filter prioritized releases by series name or release title..." 
                class="bg-transparent border-0 text-sm text-slate-100 placeholder-slate-500 focus:outline-none w-full">
@@ -119,7 +119,7 @@
         {% else %}
             <div id="series-loading-skeleton" class="space-y-4">
                 {% for _ in range(3) %}
-                <div class="bg-slate-900/90 border border-amber-500/20 rounded-2xl p-5 shadow-lg animate-pulse">
+                <div class="bg-darkcard border border-amber-500/20 rounded-2xl p-5 shadow-lg animate-pulse">
                     <div class="flex flex-col md:flex-row gap-5 items-start">
                         <div class="w-24 h-36 bg-slate-800 rounded-xl flex-shrink-0"></div>
                         <div class="flex-1 w-full space-y-3">
@@ -137,14 +137,14 @@
 
     <!-- Infinite Scroll / Progressive Load More Sentinel for Series -->
     <div id="load-more-series-container" class="text-center py-6">
-        <div id="series-spinner" class="inline-flex items-center gap-2.5 px-4 py-2 rounded-xl bg-slate-900 border border-slate-800 text-xs text-amber-300">
+        <div id="series-spinner" class="inline-flex items-center gap-2.5 px-4 py-2 rounded-xl bg-slate-900/60 border border-slate-800/70 text-xs text-amber-300">
             <svg class="animate-spin w-4 h-4 text-amber-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
                 <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
                 <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
             </svg>
             <span id="series-loading-text">Loading prioritized series...</span>
         </div>
-        <button onclick="loadMoreSeries()" id="btn-load-more-series" class="hidden px-5 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold items-center gap-2 shadow-md hover:border-slate-600 transition-all active:scale-95">
+        <button onclick="loadMoreSeries()" id="btn-load-more-series" class="hidden px-5 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold items-center gap-2 transition-colors active:scale-95">
             <i data-lucide="chevrons-down" class="w-4 h-4 text-amber-400"></i>
             <span>Load More Series (<span id="deferred-series-count">0</span> remaining)</span>
         </button>
@@ -152,9 +152,9 @@
 
     {% else %}
     <!-- VIEW MODE: ALL RELEASES (FLAT TABLE) -->
-    <div class="bg-slate-900/90 border border-slate-800 rounded-2xl overflow-hidden shadow-xl" id="flatReleasesTable">
+    <div class="bg-darkcard border border-slate-800/80 rounded-2xl overflow-hidden shadow-lg" id="flatReleasesTable">
         <div class="overflow-x-auto">
-            <table class="w-full text-left border-collapse text-xs">
+            <table class="w-full text-left border-collapse text-xs nt-table-cards md:min-w-[900px]">
                 <thead>
                     <tr class="bg-slate-950 border-b border-slate-800 text-slate-400 font-semibold uppercase tracking-wider text-[11px]">
                         <th class="py-3.5 px-4 w-12 text-center">Cover</th>
@@ -170,7 +170,7 @@
                         {% include "partials/flat_release_row_chunk.html" %}
                     {% else %}
                     <tr id="flat-loading-skeleton" class="animate-pulse">
-                        <td colspan="6" class="py-8 text-center text-xs text-slate-500 font-medium">
+                        <td colspan="6" class="py-8 text-center text-xs text-slate-500 font-medium nt-table-empty">
                             <div class="inline-flex items-center gap-2">
                                 <i data-lucide="loader-2" class="w-4 h-4 animate-spin text-amber-400"></i>
                                 <span>Loading prioritized releases...</span>
@@ -182,7 +182,7 @@
             </table>
         </div>
         <div id="load-more-flat-container" class="text-center py-4 bg-slate-950/60 border-t border-slate-800">
-            <button onclick="loadMoreFlat()" id="btn-load-more-flat" class="hidden px-5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold inline-flex items-center gap-2 shadow-md hover:border-slate-600 transition-all active:scale-95">
+            <button onclick="loadMoreFlat()" id="btn-load-more-flat" class="hidden px-5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold inline-flex items-center gap-2 transition-colors active:scale-95">
                 <i data-lucide="chevrons-down" class="w-4 h-4 text-amber-400"></i>
                 <span>Load More Releases (<span id="deferred-flat-count">0</span> remaining)</span>
             </button>
@@ -236,7 +236,7 @@ async function fetchNextSeriesBatch() {
 
         if (isFirstSeriesBatch && data.count === 0) {
             container.innerHTML = `
-                <div class="bg-slate-900 border border-amber-500/20 rounded-2xl p-12 text-center text-slate-500">
+                <div class="bg-darkcard border border-amber-500/20 rounded-2xl p-12 text-center text-slate-500">
                     <i data-lucide="inbox" class="w-12 h-12 mx-auto mb-3 opacity-40"></i>
                     <p class="text-sm font-semibold">No prioritized light novel releases found matching current filters.</p>
                 </div>
@@ -330,7 +330,7 @@ async function fetchNextFlatBatch() {
         if (isFirstFlatBatch && data.count === 0) {
             tbody.innerHTML = `
                 <tr>
-                    <td colspan="6" class="py-12 text-center text-slate-500">
+                    <td colspan="6" class="py-12 text-center text-slate-500 nt-table-empty">
                         No releases found from prioritized groups matching the selected filter.
                     </td>
                 </tr>

@@ -8,7 +8,7 @@
     <!-- Header & Action Row -->
     <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
-            <h1 class="text-2xl font-black text-white flex items-center gap-2.5">
+            <h1 class="text-2xl font-display font-bold tracking-tight text-white flex items-center gap-2.5">
                 <i data-lucide="library" class="w-6 h-6 text-brand-400"></i>
                 Tracked Novel Series
             </h1>
@@ -17,7 +17,7 @@
             </p>
         </div>
         <div class="flex items-center gap-2.5">
-            <button onclick="triggerCalibreSync()" class="text-xs px-3.5 py-2 rounded-xl bg-brand-600 hover:bg-brand-500 text-white font-medium flex items-center gap-2 transition-all shadow-md shadow-brand-600/20 active:scale-95">
+            <button onclick="triggerCalibreSync()" class="text-xs px-3.5 py-2 rounded-xl bg-brand-600 hover:bg-brand-500 text-white font-semibold flex items-center gap-2 transition-colors shadow-md shadow-brand-600/20 active:scale-95">
                 <i data-lucide="refresh-cw" class="w-4 h-4" id="icon-calibre-sync"></i>
                 Sync From Calibre Now
             </button>
@@ -25,23 +25,23 @@
     </div>
 
     <!-- Search & Filter Controls -->
-    <div class="bg-slate-900/80 border border-slate-800 rounded-2xl p-4 flex flex-col sm:flex-row items-center justify-between gap-3">
+    <div class="bg-darkcard border border-slate-800/80 rounded-2xl shadow-lg p-4 flex flex-col sm:flex-row items-center justify-between gap-3">
         <div class="relative w-full sm:w-80">
             <i data-lucide="search" class="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2"></i>
             <input type="text" id="series-search" oninput="filterSeries()" placeholder="Search series name or author..." class="w-full bg-slate-950/70 border border-slate-700/80 rounded-xl pl-10 pr-4 py-2 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500">
         </div>
         <div class="flex items-center gap-2 w-full sm:w-auto justify-end">
             <span class="text-xs text-slate-400 font-medium">Filter:</span>
-            <button onclick="setFilter('all')" id="filter-all" class="text-xs px-3 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-white font-medium">All ({{ series_list|length }})</button>
-            <button onclick="setFilter('monitored')" id="filter-monitored" class="text-xs px-3 py-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 border border-transparent font-medium">Monitored Only</button>
+            <button onclick="setFilter('all')" id="filter-all" class="text-xs px-3 py-1.5 rounded-xl bg-slate-800 border border-slate-700 text-white font-medium transition-colors">All ({{ series_list|length }})</button>
+            <button onclick="setFilter('monitored')" id="filter-monitored" class="text-xs px-3 py-1.5 rounded-xl text-slate-400 hover:text-white hover:bg-slate-800 border border-transparent font-medium transition-colors">Monitored Only</button>
         </div>
     </div>
 
     <!-- Series Table -->
-    <div class="bg-slate-900/90 border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
+    <div class="bg-darkcard border border-slate-800/80 rounded-2xl overflow-hidden shadow-lg">
         <div class="overflow-x-auto">
-            <table class="w-full text-left text-xs">
-                <thead class="bg-[#111827] border-b border-slate-800 text-slate-400 font-semibold uppercase tracking-wider text-[11px]">
+            <table class="w-full text-left text-xs nt-table-cards md:min-w-[960px]">
+                <thead class="bg-slate-900/80 border-b border-slate-800 text-slate-400 font-semibold uppercase tracking-wider text-[11px]">
                     <tr>
                         <th class="py-3.5 px-4 sm:px-6">Series Name</th>
                         <th class="py-3.5 px-4">Author(s)</th>
@@ -55,11 +55,11 @@
                 </thead>
                 <tbody class="divide-y divide-slate-800/60" id="series-table-body">
                     {% for s in series_list %}
-                    <tr class="series-row hover:bg-slate-800/40 transition-colors" data-name="{{ s.name|lower }}" data-author="{{ s.authors|lower }}" data-monitored="{{ s.is_monitored }}">
+                    <tr class="series-row hover:bg-slate-850/50 transition-colors" data-name="{{ s.name|lower }}" data-author="{{ s.authors|lower }}" data-monitored="{{ s.is_monitored }}">
                         <!-- Series Name -->
-                        <td class="py-4 px-4 sm:px-6 font-bold text-white flex items-center gap-3">
+                        <td class="py-4 px-4 sm:px-6 font-bold text-white flex items-center gap-3" data-label="Series Name">
                             {% if s.cover_url %}
-                            <img src="/api/covers?url={{ s.cover_url|urlencode }}" alt="Cover" loading="lazy" onclick="openImageModal(this.src, '{{ s.name|escape }}')" class="w-8 h-11 object-cover rounded shadow flex-shrink-0 border border-slate-800 cursor-pointer hover:opacity-80 hover:scale-105 transition-all" title="Click to enlarge thumbnail">
+                            <img src="/api/covers?url={{ s.cover_url|urlencode }}" alt="Cover" loading="lazy" onclick="openImageModal(this.src, '{{ s.name|escape }}')" class="w-8 h-11 object-cover rounded-md flex-shrink-0 border border-slate-800/80 cursor-pointer hover:opacity-80 transition-all" title="Click to enlarge thumbnail">
                             {% else %}
                             <div class="w-8 h-11 rounded-lg bg-slate-800 flex items-center justify-center text-brand-400 flex-shrink-0">
                                 <i data-lucide="book-marked" class="w-4 h-4"></i>
@@ -86,26 +86,26 @@
                         </td>
 
                         <!-- Authors -->
-                        <td class="py-4 px-4 text-slate-300">
+                        <td class="py-4 px-4 text-slate-300" data-label="Authors">
                             {{ s.authors or 'Unknown' }}
                         </td>
 
                         <!-- Books Count -->
-                        <td class="py-4 px-4 text-center">
+                        <td class="py-4 px-4 text-center" data-label="In Calibre">
                             <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold bg-slate-800 text-slate-200 border border-slate-700">
                                 {{ s.book_count }} books
                             </span>
                         </td>
 
                         <!-- Latest Index -->
-                        <td class="py-4 px-4 text-center">
-                            <span class="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-bold bg-brand-500/10 text-brand-400 border border-brand-500/20">
-                                Vol. {{ s.latest_index }}
+                        <td class="py-4 px-4 text-center" data-label="Latest Owned">
+                            <span class="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-mono font-bold border vol-badge vol-spine vol-spine-owned">
+                                Vol. {{ s.latest_index|int if s.latest_index == s.latest_index|int else s.latest_index }}
                             </span>
                         </td>
 
                         <!-- Website Hub -->
-                        <td class="py-4 px-4 text-center">
+                        <td class="py-4 px-4 text-center" data-label="Website Hub">
                             <div class="flex items-center justify-center gap-1.5">
                                 {% if s.website_url %}
                                 <a href="{{ s.website_url }}" target="_blank" rel="noopener noreferrer" class="px-2.5 py-1 rounded-lg bg-brand-500/10 hover:bg-brand-500/20 text-brand-400 border border-brand-500/20 font-medium inline-flex items-center gap-1.5 transition-colors" title="Open Series Hub on Website">
@@ -124,19 +124,19 @@
                         </td>
 
                         <!-- Monitor Toggle -->
-                        <td class="py-4 px-4 text-center">
+                        <td class="py-4 px-4 text-center" data-label="Monitor Status">
                             <button onclick="toggleSeries({{ s.id }})" class="relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none {% if s.is_monitored %}bg-brand-600{% else %}bg-slate-700{% endif %}" role="switch" aria-checked="{{ 'true' if s.is_monitored else 'false' }}">
                                 <span class="pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out {% if s.is_monitored %}translate-x-5{% else %}translate-x-0{% endif %}"></span>
                             </button>
                         </td>
 
                         <!-- Last Sync -->
-                        <td class="py-4 px-4 text-right text-slate-500 font-mono text-[11px]">
+                        <td class="py-4 px-4 text-right text-slate-500 font-mono text-[11px]" data-label="Last Sync">
                             {{ s.last_sync[:10] if s.last_sync else 'Never' }}
                         </td>
 
                         <!-- Actions: manual Calibre match + AniList refresh -->
-                        <td class="py-4 px-4 text-right">
+                        <td class="py-4 px-4 text-right nt-cell-actions" data-label="Actions">
                             <div class="flex items-center justify-end gap-1.5">
                                 <button type="button" class="series-match-btn p-1.5 rounded-lg bg-slate-800 hover:bg-brand-500/20 text-slate-400 hover:text-brand-300 border border-slate-700 hover:border-brand-500/30 transition-colors"
                                         data-series-id="{{ s.id }}" data-series-name="{{ s.name }}"
@@ -177,7 +177,7 @@
                     </tr>
                     {% else %}
                     <tr>
-                        <td colspan="8" class="py-12 text-center text-slate-500">
+                        <td colspan="8" class="py-12 text-center text-slate-500 nt-table-empty">
                             No series found. Make sure Calibre library path is mounted and click "Sync From Calibre Now".
                         </td>
                     </tr>
@@ -192,7 +192,7 @@
 <!-- Manual Calibre match modal (series page) -->
 <div id="series-match-modal" class="hidden fixed inset-0 z-50">
     <div class="absolute inset-0 bg-slate-950/80 backdrop-blur-sm" onclick="closeSeriesMatchModal()" aria-hidden="true"></div>
-    <div class="relative z-10 w-full max-w-lg mx-auto mt-24 bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl p-5" role="dialog" aria-modal="true" aria-labelledby="series-match-title">
+    <div class="relative z-10 w-full max-w-lg mx-auto mt-24 bg-darkcard border border-slate-800/80 rounded-2xl shadow-2xl p-5" role="dialog" aria-modal="true" aria-labelledby="series-match-title">
         <div class="flex items-start justify-between gap-3">
             <div class="min-w-0">
                 <h2 id="series-match-title" class="text-sm font-bold text-white flex items-center gap-2">
@@ -220,11 +220,11 @@
     function setFilter(type) {
         currentFilter = type;
         document.getElementById('filter-all').className = type === 'all' 
-            ? 'text-xs px-3 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-white font-medium'
-            : 'text-xs px-3 py-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 border border-transparent font-medium';
+            ? 'text-xs px-3 py-1.5 rounded-xl bg-slate-800 border border-slate-700 text-white font-medium transition-colors'
+            : 'text-xs px-3 py-1.5 rounded-xl text-slate-400 hover:text-white hover:bg-slate-800 border border-transparent font-medium transition-colors';
         document.getElementById('filter-monitored').className = type === 'monitored' 
-            ? 'text-xs px-3 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-white font-medium'
-            : 'text-xs px-3 py-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 border border-transparent font-medium';
+            ? 'text-xs px-3 py-1.5 rounded-xl bg-slate-800 border border-slate-700 text-white font-medium transition-colors'
+            : 'text-xs px-3 py-1.5 rounded-xl text-slate-400 hover:text-white hover:bg-slate-800 border border-transparent font-medium transition-colors';
         filterSeries();
     }
 

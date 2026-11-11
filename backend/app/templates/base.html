@@ -2,8 +2,14 @@
 <html lang="en" class="dark">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>{% block title %}NovelTrax{% endblock %} - Calibre Novel Release Monitor</title>
+    <!-- Sumi Ink & Ai-iro brand mark (inline SVG favicon, no extra request) -->
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 36 36' fill='none'%3E%3Crect width='36' height='36' rx='9' fill='%2312141f'/%3E%3Crect x='1' y='1' width='34' height='34' rx='8' stroke='%234f46e5' stroke-opacity='0.5' stroke-width='2'/%3E%3Cpath d='M7 10.5h8.5c1.1 0 2 .9 2 2V28l-6-3.4L7 28V10.5Z' fill='%23e4e5ec'/%3E%3Cpath d='M17.5 12.5c0-1.1.9-2 2-2H28V28l-6-3.4-4.5 2.5V12.5Z' fill='%23a1a4b8'/%3E%3Cpath d='M16 7h3.5v8L17.75 13.8 16 15V7Z' fill='%236366f1'/%3E%3C/svg%3E">
+    <!-- Sumi Ink typography: Space Grotesk (display), Plus Jakarta Sans (UI), JetBrains Mono (data) -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@600;700&display=swap" rel="stylesheet">
     <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
     <!-- Lucide Icons -->
@@ -13,18 +19,40 @@
             darkMode: 'class',
             theme: {
                 extend: {
+                    fontFamily: {
+                        sans: ['"Plus Jakarta Sans"', 'system-ui', 'sans-serif'],
+                        display: ['"Space Grotesk"', 'system-ui', 'sans-serif'],
+                        mono: ['"JetBrains Mono"', 'ui-monospace', 'monospace']
+                    },
                     colors: {
                         brand: {
-                            50: '#f0fdf4',
-                            100: '#dcfce7',
-                            500: '#22c55e',
-                            600: '#16a34a',
-                            700: '#15803d',
-                            900: '#14532d',
+                            50: '#eef2ff',
+                            100: '#e0e7ff',
+                            200: '#c7d2fe',
+                            300: '#a5b4fc',
+                            400: '#818cf8',
+                            500: '#6366f1',
+                            600: '#4f46e5',
+                            700: '#4338ca',
+                            900: '#312e81',
                         },
-                        darkbg: '#0f172a',
-                        darkcard: '#1e293b',
-                        darkborder: '#334155'
+                        /* Sumi Ink & Ai-iro: cool carbon surfaces, indigo seal accent */
+                        darkbg: '#0a0b12',
+                        darkcard: '#12141f',
+                        darkborder: '#242840',
+                        slate: {
+                            100: '#f4f4f7',
+                            200: '#e4e5ec',
+                            300: '#d4d6e2',
+                            400: '#a1a4b8',
+                            500: '#8b8ea3',
+                            600: '#7f8296',
+                            700: '#2e334a',
+                            800: '#202438',
+                            850: '#171a2a',
+                            900: '#0e1120',
+                            950: '#070811',
+                        }
                     }
                 }
             }
@@ -33,14 +61,14 @@
     <style>
         [x-cloak] { display: none !important; }
         ::-webkit-scrollbar { width: 8px; height: 8px; }
-        ::-webkit-scrollbar-track { background: #0f172a; }
-        ::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
-        ::-webkit-scrollbar-thumb:hover { background: #475569; }
+        ::-webkit-scrollbar-track { background: #0a0b12; }
+        ::-webkit-scrollbar-thumb { background: #242840; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #3a4062; }
 
         .custom-scrollbar::-webkit-scrollbar { width: 5px; height: 5px; }
-        .custom-scrollbar::-webkit-scrollbar-track { background: rgba(15, 23, 42, 0.4); border-radius: 4px; }
-        .custom-scrollbar::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
-        .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #475569; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: rgba(10, 11, 18, 0.45); border-radius: 4px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #242840; border-radius: 4px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #3a4062; }
 
         /* Universal word-wrapping rule for cards, titles, and synopses */
         .break-words-anywhere {
@@ -51,7 +79,7 @@
 
         /* Cover shimmer placeholder while lazy loading images */
         .cover-placeholder {
-            background: linear-gradient(110deg, #161e2e 8%, #1f2a3d 18%, #161e2e 33%);
+            background: linear-gradient(110deg, #12141f 8%, #1b1f30 18%, #12141f 33%);
             background-size: 200% 100%;
             animation: shimmer 1.5s linear infinite;
         }
@@ -60,6 +88,7 @@
         }
 
         /* Instant page loading bar */
+        #page-progress-bar { z-index: var(--nt-z-progress); }
         #page-progress-bar.loading {
             opacity: 1 !important;
         }
@@ -83,94 +112,349 @@
         @keyframes spin {
             to { transform: rotate(360deg); }
         }
+
+        /* Consistent keyboard focus ring for every interactive control. */
+        :where(a, button, input, select, textarea, summary):focus-visible {
+            outline: 2px solid rgba(99, 102, 241, 0.85);
+            outline-offset: 2px;
+        }
+        input[type="checkbox"], input[type="radio"] { accent-color: #4f46e5; }
+        [data-dropdown-menu] a:focus-visible,
+        [data-dropdown-menu] button:focus-visible {
+            background-color: rgba(32, 36, 50, 0.92);
+            outline-offset: 0;
+        }
+
+        /* ===== NovelTrax UI layer ===== */
+        :root {
+            --nt-header-h: 4rem;
+            --nt-bottom-bar-h: calc(4rem + env(safe-area-inset-bottom));
+            --nt-z-header: 40;
+            --nt-z-progress: 50;
+            --nt-z-backdrop: 60;
+            --nt-z-sheet: 70;
+            --nt-z-dialog: 90;
+            --nt-z-toast: 100;
+        }
+        .nt-skip-link {
+            position: absolute; left: 0.75rem; top: -3rem; z-index: 200;
+            background: #4f46e5; color: #fff; padding: 0.5rem 0.9rem;
+            border-radius: 0.5rem; font-size: 0.8rem; font-weight: 700;
+            transition: top 0.15s ease;
+        }
+        .nt-skip-link:focus { top: 0.75rem; }
+        .nt-skip-link:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+        #mobile-menu-backdrop { z-index: var(--nt-z-backdrop); }
+        #mobile-menu.nt-sheet {
+            position: fixed; left: 0; right: 0; bottom: 0; z-index: var(--nt-z-sheet);
+            max-height: 80dvh; overflow-y: auto;
+            border-radius: 1rem 1rem 0 0;
+            padding-bottom: env(safe-area-inset-bottom);
+            background: #0a0b12;
+            border-top: 1px solid #242840;
+            box-shadow: 0 -20px 60px rgba(0, 0, 0, 0.55);
+        }
+        body.nt-scroll-locked { overflow: hidden; }
+        body.nt-modal-open .nt-bottom-bar,
+        body.nt-modal-open #offline-banner { visibility: hidden; }
+        body.nt-modal-open #toast-container button,
+        body.nt-modal-open #toast-errors button { pointer-events: none; opacity: 0.5; }
+        .nt-bottom-bar {
+            position: fixed; left: 0; right: 0; bottom: 0; z-index: var(--nt-z-header);
+            display: none; grid-template-columns: repeat(5, minmax(0, 1fr));
+            background: rgba(14, 16, 27, 0.97);
+            border-top: 1px solid #242840;
+            padding-bottom: env(safe-area-inset-bottom);
+            backdrop-filter: blur(10px);
+        }
+        @media (max-width: 767px) {
+            .nt-bottom-bar { display: grid; }
+            body { padding-bottom: var(--nt-bottom-bar-h); }
+        }
+        .nt-bottom-bar a {
+            min-height: 44px; display: flex; flex-direction: column;
+            align-items: center; justify-content: center; gap: 2px;
+            font-size: 10px; font-weight: 600; color: #8b8ea3;
+            padding: 6px 2px; position: relative;
+        }
+        .nt-bottom-bar a[aria-current="page"] { color: #a5b4fc; font-weight: 700; }
+        .nt-bottom-bar a[aria-current="page"]::before {
+            content: ""; position: absolute; top: 0; left: 22%; right: 22%;
+            height: 2px; border-radius: 2px; background: #6366f1;
+        }
+        .nt-bottom-bar .nt-tab-badge {
+            position: absolute; top: 4px; right: calc(50% - 18px);
+            min-width: 14px; height: 14px; border-radius: 999px;
+            background: #4f46e5; color: #fff; font-size: 9px; line-height: 14px;
+            text-align: center; padding: 0 4px;
+        }
+        @media (max-width: 767px) { #mobile-menu:not(.hidden) { display: block !important; } }
+        .nt-sheet-close {
+            min-width: 44px; min-height: 44px; display: inline-flex;
+            align-items: center; justify-content: center; border-radius: 0.75rem;
+            color: #e2e8f0;
+        }
+        .nt-sheet-close:hover { background: rgba(32, 36, 50, 0.92); }
+        #image-modal, #release-rebind-modal { z-index: var(--nt-z-dialog); }
+        #toast-container, #toast-errors { z-index: var(--nt-z-toast); }
+        @media (max-width: 767px) {
+            #offline-banner { position: fixed; left: 0.75rem; right: 0.75rem; bottom: calc(var(--nt-bottom-bar-h) + 0.5rem); margin: 0; z-index: 36; }
+            #toast-container, #toast-errors { top: calc(var(--nt-header-h) + 0.5rem); bottom: auto; left: 0.75rem; right: 0.75rem; align-items: stretch; }
+            #toast-container > *, #toast-errors > * { width: 100%; }
+        }
+        .nt-table-cards { width: 100%; }
+        @media (max-width: 767px) {
+            .nt-table-cards thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+            .nt-table-cards tbody, .nt-table-cards tr, .nt-table-cards td { display: block; width: 100%; }
+            .nt-table-cards tr { background: #12141f; border: 1px solid #242840; border-radius: 0.9rem; margin-bottom: 0.6rem; padding: 0.5rem 0.75rem; }
+            .nt-table-cards td { border: 0; padding: 0.3rem 0; text-align: left; }
+            .nt-table-cards td.flex { display: flex; flex-wrap: wrap; align-items: flex-start; }
+            .nt-table-cards td.flex[data-label]::before { flex: 0 0 100%; }
+            .nt-table-cards td.flex > div.min-w-0 { flex: 1 1 0%; min-width: 0; }
+            .nt-table-cards td::before { content: attr(data-label); display: block; font-size: 9px; text-transform: uppercase; letter-spacing: 0.06em; color: #a1a4b8; }
+            .nt-table-cards td:not([data-label])::before { content: none; }
+            .nt-table-cards td.nt-cell-actions { display: flex; flex-wrap: wrap; gap: 0.4rem; justify-content: flex-start; padding-top: 0.5rem; }
+            .nt-table-cards td.nt-cell-actions::before { width: 100%; }
+            .nt-table-cards .nt-table-empty { display: block !important; text-align: center; padding: 1.5rem 0.5rem; }
+            .nt-table-cards .nt-table-empty::before { content: none; }
+            .nt-table-cards td button, .nt-table-cards td a { min-height: 44px; min-width: 44px; }
+            .nt-table-cards td button[role="switch"] { min-height: 0; min-width: 0; }
+        }
+        .nt-skeleton { background: linear-gradient(110deg, #12141f 8%, #1b1f30 18%, #12141f 33%); background-size: 200% 100%; animation: shimmer 1.5s linear infinite; }
+        .nt-offline-banner { position: relative; z-index: 35; margin: 0 auto; max-width: 80rem; background: rgba(120, 53, 15, 0.95); border: 1px solid rgba(245, 158, 11, 0.4); color: #fde68a; border-radius: 0.75rem; padding: 0.5rem 0.9rem; font-size: 0.75rem; }
+        @media (max-width: 767px) {
+            main select, main input[type="text"], main input[type="number"], .nt-btn { min-height: 44px; }
+        }
+        .nt-btn { display: inline-flex; align-items: center; justify-content: center; gap: 0.4rem; border-radius: 0.75rem; font-size: 0.75rem; font-weight: 600; min-height: 36px; padding: 0.45rem 0.8rem; }
+        @media (max-width: 767px) { .nt-btn { min-height: 44px; } }
+        .nt-btn-primary { background: #4f46e5; color: #fff; }
+        .nt-btn-primary:hover { background: #4338ca; }
+        .nt-btn-secondary { background: #202438; color: #e4e5ec; border: 1px solid #2e334a; }
+        .nt-btn-secondary:hover { background: #2e334a; }
+
+        /* ===== Sumi Ink & Ai-iro visual identity ===== */
+        body {
+            background-color: #0a0b12;
+            background-image:
+                radial-gradient(circle at 50% 0%, rgba(79, 70, 229, 0.09), transparent 45%),
+                radial-gradient(rgba(255, 255, 255, 0.022) 1px, transparent 1px);
+            background-size: 100% 100%, 24px 24px;
+        }
+        h1, h2, h3, .font-display {
+            font-family: 'Space Grotesk', system-ui, sans-serif;
+            letter-spacing: -0.02em;
+        }
+        .font-mono, code, pre, .vol-badge, .kpi-number {
+            font-family: 'JetBrains Mono', ui-monospace, monospace;
+        }
+        /* The card surface carries a faint screentone so the UI reads as print, not SaaS. */
+        body .bg-darkcard {
+            background-color: #12141f;
+            box-shadow: 0 10px 30px -10px rgba(0, 0, 0, 0.65), inset 0 1px 0 0 rgba(255, 255, 255, 0.04);
+        }
+        .series-card, .discovery-card { position: relative; transition: transform 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease; }
+        .series-card:hover, .discovery-card:hover {
+            border-color: #3a4062 !important;
+            box-shadow: 0 14px 34px -10px rgba(0, 0, 0, 0.78), 0 0 0 1px rgba(99, 102, 241, 0.18);
+        }
+        .series-card img, .discovery-card img {
+            box-shadow: -3px 0 0 0 rgba(255, 255, 255, 0.08), 0 8px 20px -4px rgba(0, 0, 0, 0.7);
+        }
+        /* Book-spine volume badges: owned = muted shelf spine, wanted = amber ticket. */
+        .vol-spine { border-left-width: 2px !important; border-radius: 0.2rem; }
+        .vol-spine-owned { background: rgba(6, 78, 59, 0.35); border-color: rgba(6, 95, 70, 0.5); border-left-color: #34d399; color: #6ee7b7; }
+        .vol-spine-wanted { background: rgba(69, 26, 3, 0.45); border-color: rgba(180, 83, 9, 0.5); border-left-color: #fbbf24; color: #fcd34d; }
+        /* A single accent bar per card instead of competing boxes. */
+        .discovery-card.card-accent { box-shadow: inset 2px 0 0 0 #4f46e5; }
+        /* Ai-iro seal ring used by the brand mark and focus surfaces. */
+        .nt-halo-ring { box-shadow: 0 0 0 1px rgba(99, 102, 241, 0.5), 0 0 18px rgba(99, 102, 241, 0.14); }
+
+        @media (prefers-reduced-motion: reduce) {
+            *, *::before, *::after { animation-duration: 0.001ms !important; animation-iteration-count: 1 !important; transition-duration: 0.001ms !important; }
+            .animate-pulse, .cover-placeholder, .nt-skeleton { animation: none !important; }
+            .animate-spin { animation: spin 0.9s linear infinite !important; }
+        }
     </style>
 </head>
-<body class="bg-[#0b0f19] text-slate-100 min-h-screen flex flex-col font-sans antialiased selection:bg-brand-500 selection:text-white">
+<body class="bg-darkbg text-slate-100 min-h-screen flex flex-col font-sans antialiased selection:bg-brand-600 selection:text-white">
+    <a href="#main-content" class="nt-skip-link">Skip to main content</a>
 
     <!-- Global Top Loading Progress Bar for Instant Click Feedback -->
-    <div id="page-progress-bar" class="fixed top-0 left-0 h-[2.5px] bg-gradient-to-r from-emerald-500 via-brand-500 to-teal-400 z-50 transition-all duration-300 pointer-events-none opacity-0 shadow-sm shadow-brand-500/50" style="width: 0%;"></div>
+    <div id="page-progress-bar" class="fixed top-0 left-0 h-[2.5px] bg-gradient-to-r from-brand-400 via-brand-500 to-sky-400 z-50 transition-all duration-300 pointer-events-none opacity-0 shadow-sm shadow-brand-500/50" style="width: 0%;"></div>
 
     <!-- Top Navigation Bar -->
-    <header class="bg-[#111827]/80 backdrop-blur-md border-b border-slate-800 sticky top-0 z-40">
+    <header id="site-header" class="bg-[#0e1120]/95 backdrop-blur-md border-b border-slate-800 sticky top-0 z-40">
         <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
             <div class="flex items-center justify-between h-16">
                 <!-- Brand Logo & Name -->
                 <div class="flex items-center space-x-3">
                     <a href="/" class="flex items-center space-x-2.5 group">
-                        <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-brand-600 to-emerald-400 flex items-center justify-center shadow-lg shadow-brand-500/20 group-hover:scale-105 transition-transform">
-                            <i data-lucide="book-open-check" class="w-5 h-5 text-white"></i>
+                        <div class="w-10 h-10 rounded-xl bg-[#12141f] border border-brand-500/40 flex items-center justify-center shadow-lg shadow-brand-500/15 nt-halo-ring group-hover:border-brand-500 group-hover:scale-105 transition-all relative overflow-hidden">
+                            <svg class="w-6 h-6" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                                <path d="M4.5 8.5h9c1.1 0 2 .9 2 2V26l-6-3.4L4.5 26V8.5Z" fill="#e2e8f0"/>
+                                <path d="M16.5 10.5c0-1.1.9-2 2-2h9V26l-6-3.4-5 2.8V10.5Z" fill="#94a3b8"/>
+                                <path d="M15 5h3.5v8.5L16.75 12.2 15 13.5V5Z" fill="#6366f1"/>
+                                <rect x="7.5" y="12" width="5" height="1.2" rx="0.6" fill="#12141f"/>
+                                <rect x="7.5" y="15" width="3.8" height="1.2" rx="0.6" fill="#12141f"/>
+                                <rect x="20" y="12" width="4" height="1.2" rx="0.6" fill="#12141f"/>
+                            </svg>
                         </div>
                         <div>
-                            <span class="text-xl font-bold tracking-tight text-white flex items-center gap-1.5">
+                            <span class="text-xl font-display font-bold tracking-tight text-white flex items-center gap-1.5">
                                 NovelTrax
-                                <span class="text-xs px-2 py-0.5 rounded-full bg-brand-500/10 text-brand-400 border border-brand-500/20 font-medium">Calibre</span>
+                                <span class="hidden lg:inline-flex text-[10px] px-2 py-0.5 rounded-full bg-brand-500/10 text-brand-400 border border-brand-500/20 font-semibold uppercase tracking-wider">Calibre</span>
                             </span>
-                            <p class="text-[10px] text-slate-400 tracking-wider uppercase font-semibold">Release Monitor</p>
+                            <p class="hidden lg:block text-[10px] text-slate-400 tracking-[0.14em] uppercase font-semibold">Novel Release Monitor</p>
                         </div>
                     </a>
                 </div>
 
-                <!-- Main Navigation Links -->
-                <nav class="hidden md:flex space-x-1 lg:space-x-2">
-                    <a href="/" class="px-3.5 py-2 rounded-lg text-sm font-medium transition-colors {% if active_page == 'dashboard' %}bg-slate-800 text-brand-400 border border-slate-700{% else %}text-slate-300 hover:text-white hover:bg-slate-800/60{% endif %} flex items-center gap-2">
+                <!-- Main Navigation (5 grouped top-level items) -->
+                <nav class="hidden md:flex items-center space-x-0.5 lg:space-x-1.5" aria-label="Main navigation">
+                    <a href="/" class="px-2.5 lg:px-3 py-2 rounded-lg text-sm font-medium transition-colors {% if active_page == 'dashboard' %}bg-slate-800 text-brand-400 border border-slate-700{% else %}text-slate-300 hover:text-white hover:bg-slate-800/60{% endif %} flex items-center gap-1.5 whitespace-nowrap">
                         <i data-lucide="layout-dashboard" class="w-4 h-4"></i>
                         Overview
                     </a>
-                    <a href="/series" class="px-3.5 py-2 rounded-lg text-sm font-medium transition-colors {% if active_page == 'series' %}bg-slate-800 text-brand-400 border border-slate-700{% else %}text-slate-300 hover:text-white hover:bg-slate-800/60{% endif %} flex items-center gap-2">
-                        <i data-lucide="library" class="w-4 h-4"></i>
-                        Series
-                    </a>
-                    <a href="/releases" class="px-3.5 py-2 rounded-lg text-sm font-medium transition-colors {% if active_page == 'releases' %}bg-slate-800 text-brand-400 border border-slate-700{% else %}text-slate-300 hover:text-white hover:bg-slate-800/60{% endif %} flex items-center gap-2">
-                        <i data-lucide="sparkles" class="w-4 h-4"></i>
-                        Releases
-                    </a>
-                    <a href="/audiobooks" class="px-3.5 py-2 rounded-lg text-sm font-medium transition-colors {% if active_page == 'audiobooks' %}bg-slate-800 text-brand-400 border border-slate-700{% else %}text-slate-300 hover:text-white hover:bg-slate-800/60{% endif %} flex items-center gap-2">
-                        <i data-lucide="headphones" class="w-4 h-4 text-cyan-400"></i>
-                        Audiobooks
-                    </a>
-                    <a href="/prioritized" class="px-3.5 py-2 rounded-lg text-sm font-medium transition-colors {% if active_page == 'prioritized' %}bg-slate-800 text-amber-400 border border-slate-700{% else %}text-slate-300 hover:text-white hover:bg-slate-800/60{% endif %} flex items-center gap-2">
-                        <i data-lucide="star" class="w-4 h-4 text-amber-400"></i>
-                        Prioritized
-                    </a>
-                    <a href="/downloads" class="px-3.5 py-2 rounded-lg text-sm font-medium transition-colors {% if active_page == 'downloads' %}bg-slate-800 text-brand-400 border border-slate-700{% else %}text-slate-300 hover:text-white hover:bg-slate-800/60{% endif %} flex items-center gap-2">
+
+                    <!-- Library -->
+                    <div class="relative" data-dropdown>
+                        <button type="button" data-dropdown-trigger aria-haspopup="true" aria-expanded="false" aria-controls="nav-menu-library" title="Library: Series, Releases, Audiobooks, Prioritized" class="px-2.5 lg:px-3 py-2 rounded-lg text-sm font-medium transition-colors {% if active_page in ['series', 'releases', 'audiobooks', 'prioritized'] %}bg-slate-800 text-brand-400 border border-slate-700{% else %}text-slate-300 hover:text-white hover:bg-slate-800/60{% endif %} flex items-center gap-1.5 whitespace-nowrap">
+                            <i data-lucide="library" class="w-4 h-4"></i>
+                            Library
+                            <i data-lucide="chevron-down" class="w-3.5 h-3.5 opacity-70"></i>
+                        </button>
+                        <div id="nav-menu-library" data-dropdown-menu role="menu" class="hidden absolute left-0 mt-2 w-56 bg-darkcard border border-slate-800 rounded-xl shadow-2xl p-1.5 z-50">
+                            <a href="/series" role="menuitem" class="nav-tab flex items-center gap-2 px-3 py-2 rounded-lg text-sm {% if active_page == 'series' %}bg-slate-800 text-brand-400{% else %}text-slate-300 hover:bg-slate-800/70 hover:text-white{% endif %}">
+                                <i data-lucide="library" class="w-4 h-4"></i> Series
+                            </a>
+                            <a href="/releases" role="menuitem" class="nav-tab flex items-center gap-2 px-3 py-2 rounded-lg text-sm {% if active_page == 'releases' %}bg-slate-800 text-brand-400{% else %}text-slate-300 hover:bg-slate-800/70 hover:text-white{% endif %}">
+                                <i data-lucide="sparkles" class="w-4 h-4"></i> Releases
+                            </a>
+                            <a href="/audiobooks" role="menuitem" class="nav-tab flex items-center gap-2 px-3 py-2 rounded-lg text-sm {% if active_page == 'audiobooks' %}bg-slate-800 text-brand-400 border border-slate-700{% else %}text-slate-300 hover:bg-slate-800/70 hover:text-white{% endif %}">
+                                <i data-lucide="headphones" class="w-4 h-4 text-cyan-400"></i> Audiobooks
+                            </a>
+                            <a href="/prioritized" role="menuitem" class="nav-tab flex items-center gap-2 px-3 py-2 rounded-lg text-sm {% if active_page == 'prioritized' %}bg-slate-800 text-amber-400 border border-slate-700{% else %}text-slate-300 hover:bg-slate-800/70 hover:text-white{% endif %}">
+                                <i data-lucide="star" class="w-4 h-4 text-amber-400"></i> Prioritized
+                            </a>
+                        </div>
+                    </div>
+
+                    <!-- Discover -->
+                    <div class="relative" data-dropdown>
+                        <button type="button" data-dropdown-trigger aria-haspopup="true" aria-expanded="false" aria-controls="nav-menu-discover" title="Discover: Discovery, Feeds" class="px-2.5 lg:px-3 py-2 rounded-lg text-sm font-medium transition-colors {% if active_page in ['discovery', 'feeds'] %}bg-slate-800 text-brand-400 border border-slate-700{% else %}text-slate-300 hover:text-white hover:bg-slate-800/60{% endif %} flex items-center gap-1.5 whitespace-nowrap">
+                            <i data-lucide="compass" class="w-4 h-4 text-amber-400"></i>
+                            Discover
+                            <i data-lucide="chevron-down" class="w-3.5 h-3.5 opacity-70"></i>
+                        </button>
+                        <div id="nav-menu-discover" data-dropdown-menu role="menu" class="hidden absolute left-0 mt-2 w-56 bg-darkcard border border-slate-800 rounded-xl shadow-2xl p-1.5 z-50">
+                            <a href="/discovery" role="menuitem" class="nav-tab flex items-center gap-2 px-3 py-2 rounded-lg text-sm {% if active_page == 'discovery' %}bg-slate-800 text-brand-400{% else %}text-slate-300 hover:bg-slate-800/70 hover:text-white{% endif %}">
+                                <i data-lucide="compass" class="w-4 h-4 text-amber-400"></i> Discovery
+                            </a>
+                            <a href="/feeds" role="menuitem" class="nav-tab flex items-center gap-2 px-3 py-2 rounded-lg text-sm {% if active_page == 'feeds' %}bg-slate-800 text-brand-400{% else %}text-slate-300 hover:bg-slate-800/70 hover:text-white{% endif %}">
+                                <i data-lucide="rss" class="w-4 h-4"></i> Feeds &amp; Scrapers
+                            </a>
+                        </div>
+                    </div>
+
+                    <!-- Downloads -->
+                    <a href="/downloads" class="px-2.5 lg:px-3 py-2 rounded-lg text-sm font-medium transition-colors {% if active_page == 'downloads' %}bg-slate-800 text-brand-400 border border-slate-700{% else %}text-slate-300 hover:text-white hover:bg-slate-800/60{% endif %} flex items-center gap-1.5 whitespace-nowrap">
                         <i data-lucide="download-cloud" class="w-4 h-4 text-cyan-400"></i>
                         Downloads
                     </a>
-                    <a href="/discovery" class="px-3.5 py-2 rounded-lg text-sm font-medium transition-colors {% if active_page == 'discovery' %}bg-slate-800 text-brand-400 border border-slate-700{% else %}text-slate-300 hover:text-white hover:bg-slate-800/60{% endif %} flex items-center gap-2">
-                        <i data-lucide="compass" class="w-4 h-4 text-amber-400"></i>
-                        Discovery
-                    </a>
-                    <a href="/feeds" class="px-3.5 py-2 rounded-lg text-sm font-medium transition-colors {% if active_page == 'feeds' %}bg-slate-800 text-brand-400 border border-slate-700{% else %}text-slate-300 hover:text-white hover:bg-slate-800/60{% endif %} flex items-center gap-2">
-                        <i data-lucide="rss" class="w-4 h-4"></i>
-                        Feeds & Scrapers
-                    </a>
-                    <a href="/logs" class="px-3.5 py-2 rounded-lg text-sm font-medium transition-colors {% if active_page == 'logs' %}bg-slate-800 text-brand-400 border border-slate-700{% else %}text-slate-300 hover:text-white hover:bg-slate-800/60{% endif %} flex items-center gap-2">
-                        <i data-lucide="scroll-text" class="w-4 h-4"></i>
-                        Logs
-                    </a>
-                    <a href="/settings" class="px-3.5 py-2 rounded-lg text-sm font-medium transition-colors {% if active_page == 'settings' %}bg-slate-800 text-brand-400 border border-slate-700{% else %}text-slate-300 hover:text-white hover:bg-slate-800/60{% endif %} flex items-center gap-2">
-                        <i data-lucide="settings" class="w-4 h-4"></i>
-                        Settings
-                    </a>
+
+                    <!-- System -->
+                    <div class="relative" data-dropdown>
+                        <button type="button" data-dropdown-trigger aria-haspopup="true" aria-expanded="false" aria-controls="nav-menu-system" title="System: Logs, Settings" class="px-2.5 lg:px-3 py-2 rounded-lg text-sm font-medium transition-colors {% if active_page in ['logs', 'settings'] %}bg-slate-800 text-brand-400 border border-slate-700{% else %}text-slate-300 hover:text-white hover:bg-slate-800/60{% endif %} flex items-center gap-1.5 whitespace-nowrap">
+                            <i data-lucide="settings" class="w-4 h-4"></i>
+                            System
+                            <i data-lucide="chevron-down" class="w-3.5 h-3.5 opacity-70"></i>
+                        </button>
+                        <div id="nav-menu-system" data-dropdown-menu role="menu" class="hidden absolute left-0 mt-2 w-52 bg-darkcard border border-slate-800 rounded-xl shadow-2xl p-1.5 z-50">
+                            <a href="/logs" role="menuitem" class="nav-tab flex items-center gap-2 px-3 py-2 rounded-lg text-sm {% if active_page == 'logs' %}bg-slate-800 text-brand-400{% else %}text-slate-300 hover:bg-slate-800/70 hover:text-white{% endif %}">
+                                <i data-lucide="scroll-text" class="w-4 h-4"></i> Logs
+                            </a>
+                            <a href="/settings" role="menuitem" class="nav-tab flex items-center gap-2 px-3 py-2 rounded-lg text-sm {% if active_page == 'settings' %}bg-slate-800 text-brand-400{% else %}text-slate-300 hover:bg-slate-800/70 hover:text-white{% endif %}">
+                                <i data-lucide="settings" class="w-4 h-4"></i> Settings
+                            </a>
+                        </div>
+                    </div>
                 </nav>
 
-                <!-- Quick Action Buttons -->
+                <!-- Quick Actions + Mobile Menu -->
                 <div class="flex items-center space-x-2">
-                    <button onclick="triggerCalibreSync()" id="btn-sync-calibre" title="Scan Calibre library for new books and series" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-xs font-medium flex items-center gap-1.5 transition-all shadow-sm active:scale-95">
+                    <button onclick="triggerCalibreSync()" id="btn-sync-calibre" aria-label="Sync Calibre library" title="Scan Calibre library for new books and series" class="hidden lg:inline-flex nt-btn nt-btn-secondary px-2.5 sm:px-3 whitespace-nowrap">
                         <i data-lucide="refresh-cw" class="w-3.5 h-3.5 text-brand-400" id="icon-calibre-sync"></i>
-                        <span class="hidden sm:inline">Sync Calibre</span>
+                        <span class="hidden xl:inline">Sync Calibre</span>
                     </button>
-                    <button onclick="triggerFeedCheck()" id="btn-check-feeds" title="Check configured feeds for new novel releases" class="px-3 py-1.5 rounded-lg bg-brand-600 hover:bg-brand-500 text-white text-xs font-medium flex items-center gap-1.5 transition-all shadow-sm active:scale-95 shadow-brand-600/30">
+                    <button onclick="triggerFeedCheck()" id="btn-check-feeds" aria-label="Check feeds for new releases" title="Check configured feeds for new novel releases" class="hidden lg:inline-flex nt-btn nt-btn-primary px-2.5 sm:px-3 whitespace-nowrap shadow-sm shadow-brand-600/30">
                         <i data-lucide="radio" class="w-3.5 h-3.5" id="icon-feed-check"></i>
-                        <span class="hidden sm:inline">Check Feeds</span>
+                        <span class="hidden xl:inline">Check Feeds</span>
+                    </button>
+                    <button type="button" id="btn-mobile-menu" onclick="toggleMobileMenu(this)" aria-haspopup="true" aria-expanded="false" aria-controls="mobile-menu" aria-label="Open navigation menu" title="Open navigation menu" class="md:hidden w-11 h-11 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 flex items-center justify-center transition-colors">
+                        <i data-lucide="menu" class="w-4 h-4"></i>
                     </button>
                 </div>
             </div>
         </div>
     </header>
 
+    <div id="offline-banner" class="hidden mt-3 mx-4"><div class="nt-offline-banner" role="status" aria-live="polite">Connection lost — data may be stale. Reconnecting…</div></div>
+
+    <!-- Mobile navigation sheet -->
+    <div id="mobile-menu-backdrop" aria-hidden="true" class="hidden fixed inset-0 bg-black/60 backdrop-blur-sm md:hidden" onclick="closeMobileMenu()"></div>
+    <div id="mobile-menu" role="dialog" aria-modal="true" aria-labelledby="mobile-menu-title" class="nt-sheet hidden md:hidden border-b border-slate-800 bg-[#0a0b12] shadow-xl">
+        <div class="flex items-center justify-between px-4 sm:px-6 pt-3 pb-1 border-b border-slate-800/80">
+            <p id="mobile-menu-title" class="text-xs font-bold uppercase tracking-wider text-slate-400">Menu</p>
+            <button type="button" onclick="closeMobileMenu()" class="nt-sheet-close" aria-label="Close navigation menu" title="Close navigation menu">
+                <i data-lucide="x" class="w-5 h-5"></i>
+            </button>
+        </div>
+        <nav class="max-w-7xl mx-auto px-4 sm:px-6 py-3 space-y-0.5" aria-label="Mobile navigation">
+            <a href="/" class="nav-tab flex items-center gap-2.5 min-h-[44px] px-3 rounded-lg text-sm font-medium {% if active_page == 'dashboard' %}bg-slate-800 text-brand-400{% else %}text-slate-300 hover:bg-slate-800/70 hover:text-white{% endif %}">
+                <i data-lucide="layout-dashboard" class="w-4 h-4"></i> Overview
+            </a>
+
+            <p class="px-3 pt-3 pb-1 text-[10px] uppercase tracking-wider text-slate-400 font-semibold">Library</p>
+            <a href="/series" class="nav-tab flex items-center gap-2.5 min-h-[44px] px-3 rounded-lg text-sm font-medium {% if active_page == 'series' %}bg-slate-800 text-brand-400{% else %}text-slate-300 hover:bg-slate-800/70 hover:text-white{% endif %}">
+                <i data-lucide="library" class="w-4 h-4"></i> Series
+            </a>
+            <a href="/releases" class="nav-tab flex items-center gap-2.5 min-h-[44px] px-3 rounded-lg text-sm font-medium {% if active_page == 'releases' %}bg-slate-800 text-brand-400{% else %}text-slate-300 hover:bg-slate-800/70 hover:text-white{% endif %}">
+                <i data-lucide="sparkles" class="w-4 h-4"></i> Releases
+            </a>
+            <a href="/audiobooks" class="nav-tab flex items-center gap-2.5 min-h-[44px] px-3 rounded-lg text-sm font-medium {% if active_page == 'audiobooks' %}bg-slate-800 text-brand-400{% else %}text-slate-300 hover:bg-slate-800/70 hover:text-white{% endif %}">
+                <i data-lucide="headphones" class="w-4 h-4 text-cyan-400"></i> Audiobooks
+            </a>
+            <a href="/prioritized" class="nav-tab flex items-center gap-2.5 min-h-[44px] px-3 rounded-lg text-sm font-medium {% if active_page == 'prioritized' %}bg-slate-800 text-amber-400{% else %}text-slate-300 hover:bg-slate-800/70 hover:text-white{% endif %}">
+                <i data-lucide="star" class="w-4 h-4 text-amber-400"></i> Prioritized
+            </a>
+
+            <p class="px-3 pt-3 pb-1 text-[10px] uppercase tracking-wider text-slate-400 font-semibold">Discover</p>
+            <a href="/discovery" class="nav-tab flex items-center gap-2.5 min-h-[44px] px-3 rounded-lg text-sm font-medium {% if active_page == 'discovery' %}bg-slate-800 text-brand-400{% else %}text-slate-300 hover:bg-slate-800/70 hover:text-white{% endif %}">
+                <i data-lucide="compass" class="w-4 h-4 text-amber-400"></i> Discovery
+            </a>
+            <a href="/feeds" class="nav-tab flex items-center gap-2.5 min-h-[44px] px-3 rounded-lg text-sm font-medium {% if active_page == 'feeds' %}bg-slate-800 text-brand-400{% else %}text-slate-300 hover:bg-slate-800/70 hover:text-white{% endif %}">
+                <i data-lucide="rss" class="w-4 h-4"></i> Feeds &amp; Scrapers
+            </a>
+
+            <p class="px-3 pt-3 pb-1 text-[10px] uppercase tracking-wider text-slate-400 font-semibold">Downloads &amp; System</p>
+            <a href="/downloads" class="nav-tab flex items-center gap-2.5 min-h-[44px] px-3 rounded-lg text-sm font-medium {% if active_page == 'downloads' %}bg-slate-800 text-brand-400{% else %}text-slate-300 hover:bg-slate-800/70 hover:text-white{% endif %}">
+                <i data-lucide="download-cloud" class="w-4 h-4 text-cyan-400"></i> Downloads
+            </a>
+            <a href="/logs" class="nav-tab flex items-center gap-2.5 min-h-[44px] px-3 rounded-lg text-sm font-medium {% if active_page == 'logs' %}bg-slate-800 text-brand-400{% else %}text-slate-300 hover:bg-slate-800/70 hover:text-white{% endif %}">
+                <i data-lucide="scroll-text" class="w-4 h-4"></i> Logs
+            </a>
+            <a href="/settings" class="nav-tab flex items-center gap-2.5 min-h-[44px] px-3 rounded-lg text-sm font-medium {% if active_page == 'settings' %}bg-slate-800 text-brand-400{% else %}text-slate-300 hover:bg-slate-800/70 hover:text-white{% endif %}">
+                <i data-lucide="settings" class="w-4 h-4"></i> Settings
+            </a>
+        </nav>
+    </div>
+
+    <!-- Notification regions: polite status + assertive errors -->
+    <div id="toast-container" role="status" aria-live="polite" class="fixed bottom-5 right-5 z-50 flex flex-col space-y-2 pointer-events-none"></div>
+    <div id="toast-errors" role="alert" aria-live="assertive" class="fixed bottom-5 right-5 z-50 flex flex-col space-y-2 pointer-events-none hidden"></div>
+
     <!-- Main Content Area -->
-    <main class="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8">
+    <main id="main-content" tabindex="-1" class="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8">
         <!-- Global Image Modal / Lightbox -->
         <div id="image-modal" class="fixed inset-0 z-50 bg-black/85 backdrop-blur-md hidden items-center justify-center p-4 transition-all duration-200" onclick="closeImageModal()">
             <div class="relative max-w-md w-full flex flex-col items-center" onclick="event.stopPropagation()">
@@ -267,20 +551,44 @@
             </div>
         </div>
 
-        <!-- Toast Notification Container -->
-        <div id="toast" class="fixed bottom-5 right-5 z-50 transform transition-all duration-300 translate-y-20 opacity-0 pointer-events-none flex items-center gap-3 px-4 py-3 rounded-xl shadow-2xl border text-sm">
-            <i id="toast-icon" data-lucide="info" class="w-5 h-5 flex-shrink-0"></i>
-            <span id="toast-msg" class="font-medium"></span>
-        </div>
-
         {% block content %}{% endblock %}
     </main>
 
+    <!-- Mobile bottom tab bar -->
+    <nav id="mobile-bottom-bar" class="nt-bottom-bar" aria-label="Primary mobile navigation">
+        <a href="/" {% if active_page == 'dashboard' %}aria-current="page"{% endif %} aria-label="Overview" title="Overview">
+            <i data-lucide="layout-dashboard" class="w-5 h-5"></i><span>Overview</span>
+        </a>
+        <a href="/series" {% if active_page == 'series' %}aria-current="page"{% endif %} aria-label="Series" title="Series">
+            <i data-lucide="library" class="w-5 h-5"></i><span>Series</span>
+        </a>
+        <a href="/downloads" {% if active_page == 'downloads' %}aria-current="page"{% endif %} aria-label="Downloads" title="Downloads">
+            <i data-lucide="download-cloud" class="w-5 h-5"></i><span>Downloads</span>
+        </a>
+        <a href="/discovery" {% if active_page == 'discovery' %}aria-current="page"{% endif %} aria-label="Discover" title="Discover">
+            <i data-lucide="compass" class="w-5 h-5"></i><span>Discover</span>
+        </a>
+        <a href="#mobile-menu" onclick="event.preventDefault(); toggleMobileMenu(this);" data-nt-sheet-opener="more" {% if active_page in ['releases', 'audiobooks', 'prioritized', 'feeds', 'logs', 'settings'] %}aria-current="page"{% endif %} aria-haspopup="dialog" aria-controls="mobile-menu" aria-label="More navigation" title="More">
+            <i data-lucide="menu" class="w-5 h-5"></i><span>More</span>
+        </a>
+    </nav>
+
     <!-- Footer -->
-    <footer class="border-t border-slate-800/80 bg-[#0e131f] py-6 text-center text-xs text-slate-500">
-        <div class="max-w-7xl mx-auto px-4 flex flex-col sm:flex-row items-center justify-between gap-2">
-            <p>NovelTrax &bull; Monitoring J-Novels, Light Novel Trackers & Calibre Library</p>
-            <p class="text-slate-400">Zero-Lock SQLite Engine &bull; Docker Ready</p>
+    <footer id="site-footer" class="border-t border-slate-800/80 bg-[#0a0b12] py-6 mt-auto">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-center justify-between text-xs text-slate-400 gap-4">
+            <div class="flex items-center space-x-2">
+                <span class="w-2 h-2 rounded-full bg-brand-500 animate-pulse"></span>
+                <span class="font-medium text-slate-400">NovelTrax</span>
+                <span>&bull;</span>
+                <span>Zero-Lock Calibre &amp; Audiobook Monitoring</span>
+            </div>
+            <div class="flex items-center space-x-4">
+                <span class="font-mono text-[11px] text-slate-500">SQLite &bull; Docker Ready</span>
+                <a href="https://github.com/Wemew/NovelTrax" target="_blank" rel="noopener noreferrer" class="hover:text-slate-300 transition-colors flex items-center gap-1">
+                    <i data-lucide="code" class="w-3.5 h-3.5"></i>
+                    GitHub
+                </a>
+            </div>
         </div>
     </footer>
 
@@ -289,24 +597,177 @@
         lucide.createIcons();
 
         function showToast(message, type = 'success') {
-            const toast = document.getElementById('toast');
-            const toastMsg = document.getElementById('toast-msg');
-            const toastIcon = document.getElementById('toast-icon');
-
-            toastMsg.textContent = message;
-            toast.className = `fixed bottom-5 right-5 z-50 transform transition-all duration-300 translate-y-0 opacity-100 flex items-center gap-3 px-4 py-3 rounded-xl shadow-2xl border text-sm pointer-events-auto ${
-                type === 'success' 
-                    ? 'bg-slate-900 border-emerald-500/50 text-emerald-300' 
-                    : type === 'error' 
-                    ? 'bg-slate-900 border-rose-500/50 text-rose-300' 
-                    : 'bg-slate-900 border-blue-500/50 text-blue-300'
-            }`;
-
-            setTimeout(() => {
-                toast.classList.add('translate-y-20', 'opacity-0');
-                toast.classList.remove('translate-y-0', 'opacity-100');
-            }, 4000);
+            showToastWithOptions(message, type, arguments[2] || {});
         }
+
+        function showToastWithOptions(message, type = 'success', options = {}) {
+            const isError = type === 'error';
+            const container = document.getElementById(isError ? 'toast-errors' : 'toast-container');
+            if (!container) return;
+            if (isError) container.classList.remove('hidden');
+            const toast = document.createElement('div');
+            toast.className = `pointer-events-auto flex items-center gap-2.5 px-4 py-3 rounded-xl shadow-xl text-sm font-medium transition-all transform duration-300 translate-y-2 opacity-0 ${
+                type === 'success' ? 'bg-slate-800 border border-brand-500/30 text-brand-300' :
+                isError ? 'bg-slate-800 border border-rose-500/30 text-rose-300' :
+                'bg-slate-800 border border-slate-700 text-slate-200'
+            }`;
+            const icon = document.createElement('i');
+            icon.setAttribute('data-lucide', type === 'success' ? 'check-circle' : isError ? 'alert-triangle' : 'info');
+            icon.className = 'w-4 h-4 shrink-0';
+            const text = document.createElement('span');
+            const prefix = (isError && options && options.action) ? String(options.action) + ' failed: ' : '';
+            text.textContent = prefix + (message == null ? '' : String(message));
+            toast.appendChild(icon);
+            toast.appendChild(text);
+            if (isError) {
+                const dismiss = document.createElement('button');
+                dismiss.type = 'button';
+                dismiss.setAttribute('aria-label', 'Dismiss error');
+                dismiss.title = 'Dismiss error';
+                dismiss.className = 'ml-2 shrink-0 text-slate-400 hover:text-white';
+                dismiss.textContent = '×';
+                dismiss.addEventListener('click', () => { toast.remove(); if (!container.children.length) container.classList.add('hidden'); });
+                toast.appendChild(dismiss);
+                if (options && typeof options.retry === 'function') {
+                    const retry = document.createElement('button');
+                    retry.type = 'button';
+                    retry.className = 'ml-2 shrink-0 underline text-amber-300 hover:text-amber-200';
+                    retry.textContent = 'Retry';
+                    retry.addEventListener('click', function () { toast.remove(); options.retry(); });
+                    toast.appendChild(retry);
+                }
+            }
+            container.appendChild(toast);
+            if (window.lucide) lucide.createIcons();
+            setTimeout(() => { toast.classList.remove('translate-y-2', 'opacity-0'); }, 10);
+            if (!isError) {
+                setTimeout(() => {
+                    toast.classList.add('opacity-0', 'translate-y-2');
+                    setTimeout(() => toast.remove(), 300);
+                }, 4000);
+            }
+        }
+
+        // --- Navigation dropdowns & mobile menu ---------------------------------
+        function closeAllDropdowns(except = null) {
+            document.querySelectorAll('[data-dropdown]').forEach((wrapper) => {
+                if (wrapper === except) return;
+                const trigger = wrapper.querySelector('[data-dropdown-trigger]');
+                const menu = wrapper.querySelector('[data-dropdown-menu]');
+                if (!trigger || !menu) return;
+                menu.classList.add('hidden');
+                trigger.setAttribute('aria-expanded', 'false');
+            });
+        }
+
+        function toggleDropdown(trigger) {
+            const wrapper = trigger.closest('[data-dropdown]');
+            if (!wrapper) return;
+            const menu = wrapper.querySelector('[data-dropdown-menu]');
+            const isOpen = trigger.getAttribute('aria-expanded') === 'true';
+            closeAllDropdowns(wrapper);
+            if (!menu) return;
+            if (isOpen) {
+                menu.classList.add('hidden');
+                trigger.setAttribute('aria-expanded', 'false');
+            } else {
+                menu.classList.remove('hidden');
+                trigger.setAttribute('aria-expanded', 'true');
+                if (window.lucide) lucide.createIcons();
+            }
+        }
+
+        function closeMobileMenu(restoreFocus = true) {
+            const menu = document.getElementById('mobile-menu');
+            const btn = document.getElementById('btn-mobile-menu');
+            const backdrop = document.getElementById('mobile-menu-backdrop');
+            if (!menu || !btn) return;
+            menu.classList.add('hidden');
+            if (backdrop) backdrop.classList.add('hidden');
+            document.body.classList.remove('nt-scroll-locked');
+            btn.setAttribute('aria-expanded', 'false');
+            btn.setAttribute('aria-label', 'Open navigation menu');
+            btn.setAttribute('title', 'Open navigation menu');
+            document.querySelectorAll('[data-nt-sheet-opener]').forEach(function (el) { el.setAttribute('aria-expanded', 'false'); });
+            if (restoreFocus) {
+                const opener = menu._ntOpener || btn;
+                if (opener && document.contains(opener) && typeof opener.focus === 'function') {
+                    try { opener.focus(); } catch (focusErr) {}
+                }
+            }
+            menu._ntOpener = null;
+        }
+
+        function toggleMobileMenu(opener = null) {
+            const menu = document.getElementById('mobile-menu');
+            const btn = document.getElementById('btn-mobile-menu');
+            const backdrop = document.getElementById('mobile-menu-backdrop');
+            if (!menu || !btn) return;
+            const willOpen = menu.classList.contains('hidden');
+            menu.classList.toggle('hidden', !willOpen);
+            if (backdrop) backdrop.classList.toggle('hidden', !willOpen);
+            document.body.classList.toggle('nt-scroll-locked', willOpen);
+            btn.setAttribute('aria-expanded', String(willOpen));
+            document.querySelectorAll('[data-nt-sheet-opener]').forEach(function (el) { el.setAttribute('aria-expanded', String(willOpen)); });
+            const label = willOpen ? 'Close navigation menu' : 'Open navigation menu';
+            btn.setAttribute('aria-label', label);
+            btn.setAttribute('title', label);
+            if (willOpen) {
+                menu._ntOpener = opener || btn;
+                closeAllDropdowns();
+                const first = menu.querySelector('a, button');
+                if (first) setTimeout(() => { try { first.focus(); } catch (focusErr) {} }, 20);
+            } else {
+                closeMobileMenu(opener ? false : true);
+            }
+            if (window.lucide) lucide.createIcons();
+        }
+
+        document.addEventListener('click', (event) => {
+            const trigger = event.target.closest('[data-dropdown-trigger]');
+            if (trigger) {
+                event.preventDefault();
+                toggleDropdown(trigger);
+                return;
+            }
+            const insideMenu = event.target.closest('[data-dropdown-menu]');
+            if (insideMenu) {
+                closeAllDropdowns();
+                return;
+            }
+            closeAllDropdowns();
+            if (!event.target.closest('#mobile-menu') && !event.target.closest('#btn-mobile-menu') && !event.target.closest('[data-nt-sheet-opener]')) {
+                if (document.getElementById('mobile-menu') && !document.getElementById('mobile-menu').classList.contains('hidden')) {
+                    closeMobileMenu(false);
+                }
+            }
+        });
+
+        document.addEventListener('keydown', (event) => {
+            if (event.key !== 'Escape') return;
+            const openWrapper = Array.from(document.querySelectorAll('[data-dropdown]')).find((wrapper) => {
+                const trigger = wrapper.querySelector('[data-dropdown-trigger]');
+                return trigger && trigger.getAttribute('aria-expanded') === 'true';
+            });
+            closeAllDropdowns();
+            const mobileMenu = document.getElementById('mobile-menu');
+            if (mobileMenu && !mobileMenu.classList.contains('hidden')) closeMobileMenu();
+            if (openWrapper) {
+                event.preventDefault();
+                const trigger = openWrapper.querySelector('[data-dropdown-trigger]');
+                if (trigger) trigger.focus();
+            }
+        });
+
+        // Offline/degraded notice: CSS keeps it above the mobile tab bar.
+        function updateOfflineBanner() {
+            const banner = document.getElementById('offline-banner');
+            if (!banner) return;
+            banner.classList.toggle('hidden', navigator.onLine !== false);
+        }
+        window.addEventListener('online', updateOfflineBanner);
+        window.addEventListener('offline', updateOfflineBanner);
+        updateOfflineBanner();
 
         async function triggerCalibreSync() {
             const btns = document.querySelectorAll('#btn-sync-calibre, .btn-calibre-sync');
@@ -383,7 +844,7 @@
             downloading: 'bg-cyan-500/15 text-cyan-300 border border-cyan-500/30',
             downloaded: 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30',
             failed: 'bg-rose-500/15 text-rose-300 border border-rose-500/30',
-            in_calibre: 'bg-brand-500/15 text-brand-300 border border-brand-500/30'
+            in_calibre: 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30'
         };
 
         function _releaseChipClasses(state) {

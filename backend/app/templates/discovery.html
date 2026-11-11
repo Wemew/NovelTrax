@@ -8,7 +8,7 @@
     <!-- Header -->
     <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
-            <h1 class="text-2xl font-black text-white flex items-center gap-2.5">
+            <h1 class="text-2xl font-display font-bold tracking-tight text-white flex items-center gap-2.5">
                 <i data-lucide="compass" class="w-6 h-6 text-amber-400"></i>
                 New Series Discovery & Blacklist
             </h1>
@@ -16,16 +16,16 @@
                 Review newly detected series (Volume 1 or unnumbered releases). 1-click <strong class="text-emerald-400 font-semibold">Track</strong> to monitor upcoming volumes, or <strong class="text-rose-400 font-semibold">Blacklist</strong> to permanently block tracking.
             </p>
         </div>
-        <div class="flex flex-wrap items-center gap-2">
-            <button onclick="triggerMasterIndexImport()" id="btn-master-index" class="text-xs px-3.5 py-2 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-500/30 font-semibold flex items-center gap-2 transition-all shadow-sm active:scale-95" title="Instantly import 1,300+ series from J-Novels Complete Master Directory">
+        <div class="flex flex-wrap items-center gap-2 justify-start sm:justify-end">
+            <button onclick="triggerMasterIndexImport()" id="btn-master-index" class="text-xs px-3.5 py-2 rounded-xl bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/30 font-semibold flex items-center gap-2 transition-colors shadow-sm active:scale-95" title="Instantly import 1,300+ series from J-Novels Complete Master Directory">
                 <i data-lucide="book-marked" class="w-4 h-4 text-amber-400"></i>
                 <span>Import Master Index (1,300+ Series)</span>
             </button>
-            <button onclick="toggleBackfill()" id="btn-backfill" class="text-xs px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-medium flex items-center gap-2 transition-all shadow-sm">
+            <button onclick="toggleBackfill()" id="btn-backfill" class="text-xs px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-semibold flex items-center gap-2 transition-colors shadow-sm">
                 <i data-lucide="history" class="w-4 h-4 text-brand-400" id="icon-backfill"></i>
                 <span id="text-backfill">Polite Backfill</span>
             </button>
-            <button onclick="triggerFeedCheck()" class="btn-feed-check text-xs px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-medium flex items-center gap-2 transition-all shadow-sm active:scale-95">
+            <button onclick="triggerFeedCheck()" class="btn-feed-check text-xs px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-semibold flex items-center gap-2 transition-colors shadow-sm active:scale-95">
                 <i data-lucide="radio" class="icon-feed-check w-4 h-4 text-brand-400"></i>
                 Check Feeds
             </button>
@@ -41,7 +41,7 @@
             <div>
                 <p class="text-xs font-bold text-white flex items-center gap-2">
                     <span>Polite Historical Backfill in Progress</span>
-                    <span id="backfill-rate-badge" class="text-[10px] px-2 py-0.5 rounded-full bg-brand-500/20 text-brand-300">Rate Limited &bull; {{ settings.backfill_delay_seconds or '2.0' }}s Delay{% if settings.backfill_max_pages == '0' %} &bull; Unlimited Pages{% else %} &bull; Max {{ settings.backfill_max_pages or '30' }} Pages{% endif %}</span>
+                    <span id="backfill-rate-badge" class="text-[10px] px-2 py-0.5 rounded-full bg-brand-500/20 text-brand-300 font-mono">Rate Limited &bull; {{ settings.backfill_delay_seconds or '2.0' }}s Delay{% if settings.backfill_max_pages == '0' %} &bull; Unlimited Pages{% else %} &bull; Max {{ settings.backfill_max_pages or '30' }} Pages{% endif %}</span>
                 </p>
                 <p class="text-[11px] text-slate-400 mt-0.5" id="backfill-status-text">
                     Initializing...
@@ -55,26 +55,27 @@
     </div>
 
     <!-- Tab Navigation -->
-    <div class="flex border-b border-slate-800 space-x-6 text-sm font-semibold">
-        <button onclick="switchTab('discovery')" id="tab-btn-discovery" class="pb-3 border-b-2 border-brand-500 text-brand-400 flex items-center gap-2 transition-colors">
+    <div class="flex border-b border-slate-800/70 gap-2 sm:gap-6 text-sm font-semibold overflow-x-auto">
+        <button onclick="switchTab('discovery')" id="tab-btn-discovery" class="pb-3 border-b-2 border-brand-500 text-brand-400 flex items-center gap-2 whitespace-nowrap shrink-0 transition-colors">
             <i data-lucide="sparkles" class="w-4 h-4"></i>
-            <span>Discovered Releases (Vol. 1 & Standalones)</span>
-            <span class="px-2 py-0.5 rounded-full text-xs bg-brand-500/15 text-brand-300 border border-brand-500/20" id="discovery-badge">{{ total_count or discovered_releases|length }}</span>
+            <span class="sm:hidden">Discovered (Vol. 1)</span>
+            <span class="hidden sm:inline">Discovered Releases (Vol. 1 &amp; Standalones)</span>
+            <span class="px-2 py-0.5 rounded-full text-xs font-mono bg-brand-500/15 text-brand-300 border border-brand-500/20" id="discovery-badge">{{ total_count or discovered_releases|length }}</span>
         </button>
-        <button onclick="switchTab('blacklist')" id="tab-btn-blacklist" class="pb-3 border-b-2 border-transparent text-slate-400 hover:text-slate-200 flex items-center gap-2 transition-colors">
+        <button onclick="switchTab('blacklist')" id="tab-btn-blacklist" class="pb-3 border-b-2 border-transparent text-slate-400 hover:text-slate-200 flex items-center gap-2 whitespace-nowrap shrink-0 transition-colors">
             <i data-lucide="ban" class="w-4 h-4 text-rose-400"></i>
             <span>Blacklisted Series</span>
-            <span class="px-2 py-0.5 rounded-full text-xs bg-rose-500/15 text-rose-300 border border-rose-500/20" id="blacklist-badge">{{ blacklisted_series|length }}</span>
+            <span class="px-2 py-0.5 rounded-full text-xs font-mono bg-rose-500/15 text-rose-300 border border-rose-500/20" id="blacklist-badge">{{ blacklisted_series|length }}</span>
         </button>
     </div>
 
     <!-- TAB 1: Discovery Panel -->
     <div id="tab-content-discovery" class="space-y-4">
         <!-- Search filter, Sort & Pagination Controls -->
-        <div class="bg-slate-900/80 border border-slate-800 rounded-2xl p-4 flex flex-col md:flex-row items-center justify-between gap-3">
+        <div class="bg-darkcard border border-slate-800/80 rounded-2xl p-4 flex flex-col md:flex-row items-center justify-between gap-3 shadow-lg">
             <form action="/discovery" method="GET" class="relative w-full md:w-80 flex items-center">
                 <i data-lucide="search" class="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2"></i>
-                <input type="text" name="q" id="discovery-search" value="{{ search_query }}" oninput="filterDiscovery()" placeholder="Search or filter discovered novels..." class="w-full bg-slate-950/70 border border-slate-700/80 rounded-xl pl-10 pr-8 py-2 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-brand-500">
+                <input type="text" name="q" id="discovery-search" value="{{ search_query }}" oninput="filterDiscovery()" placeholder="Search or filter discovered novels..." class="w-full bg-slate-950/50 border border-slate-800/70 rounded-xl pl-10 pr-8 py-2 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-brand-500">
                 <input type="hidden" name="page_size" value="{{ page_size }}">
                 <input type="hidden" name="sort" value="{{ current_sort }}">
                 {% if search_query %}
@@ -90,7 +91,7 @@
                         <i data-lucide="arrow-up-down" class="w-3.5 h-3.5 text-slate-400"></i>
                         <span>Sort:</span>
                     </span>
-                    <select onchange="changeDiscoverySort(this.value)" class="bg-slate-900 border border-slate-700 text-slate-200 rounded-xl px-2.5 py-1.5 text-xs focus:outline-none focus:border-brand-500 cursor-pointer">
+                    <select onchange="changeDiscoverySort(this.value)" class="bg-slate-950/50 border border-slate-800/70 text-slate-200 rounded-xl px-2.5 py-1.5 text-xs focus:outline-none focus:border-brand-500 cursor-pointer">
                         <option value="date_desc" {% if current_sort == 'date_desc' %}selected{% endif %}>Release Date: New to Old</option>
                         <option value="date_asc" {% if current_sort == 'date_asc' %}selected{% endif %}>Release Date: Old to New</option>
                         <option value="title_asc" {% if current_sort == 'title_asc' %}selected{% endif %}>Title: A to Z</option>
@@ -103,7 +104,7 @@
                 <!-- Per page selector -->
                 <div class="flex items-center gap-1.5">
                     <span class="text-slate-400 text-xs">Per page:</span>
-                    <select onchange="changeDiscoveryPageSize(this.value)" class="bg-slate-900 border border-slate-700 text-slate-200 rounded-xl px-2.5 py-1.5 text-xs focus:outline-none focus:border-brand-500 cursor-pointer">
+                    <select onchange="changeDiscoveryPageSize(this.value)" class="bg-slate-950/50 border border-slate-800/70 text-slate-200 rounded-xl px-2.5 py-1.5 text-xs focus:outline-none focus:border-brand-500 cursor-pointer">
                         <option value="12" {% if page_size == 12 %}selected{% endif %}>12</option>
                         <option value="24" {% if page_size == 24 %}selected{% endif %}>24</option>
                         <option value="48" {% if page_size == 48 %}selected{% endif %}>48</option>
@@ -112,7 +113,7 @@
                 </div>
 
                 <p class="hidden lg:block text-slate-500">
-                    Showing <strong class="text-white">{{ (current_page - 1) * page_size + 1 if total_count > 0 else 0 }}</strong> to <strong class="text-white">{{ [current_page * page_size, total_count]|min }}</strong> of <strong class="text-white">{{ total_count }}</strong>
+                    Showing <strong class="text-white font-mono">{{ (current_page - 1) * page_size + 1 if total_count > 0 else 0 }}</strong> to <strong class="text-white font-mono">{{ [current_page * page_size, total_count]|min }}</strong> of <strong class="text-white font-mono">{{ total_count }}</strong>
                 </p>
             </div>
         </div>
@@ -124,43 +125,43 @@
 
         <!-- Pagination Bar -->
         {% if total_pages and total_pages > 1 %}
-        <div class="bg-slate-900/80 border border-slate-800 rounded-2xl p-4 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs text-slate-400">
+        <div class="bg-darkcard border border-slate-800/80 rounded-2xl p-4 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs text-slate-400 shadow-lg">
             <div>
-                Showing <strong class="text-white">{{ (current_page - 1) * page_size + 1 }}</strong> to <strong class="text-white">{{ [current_page * page_size, total_count]|min }}</strong> of <strong class="text-white">{{ total_count }}</strong> series
+                Showing <strong class="text-white font-mono">{{ (current_page - 1) * page_size + 1 }}</strong> to <strong class="text-white font-mono">{{ [current_page * page_size, total_count]|min }}</strong> of <strong class="text-white font-mono">{{ total_count }}</strong> series
             </div>
             <div class="flex items-center space-x-1.5">
                 <!-- First & Prev -->
                 {% if current_page > 1 %}
-                <a href="/discovery?page=1&page_size={{ page_size }}&sort={{ current_sort }}{% if search_query %}&q={{ search_query|urlencode }}{% endif %}" class="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition-colors flex items-center gap-1" title="First Page">
+                <a href="/discovery?page=1&page_size={{ page_size }}&sort={{ current_sort }}{% if search_query %}&q={{ search_query|urlencode }}{% endif %}" class="px-2.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition-colors flex items-center gap-1" title="First Page">
                     <i data-lucide="chevrons-left" class="w-3.5 h-3.5"></i>
                 </a>
-                <a href="/discovery?page={{ current_page - 1 }}&page_size={{ page_size }}&sort={{ current_sort }}{% if search_query %}&q={{ search_query|urlencode }}{% endif %}" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition-colors flex items-center gap-1">
+                <a href="/discovery?page={{ current_page - 1 }}&page_size={{ page_size }}&sort={{ current_sort }}{% if search_query %}&q={{ search_query|urlencode }}{% endif %}" class="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition-colors flex items-center gap-1">
                     <i data-lucide="chevron-left" class="w-3.5 h-3.5"></i>
                     <span>Previous</span>
                 </a>
                 {% else %}
-                <span class="px-3 py-1.5 rounded-lg bg-slate-900 text-slate-600 border border-slate-800 cursor-not-allowed flex items-center gap-1">
+                <span class="px-3 py-1.5 rounded-xl bg-slate-900 text-slate-600 border border-slate-800 cursor-not-allowed flex items-center gap-1">
                     <i data-lucide="chevron-left" class="w-3.5 h-3.5"></i>
                     <span>Previous</span>
                 </span>
                 {% endif %}
 
                 <!-- Page Indicator -->
-                <span class="px-3 py-1.5 rounded-lg bg-brand-500/10 text-brand-300 border border-brand-500/20 font-bold">
+                <span class="px-3 py-1.5 rounded-xl bg-brand-500/10 text-brand-300 border border-brand-500/20 font-bold font-mono">
                     Page {{ current_page }} of {{ total_pages }}
                 </span>
 
                 <!-- Next & Last -->
                 {% if current_page < total_pages %}
-                <a href="/discovery?page={{ current_page + 1 }}&page_size={{ page_size }}&sort={{ current_sort }}{% if search_query %}&q={{ search_query|urlencode }}{% endif %}" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition-colors flex items-center gap-1">
+                <a href="/discovery?page={{ current_page + 1 }}&page_size={{ page_size }}&sort={{ current_sort }}{% if search_query %}&q={{ search_query|urlencode }}{% endif %}" class="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition-colors flex items-center gap-1">
                     <span>Next</span>
                     <i data-lucide="chevron-right" class="w-3.5 h-3.5"></i>
                 </a>
-                <a href="/discovery?page={{ total_pages }}&page_size={{ page_size }}&sort={{ current_sort }}{% if search_query %}&q={{ search_query|urlencode }}{% endif %}" class="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition-colors flex items-center gap-1" title="Last Page">
+                <a href="/discovery?page={{ total_pages }}&page_size={{ page_size }}&sort={{ current_sort }}{% if search_query %}&q={{ search_query|urlencode }}{% endif %}" class="px-2.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition-colors flex items-center gap-1" title="Last Page">
                     <i data-lucide="chevrons-right" class="w-3.5 h-3.5"></i>
                 </a>
                 {% else %}
-                <span class="px-3 py-1.5 rounded-lg bg-slate-900 text-slate-600 border border-slate-800 cursor-not-allowed flex items-center gap-1">
+                <span class="px-3 py-1.5 rounded-xl bg-slate-900 text-slate-600 border border-slate-800 cursor-not-allowed flex items-center gap-1">
                     <span>Next</span>
                     <i data-lucide="chevron-right" class="w-3.5 h-3.5"></i>
                 </span>
@@ -169,11 +170,11 @@
         </div>
         {% endif %}
         {% else %}
-        <div class="bg-slate-900/60 border border-slate-800/80 rounded-2xl p-12 text-center">
+        <div class="bg-darkcard border border-slate-800/80 rounded-2xl p-12 text-center shadow-lg">
             <div class="w-14 h-14 rounded-2xl bg-brand-500/10 text-brand-400 border border-brand-500/20 flex items-center justify-center mx-auto mb-3">
                 <i data-lucide="check-check" class="w-7 h-7"></i>
             </div>
-            <h3 class="text-base font-bold text-white">No new unreviewed series!</h3>
+            <h3 class="text-base font-display font-bold tracking-tight text-white">No new unreviewed series!</h3>
             <p class="text-xs text-slate-400 max-w-md mx-auto mt-1">
                 Whenever your feeds discover a Volume 1 or unnumbered release that isn't already in your Calibre library or blacklist, it will appear here for you to easily Track or Blacklist.
             </p>
@@ -185,8 +186,8 @@
     <div id="tab-content-blacklist" class="hidden space-y-6">
 
         <!-- Manual Add to Blacklist Form -->
-        <div class="bg-slate-900/90 border border-slate-800 rounded-2xl p-5 shadow-xl">
-            <h3 class="text-sm font-bold uppercase tracking-wider text-white mb-1 flex items-center gap-2">
+        <div class="bg-darkcard border border-slate-800/80 rounded-2xl p-5 shadow-lg">
+            <h3 class="text-xs font-semibold uppercase tracking-wider text-slate-300 mb-1 flex items-center gap-2">
                 <i data-lucide="plus-circle" class="w-4 h-4 text-rose-400"></i>
                 Proactively Blacklist a Series
             </h3>
@@ -197,14 +198,14 @@
             <form onsubmit="submitManualBlacklist(event)" class="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div class="sm:col-span-1">
                     <label class="block text-xs font-semibold text-slate-300 mb-1">Series Name</label>
-                    <input type="text" id="manual-blacklist-name" required placeholder="e.g. Unwanted Series Title" class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-rose-500">
+                    <input type="text" id="manual-blacklist-name" required placeholder="e.g. Unwanted Series Title" class="w-full bg-slate-950/60 border border-slate-800/70 rounded-xl px-3.5 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-rose-500">
                 </div>
                 <div class="sm:col-span-1">
                     <label class="block text-xs font-semibold text-slate-300 mb-1">Reason / Notes (Optional)</label>
-                    <input type="text" id="manual-blacklist-reason" placeholder="e.g. Not interested / dropped" class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-rose-500">
+                    <input type="text" id="manual-blacklist-reason" placeholder="e.g. Not interested / dropped" class="w-full bg-slate-950/60 border border-slate-800/70 rounded-xl px-3.5 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-rose-500">
                 </div>
                 <div class="flex items-end">
-                    <button type="submit" class="w-full px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs flex items-center justify-center gap-1.5 transition-all shadow-md shadow-rose-600/20 active:scale-95">
+                    <button type="submit" class="w-full px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs flex items-center justify-center gap-1.5 transition-colors shadow-md shadow-rose-600/20 active:scale-95">
                         <i data-lucide="ban" class="w-4 h-4"></i>
                         Add to Blacklist
                     </button>
@@ -213,21 +214,21 @@
         </div>
 
         <!-- Blacklisted Series Table -->
-        <div class="bg-slate-900/90 border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
-            <div class="p-4 border-b border-slate-800 flex items-center justify-between">
-                <h3 class="text-sm font-bold text-white flex items-center gap-2">
+        <div class="bg-darkcard border border-slate-800/80 rounded-2xl overflow-hidden shadow-lg">
+            <div class="p-4 border-b border-slate-800/70 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <h3 class="text-sm font-bold text-white flex items-center gap-2 break-words-anywhere">
                     <i data-lucide="shield-alert" class="w-4 h-4 text-rose-400"></i>
-                    Currently Blacklisted Series ({{ blacklisted_series|length }})
+                    Currently Blacklisted Series (<span class="font-mono text-xs text-slate-300">{{ blacklisted_series|length }}</span>)
                 </h3>
-                <div class="relative w-64">
+                <div class="relative w-full sm:w-64">
                     <i data-lucide="search" class="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2"></i>
-                    <input type="text" id="blacklist-search" oninput="filterBlacklist()" placeholder="Search blacklist..." class="w-full bg-slate-950 border border-slate-700 rounded-lg pl-8 pr-3 py-1.5 text-xs text-white focus:outline-none focus:border-rose-500">
+                    <input type="text" id="blacklist-search" oninput="filterBlacklist()" placeholder="Search blacklist..." class="w-full bg-slate-950/60 border border-slate-800/70 rounded-lg pl-8 pr-3 py-1.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-rose-500">
                 </div>
             </div>
 
             <div class="overflow-x-auto">
-                <table class="w-full text-left text-xs">
-                    <thead class="bg-[#111827] border-b border-slate-800 text-slate-400 font-semibold uppercase tracking-wider text-[11px]">
+                <table class="nt-table-cards w-full text-left text-xs">
+                    <thead class="bg-slate-950/50 border-b border-slate-800/70 text-slate-400 font-semibold uppercase tracking-wider text-[11px]">
                         <tr>
                             <th class="py-3.5 px-6">Blacklisted Series Name</th>
                             <th class="py-3.5 px-4">Reason / Notes</th>
@@ -238,18 +239,18 @@
                     <tbody class="divide-y divide-slate-800/60" id="blacklist-table-body">
                         {% for b in blacklisted_series %}
                         <tr class="blacklist-row hover:bg-slate-800/40 transition-colors" data-name="{{ b.name|lower }}">
-                            <td class="py-3.5 px-6 font-bold text-white flex items-center gap-2">
-                                <span class="w-2 h-2 rounded-full bg-rose-400"></span>
-                                <span class="text-sm">{{ b.name }}</span>
+                            <td data-label="Series Name" class="py-3.5 px-6 font-bold text-white flex items-center gap-2">
+                                <span class="w-2 h-2 rounded-full bg-rose-400 flex-shrink-0"></span>
+                                <span class="text-sm break-words-anywhere">{{ b.name }}</span>
                             </td>
-                            <td class="py-3.5 px-4 text-slate-400">
+                            <td data-label="Reason / Notes" class="py-3.5 px-4 text-slate-400 break-words-anywhere">
                                 {{ b.reason or 'Manually Blacklisted' }}
                             </td>
-                            <td class="py-3.5 px-4 text-slate-500 font-mono text-[11px]">
+                            <td data-label="Date Added" class="py-3.5 px-4 text-slate-500 font-mono text-[11px]">
                                 {{ b.created_at[:10] if b.created_at else 'Recent' }}
                             </td>
-                            <td class="py-3.5 px-6 text-right">
-                                <button data-blacklist-id="{{ b.id }}" data-series-name="{{ b.name }}" onclick="handleUnblockBtn(this)" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-brand-500/20 text-slate-300 hover:text-brand-300 border border-slate-700 hover:border-brand-500/30 text-xs font-semibold flex items-center gap-1.5 transition-colors ml-auto" title="Restore and allow tracking">
+                            <td data-label="Actions" class="py-3.5 px-6 text-right nt-cell-actions">
+                                <button data-blacklist-id="{{ b.id }}" data-series-name="{{ b.name }}" onclick="handleUnblockBtn(this)" class="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-brand-500/20 text-slate-300 hover:text-brand-300 border border-slate-700 hover:border-brand-500/30 text-xs font-semibold flex items-center gap-1.5 transition-colors ml-auto" title="Restore and allow tracking">
                                     <i data-lucide="undo-2" class="w-3.5 h-3.5"></i>
                                     Unblock / Restore
                                 </button>
@@ -257,7 +258,7 @@
                         </tr>
                         {% else %}
                         <tr>
-                            <td colspan="4" class="py-12 text-center text-slate-500">
+                            <td colspan="4" class="nt-table-empty py-12 text-center text-slate-500">
                                 No series currently blacklisted.
                             </td>
                         </tr>
@@ -274,22 +275,22 @@
 <!-- Manual Calibre match modal (discovery page) -->
 <div id="discovery-match-modal" class="hidden fixed inset-0 z-50">
     <div class="absolute inset-0 bg-slate-950/80 backdrop-blur-sm" onclick="closeDiscoveryMatchModal()" aria-hidden="true"></div>
-    <div class="relative z-10 w-full max-w-lg mx-auto mt-24 bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl p-5" role="dialog" aria-modal="true" aria-labelledby="discovery-match-title">
+    <div class="relative z-10 w-full max-w-lg mx-auto mt-24 bg-darkcard border border-slate-800/80 rounded-2xl shadow-2xl p-5" role="dialog" aria-modal="true" aria-labelledby="discovery-match-title">
         <div class="flex items-start justify-between gap-3">
             <div class="min-w-0">
-                <h2 id="discovery-match-title" class="text-sm font-bold text-white flex items-center gap-2">
+                <h2 id="discovery-match-title" class="text-sm font-display font-bold tracking-tight text-white flex items-center gap-2">
                     <i data-lucide="link" class="w-4 h-4 text-brand-400"></i>
                     Match discovered series to Calibre
                 </h2>
                 <p class="text-[11px] text-slate-400 mt-1 truncate">Discovered: <span id="discovery-match-source" class="font-mono text-slate-300"></span></p>
             </div>
-            <button type="button" id="discovery-match-cancel" onclick="closeDiscoveryMatchModal()" class="p-1.5 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-white transition-colors" title="Close (Esc)">
+            <button type="button" id="discovery-match-cancel" onclick="closeDiscoveryMatchModal()" class="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white border border-slate-700 transition-colors" title="Close (Esc)">
                 <i data-lucide="x" class="w-4 h-4"></i>
             </button>
         </div>
         <div class="relative mt-4">
             <i data-lucide="search" class="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2"></i>
-            <input type="text" id="discovery-match-search" oninput="onDiscoveryMatchSearchInput()" autocomplete="off" placeholder="Search Calibre series or author..." class="w-full bg-slate-950/70 border border-slate-700/80 rounded-xl pl-9 pr-3 py-2 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-brand-500">
+            <input type="text" id="discovery-match-search" oninput="onDiscoveryMatchSearchInput()" autocomplete="off" placeholder="Search Calibre series or author..." class="w-full bg-slate-950/50 border border-slate-800/70 rounded-xl pl-9 pr-3 py-2 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-brand-500">
         </div>
         <div id="discovery-match-results" class="mt-3 max-h-72 overflow-y-auto space-y-1.5 custom-scrollbar"></div>
         <p class="text-[10px] text-slate-500 mt-3">Choosing a series links and re-keys the discovered releases to the Calibre series, merges trackers and stores an alias so future releases match automatically. Already linked? Picking another series re-links the tracker.</p>
@@ -306,13 +307,13 @@
         if (tab === 'discovery') {
             discContent.classList.remove('hidden');
             blackContent.classList.add('hidden');
-            discBtn.className = "pb-3 border-b-2 border-brand-500 text-brand-400 flex items-center gap-2 transition-colors";
-            blackBtn.className = "pb-3 border-b-2 border-transparent text-slate-400 hover:text-slate-200 flex items-center gap-2 transition-colors";
+            discBtn.className = "pb-3 border-b-2 border-brand-500 text-brand-400 flex items-center gap-2 whitespace-nowrap transition-colors";
+            blackBtn.className = "pb-3 border-b-2 border-transparent text-slate-400 hover:text-slate-200 flex items-center gap-2 whitespace-nowrap transition-colors";
         } else {
             discContent.classList.add('hidden');
             blackContent.classList.remove('hidden');
-            discBtn.className = "pb-3 border-b-2 border-transparent text-slate-400 hover:text-slate-200 flex items-center gap-2 transition-colors";
-            blackBtn.className = "pb-3 border-b-2 border-rose-500 text-rose-400 flex items-center gap-2 transition-colors";
+            discBtn.className = "pb-3 border-b-2 border-transparent text-slate-400 hover:text-slate-200 flex items-center gap-2 whitespace-nowrap transition-colors";
+            blackBtn.className = "pb-3 border-b-2 border-brand-500 text-brand-400 flex items-center gap-2 whitespace-nowrap transition-colors";
         }
     }
 

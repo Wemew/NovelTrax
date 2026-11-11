@@ -7,7 +7,7 @@
 
     <div>
         <div class="flex items-center gap-2.5 flex-wrap">
-            <h1 class="text-2xl font-black text-white flex items-center gap-2.5">
+            <h1 class="text-2xl font-display font-bold tracking-tight text-white flex items-center gap-2.5">
                 <i data-lucide="settings" class="w-6 h-6 text-brand-400"></i>
                 System Settings & Integration
             </h1>
@@ -21,7 +21,7 @@
     </div>
 
     <!-- Zero-Lock Safety Notice -->
-    <div class="bg-brand-950/30 border border-brand-500/20 rounded-2xl p-4 sm:p-5 flex items-start gap-3.5">
+    <div class="bg-brand-900/15 border border-brand-500/20 rounded-2xl p-4 sm:p-5 flex items-start gap-3.5">
         <div class="w-8 h-8 rounded-lg bg-brand-500/20 text-brand-400 flex items-center justify-center flex-shrink-0 mt-0.5">
             <i data-lucide="shield-check" class="w-5 h-5"></i>
         </div>
@@ -34,11 +34,11 @@
     </div>
 
     <!-- Settings Form -->
-    <form id="settings-form" onsubmit="saveSettings(event)" class="bg-slate-900/90 border border-slate-800 rounded-2xl p-6 space-y-6 shadow-xl">
+    <form id="settings-form" onsubmit="saveSettings(event)" class="bg-darkcard border border-slate-800/80 rounded-2xl p-6 space-y-6 shadow-lg">
         
         <!-- Section: Calibre Library -->
         <div>
-            <h3 class="text-sm font-bold uppercase tracking-wider text-slate-300 border-b border-slate-800 pb-2 mb-4 flex items-center gap-2">
+            <h3 class="text-xs font-display font-bold uppercase tracking-wider text-slate-300 border-b border-slate-800/70 pb-2 mb-4 flex items-center gap-2">
                 <i data-lucide="library" class="w-4 h-4 text-brand-400"></i>
                 Calibre Library Network Mount
             </h3>
@@ -48,9 +48,9 @@
                     <label class="block text-xs font-semibold text-slate-300 mb-1">
                         Calibre Library Path in Container
                     </label>
-                    <div class="flex gap-2">
+                    <div class="flex flex-col sm:flex-row gap-2">
                         <input type="text" id="setting-calibre-path" value="{{ settings.calibre_path }}" required class="flex-1 bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white font-mono focus:outline-none focus:border-brand-500">
-                        <button type="button" onclick="testCalibreConnection()" class="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold flex items-center gap-1.5 transition-colors">
+                        <button type="button" onclick="testCalibreConnection()" class="w-full sm:w-auto justify-center whitespace-nowrap px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold flex items-center gap-1.5 transition-colors">
                             <i data-lucide="check" class="w-4 h-4 text-brand-400"></i>
                             Test Connection
                         </button>
@@ -66,7 +66,7 @@
 
         <!-- Section: Automation Intervals -->
         <div>
-            <h3 class="text-sm font-bold uppercase tracking-wider text-slate-300 border-b border-slate-800 pb-2 mb-4 flex items-center gap-2">
+            <h3 class="text-xs font-display font-bold uppercase tracking-wider text-slate-300 border-b border-slate-800/70 pb-2 mb-4 flex items-center gap-2">
                 <i data-lucide="clock" class="w-4 h-4 text-brand-400"></i>
                 Automation & Polling Intervals
             </h3>
@@ -106,9 +106,9 @@
                     </label>
                 </div>
 
-                <div class="sm:col-span-2 pt-3 border-t border-slate-800">
+                <div class="sm:col-span-2 pt-3 border-t border-slate-800/70">
                     <label class="flex items-start gap-3 cursor-pointer">
-                        <input type="checkbox" id="setting-nyaa-bundle-inference" {% if settings.get('nyaa_bundle_volume_inference', 'true')|lower not in ['false', '0', 'no', 'off'] %}checked{% endif %} class="mt-0.5 w-4 h-4 rounded bg-slate-950 border-slate-700 text-brand-600 focus:ring-0">
+                        <input type="checkbox" id="setting-nyaa-bundle-inference" {% if settings.get('nyaa_bundle_volume_inference', 'true')|lower not in ['false', '0', 'no', 'off'] %}checked{% endif %} class="mt-0.5 w-4 h-4 rounded bg-slate-950 border-slate-700 text-brand-600 focus:ring-brand-500">
                         <div>
                             <span class="text-xs font-semibold text-slate-200">Infer bundle volumes from AniList</span>
                             <p class="text-[11px] text-slate-500">Unmarked Nyaa light-novel batch releases are treated as the complete series when AniList reports Format: Light Novel, Status: Finished and a volume count.</p>
@@ -148,7 +148,7 @@
                     <p class="text-[11px] text-slate-500 mt-1">Rate-limiting delay between network requests to prevent server bans.</p>
                 </div>
 
-                <div class="sm:col-span-2 pt-3 border-t border-slate-800">
+                <div class="sm:col-span-2 pt-3 border-t border-slate-800/70">
                     <label class="flex items-center gap-3 cursor-pointer">
                         <input type="checkbox" id="setting-official-only" {% if settings.track_official_only != 'false' %}checked{% endif %} class="w-4 h-4 rounded bg-slate-950 border-slate-700 text-brand-600 focus:ring-brand-500">
                         <div>
@@ -162,7 +162,7 @@
 
         <!-- Section: Display & Logging -->
         <div>
-            <h3 class="text-sm font-bold uppercase tracking-wider text-slate-300 border-b border-slate-800 pb-2 mb-4 flex items-center gap-2">
+            <h3 class="text-xs font-display font-bold uppercase tracking-wider text-slate-300 border-b border-slate-800/70 pb-2 mb-4 flex items-center gap-2">
                 <i data-lucide="terminal" class="w-4 h-4 text-brand-400"></i>
                 Display &amp; Logging
             </h3>
@@ -208,7 +208,7 @@
                     <p class="text-[11px] text-slate-500 mt-1">Keep at most this many activity-log rows. <strong>0 disables</strong> the row cap.</p>
                 </div>
 
-                <div class="sm:col-span-2 pt-3 border-t border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div class="sm:col-span-2 pt-3 border-t border-slate-800/70 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                     <p class="text-[11px] text-slate-500">Activity logs are pruned automatically every 6 hours using these limits.</p>
                     <div class="flex items-center gap-2">
                         <button type="button" onclick="pruneActivityLogs()" id="btn-prune-logs" class="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-[11px] font-semibold flex items-center gap-1.5 transition-colors">
@@ -223,7 +223,7 @@
 
         <!-- Section: Download Engine -->
         <div>
-            <h3 class="text-sm font-bold uppercase tracking-wider text-slate-300 border-b border-slate-800 pb-2 mb-4 flex items-center gap-2">
+            <h3 class="text-xs font-display font-bold uppercase tracking-wider text-slate-300 border-b border-slate-800/70 pb-2 mb-4 flex items-center gap-2">
                 <i data-lucide="hard-drive-download" class="w-4 h-4 text-brand-400"></i>
                 Download Engine
             </h3>
@@ -247,7 +247,7 @@
 
         <!-- Section: TorBox Debrid Engine -->
         <div>
-            <h3 class="text-sm font-bold uppercase tracking-wider text-slate-300 border-b border-slate-800 pb-2 mb-4 flex items-center gap-2">
+            <h3 class="text-xs font-display font-bold uppercase tracking-wider text-slate-300 border-b border-slate-800/70 pb-2 mb-4 flex items-center gap-2">
                 <i data-lucide="cloud-download" class="w-4 h-4 text-cyan-400"></i>
                 TorBox Debrid Engine
             </h3>
@@ -281,7 +281,7 @@
 
                 <div id="torbox-test-result" class="hidden p-3 rounded-xl text-xs font-mono"></div>
 
-                <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2 border-t border-slate-800">
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2 border-t border-slate-800/70">
                     <label class="flex items-start gap-3 cursor-pointer">
                         <input type="checkbox" id="setting-torbox-enabled" {% if settings.torbox_enabled == 'true' %}checked{% endif %} class="mt-0.5 w-4 h-4 rounded bg-slate-950 border-slate-700 text-brand-600 focus:ring-brand-500">
                         <span>
@@ -360,7 +360,7 @@
 
         <!-- Section: Notifications -->
         <div>
-            <h3 class="text-sm font-bold uppercase tracking-wider text-slate-300 border-b border-slate-800 pb-2 mb-4 flex items-center gap-2">
+            <h3 class="text-xs font-display font-bold uppercase tracking-wider text-slate-300 border-b border-slate-800/70 pb-2 mb-4 flex items-center gap-2">
                 <i data-lucide="bell" class="w-4 h-4 text-brand-400"></i>
                 Notifications (Optional)
             </h3>
@@ -394,16 +394,16 @@
                     <p class="text-[11px] text-slate-500 mt-1">Sends JSON event payloads for Gotify, Ntfy, Home Assistant, or Apprise.</p>
                 </div>
 
-                <div class="pt-3 border-t border-slate-800 space-y-2.5">
+                <div class="pt-3 border-t border-slate-800/70 space-y-2.5">
                     <label class="flex items-start gap-3 cursor-pointer">
-                        <input type="checkbox" id="setting-webhook-new-request" {% if settings.webhook_new_request_notifications != 'false' %}checked{% endif %} class="mt-0.5 w-4 h-4 rounded bg-slate-950 border-slate-700 text-brand-600 focus:ring-0">
+                        <input type="checkbox" id="setting-webhook-new-request" {% if settings.webhook_new_request_notifications != 'false' %}checked{% endif %} class="mt-0.5 w-4 h-4 rounded bg-slate-950 border-slate-700 text-brand-600 focus:ring-brand-500">
                         <span class="min-w-0">
                             <span class="block text-xs font-semibold text-slate-200">New-request notifications</span>
                             <span class="block text-[11px] text-slate-500">Send a webhook when a new release is detected and requested. Disable to mute only this event.</span>
                         </span>
                     </label>
                     <label class="flex items-start gap-3 cursor-pointer">
-                        <input type="checkbox" id="setting-webhook-acquired" {% if settings.webhook_acquired_notifications != 'false' %}checked{% endif %} class="mt-0.5 w-4 h-4 rounded bg-slate-950 border-slate-700 text-brand-600 focus:ring-0">
+                        <input type="checkbox" id="setting-webhook-acquired" {% if settings.webhook_acquired_notifications != 'false' %}checked{% endif %} class="mt-0.5 w-4 h-4 rounded bg-slate-950 border-slate-700 text-brand-600 focus:ring-brand-500">
                         <span class="min-w-0">
                             <span class="block text-xs font-semibold text-slate-200">Acquired notifications</span>
                             <span class="block text-[11px] text-slate-500">Send a webhook when a requested release is found in Calibre and marked acquired. Disable to mute only this event.</span>
@@ -416,17 +416,17 @@
             </div>
         </div>
 
-        <div class="pt-4 border-t border-slate-800 flex justify-end">
-            <button type="submit" class="px-5 py-2.5 rounded-xl bg-brand-600 hover:bg-brand-500 text-white text-xs font-bold transition-all shadow-lg shadow-brand-600/30 active:scale-95">
+        <div class="pt-4 border-t border-slate-800/70 flex justify-end">
+            <button type="submit" class="px-5 py-2.5 rounded-xl bg-brand-600 hover:bg-brand-500 text-white text-xs font-semibold shadow-md shadow-brand-600/20 transition-colors active:scale-95">
                 Save Settings
             </button>
         </div>
     </form>
 
     <!-- Series Identity & Overrides (per-series reset) -->
-    <div class="bg-slate-900/90 border border-slate-800 rounded-2xl p-6 space-y-4 shadow-xl" id="series-identity-section">
+    <div class="bg-darkcard border border-slate-800/80 rounded-2xl p-6 space-y-4 shadow-lg" id="series-identity-section">
         <button type="button" id="series-identity-toggle" onclick="toggleSettingsSection('series-identity')" aria-expanded="false" aria-controls="series-identity-body" class="w-full flex items-center justify-between gap-3 text-left group">
-            <h3 class="text-sm font-bold uppercase tracking-wider text-slate-300 flex items-center gap-2">
+            <h3 class="text-xs font-display font-bold uppercase tracking-wider text-slate-300 flex items-center gap-2">
                 <i data-lucide="git-branch" class="w-4 h-4 text-cyan-400"></i>
                 Series identity &amp; overrides
             </h3>
@@ -455,7 +455,7 @@
             </div>
 
             <!-- Global alias overrides (collapsible, closed by default) -->
-            <div class="pt-4 border-t border-slate-800">
+            <div class="pt-4 border-t border-slate-800/70">
                 <button type="button" id="series-alias-toggle" onclick="toggleSettingsSection('series-alias')" aria-expanded="false" aria-controls="series-alias-body" class="w-full flex items-center justify-between gap-2 text-left">
                     <h4 class="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-2">
                         <i data-lucide="tags" class="w-3.5 h-3.5 text-amber-400"></i>
@@ -484,7 +484,7 @@
             </div>
 
             <!-- Attribution audit -->
-            <div class="pt-4 border-t border-slate-800 space-y-2">
+            <div class="pt-4 border-t border-slate-800/70 space-y-2">
                 <div class="flex items-center justify-between gap-2">
                     <h4 class="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-2">
                         <i data-lucide="search-check" class="w-3.5 h-3.5 text-emerald-400"></i>
@@ -504,9 +504,9 @@
     </div>
 
     <!-- Storage & Diagnostics -->
-    <div class="bg-slate-900/90 border border-slate-800 rounded-2xl p-6 space-y-4 shadow-xl">
+    <div class="bg-darkcard border border-slate-800/80 rounded-2xl p-6 space-y-4 shadow-lg">
         <div>
-            <h3 class="text-sm font-bold uppercase tracking-wider text-slate-300 border-b border-slate-800 pb-2 mb-2 flex items-center gap-2">
+            <h3 class="text-xs font-display font-bold uppercase tracking-wider text-slate-300 border-b border-slate-800/70 pb-2 mb-2 flex items-center gap-2">
                 <i data-lucide="hard-drive" class="w-4 h-4 text-cyan-400"></i>
                 Storage &amp; Diagnostics
             </h3>
@@ -516,7 +516,7 @@
         </div>
 
         <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
-            <div class="bg-slate-950/60 border border-slate-800 rounded-xl p-4 space-y-2">
+            <div class="bg-slate-950/50 border border-slate-800/70 rounded-xl p-4 space-y-2">
                 <div class="flex items-center justify-between gap-2">
                     <h4 class="text-xs font-bold text-white flex items-center gap-1.5">
                         <i data-lucide="database" class="w-4 h-4 text-cyan-400"></i>
@@ -532,13 +532,13 @@
                 </div>
             </div>
 
-            <div class="bg-slate-950/60 border border-slate-800 rounded-xl p-4 space-y-2">
-                <div class="flex items-center justify-between gap-2">
+            <div class="bg-slate-950/50 border border-slate-800/70 rounded-xl p-4 space-y-2">
+                <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                     <h4 class="text-xs font-bold text-white flex items-center gap-1.5">
                         <i data-lucide="wifi" class="w-4 h-4 text-brand-400"></i>
                         Network diagnostics
                     </h4>
-                    <div class="flex items-center gap-1.5">
+                    <div class="flex flex-wrap items-center gap-1.5">
                         <button type="button" onclick="runNetworkDiagnostics()" id="btn-network-diagnostics" class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-[11px] font-semibold flex items-center gap-1.5 transition-colors">
                             <i data-lucide="activity" class="w-3 h-3 text-brand-400"></i>
                             Run network diagnostics
@@ -555,7 +555,7 @@
             </div>
         </div>
 
-        <div class="pt-3 border-t border-slate-800 grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <div class="pt-3 border-t border-slate-800/70 grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div class="flex flex-col sm:flex-row sm:items-center gap-2.5">
                 <button type="button" onclick="downloadDatabaseBackup()" id="btn-download-backup" class="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors">
                     <i data-lucide="download" class="w-3.5 h-3.5 text-cyan-400"></i>
@@ -573,9 +573,9 @@
     </div>
 
     <!-- Maintenance & Debug Tools -->
-    <div class="bg-slate-900/90 border border-slate-800 rounded-2xl p-6 space-y-4 shadow-xl">
+    <div class="bg-darkcard border border-slate-800/80 rounded-2xl p-6 space-y-4 shadow-lg">
         <div>
-            <h3 class="text-sm font-bold uppercase tracking-wider text-rose-400 border-b border-slate-800 pb-2 mb-2 flex items-center gap-2">
+            <h3 class="text-xs font-display font-bold uppercase tracking-wider text-rose-400 border-b border-slate-800/70 pb-2 mb-2 flex items-center gap-2">
                 <i data-lucide="wrench" class="w-4 h-4 text-rose-400"></i>
                 Maintenance & Debug Tools
             </h3>
@@ -586,7 +586,7 @@
 
         <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5 pt-2">
             <!-- Clear Descriptions -->
-            <div class="bg-slate-950/60 border border-slate-800 rounded-xl p-4 flex flex-col justify-between">
+            <div class="bg-slate-950/50 border border-slate-800/70 rounded-xl p-4 flex flex-col justify-between">
                 <div>
                     <h4 class="text-xs font-bold text-white flex items-center gap-1.5">
                         <i data-lucide="file-text" class="w-4 h-4 text-amber-400"></i>
@@ -603,7 +603,7 @@
             </div>
 
             <!-- Clear Discovered Series -->
-            <div class="bg-slate-950/60 border border-slate-800 rounded-xl p-4 flex flex-col justify-between">
+            <div class="bg-slate-950/50 border border-slate-800/70 rounded-xl p-4 flex flex-col justify-between">
                 <div>
                     <h4 class="text-xs font-bold text-white flex items-center gap-1.5">
                         <i data-lucide="compass" class="w-4 h-4 text-brand-400"></i>
@@ -620,7 +620,7 @@
             </div>
 
             <!-- Clear Thumbnails -->
-            <div class="bg-slate-950/60 border border-slate-800 rounded-xl p-4 flex flex-col justify-between">
+            <div class="bg-slate-950/50 border border-slate-800/70 rounded-xl p-4 flex flex-col justify-between">
                 <div>
                     <h4 class="text-xs font-bold text-white flex items-center gap-1.5">
                         <i data-lucide="image" class="w-4 h-4 text-rose-400"></i>
@@ -637,24 +637,24 @@
             </div>
 
             <!-- Purge PDF Releases -->
-            <div class="bg-slate-950/60 border border-slate-800 rounded-xl p-4 flex flex-col justify-between">
+            <div class="bg-slate-950/50 border border-slate-800/70 rounded-xl p-4 flex flex-col justify-between">
                 <div>
                     <h4 class="text-xs font-bold text-white flex items-center gap-1.5">
-                        <i data-lucide="file-x" class="w-4 h-4 text-indigo-400"></i>
+                        <i data-lucide="file-x" class="w-4 h-4 text-rose-400"></i>
                         Purge PDF Releases
                     </h4>
                     <p class="text-[11px] text-slate-400 mt-1.5 leading-relaxed">
                         Permanently deletes any PDF releases and deduplicates series. NovelTrax strictly monitors digital novel EPUBs.
                     </p>
                 </div>
-                <button type="button" onclick="debugAction('purge-pdf')" id="btn-purge-pdf" class="mt-4 w-full px-3 py-2 rounded-xl bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors active:scale-95">
+                <button type="button" onclick="debugAction('purge-pdf')" id="btn-purge-pdf" class="mt-4 w-full px-3 py-2 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 border border-rose-500/30 text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors active:scale-95">
                     <i data-lucide="shield-alert" class="w-3.5 h-3.5"></i>
                     <span>Purge PDF Releases</span>
                 </button>
             </div>
 
             <!-- Clear Metadata Cache -->
-            <div class="bg-slate-950/60 border border-slate-800 rounded-xl p-4 flex flex-col justify-between">
+            <div class="bg-slate-950/50 border border-slate-800/70 rounded-xl p-4 flex flex-col justify-between">
                 <div>
                     <h4 class="text-xs font-bold text-white flex items-center gap-1.5">
                         <i data-lucide="database" class="w-4 h-4 text-cyan-400"></i>
@@ -981,7 +981,7 @@
             const name = String(row.name || '');
             const display = String(row.display_title || '');
             const card = document.createElement('div');
-            card.className = 'p-3 rounded-xl border border-slate-800 bg-slate-950/60 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5';
+            card.className = 'p-3 rounded-xl border border-slate-800/70 bg-slate-950/50 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5';
 
             const info = document.createElement('div');
             info.className = 'min-w-0';
@@ -1137,7 +1137,7 @@
             const source = String(alias.source_name || alias.source || '');
             const target = String(alias.target_name || alias.target || '');
             const row = document.createElement('div');
-            row.className = 'p-2 rounded-xl border border-slate-800 bg-slate-950/60 flex flex-col sm:flex-row sm:items-center justify-between gap-2';
+            row.className = 'p-2 rounded-xl border border-slate-800/70 bg-slate-950/50 flex flex-col sm:flex-row sm:items-center justify-between gap-2';
             const mapping = document.createElement('p');
             mapping.className = 'text-[11px] text-slate-300 break-words-anywhere';
             mapping.textContent = (source || '(unknown)') + '  →  ' + (target || '(unknown)');
@@ -1225,7 +1225,7 @@
                 }
                 items.forEach(function (item) {
                     const row = document.createElement('div');
-                    row.className = 'p-2 rounded-xl border border-slate-800 bg-slate-950/60 flex flex-col sm:flex-row sm:items-center justify-between gap-2';
+                    row.className = 'p-2 rounded-xl border border-slate-800/70 bg-slate-950/50 flex flex-col sm:flex-row sm:items-center justify-between gap-2';
                     const info = document.createElement('div');
                     info.className = 'min-w-0';
                     const title = document.createElement('p');

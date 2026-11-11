@@ -8,7 +8,7 @@
     <!-- Header & Action Row -->
     <div class="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
         <div>
-            <h1 class="text-2xl font-black text-white flex items-center gap-2.5">
+            <h1 class="text-2xl font-display font-bold tracking-tight text-white flex items-center gap-2.5">
                 <i data-lucide="sparkles" class="w-6 h-6 text-brand-400"></i>
                 Novel Releases & Wishlist
             </h1>
@@ -32,7 +32,7 @@
                 </a>
             </div>
 
-            <button onclick="triggerFeedCheck()" class="btn-feed-check text-xs px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-medium flex items-center gap-2 transition-all shadow-sm active:scale-95">
+            <button onclick="triggerFeedCheck()" class="btn-feed-check text-xs px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-medium flex items-center gap-2 transition-colors active:scale-95">
                 <i data-lucide="radio" class="icon-feed-check w-4 h-4 text-brand-400"></i>
                 Check Feeds Now
             </button>
@@ -40,21 +40,21 @@
     </div>
 
     <!-- Filter Buttons, Sort & Search -->
-    <div class="bg-slate-900/80 border border-slate-800 rounded-2xl p-4 flex flex-col md:flex-row items-center justify-between gap-3">
+    <div class="bg-darkcard border border-slate-800/80 rounded-2xl shadow-lg p-4 flex flex-col md:flex-row items-center justify-between gap-3">
         <!-- Status Filter Pills -->
         <div class="flex items-center space-x-1 sm:space-x-2 overflow-x-auto w-full md:w-auto">
-            <a href="/releases?view={{ current_view }}{% if current_sort %}&sort={{ current_sort }}{% endif %}{% if search_query %}&q={{ search_query|urlencode }}{% endif %}" class="text-xs px-3 py-1.5 rounded-lg {% if not current_status %}bg-slate-800 text-white border border-slate-700 font-semibold{% else %}text-slate-400 hover:text-white{% endif %} transition-colors">
+            <a href="/releases?view={{ current_view }}{% if current_sort %}&sort={{ current_sort }}{% endif %}{% if search_query %}&q={{ search_query|urlencode }}{% endif %}" class="text-xs px-1.5 sm:px-3 py-1.5 rounded-lg whitespace-nowrap {% if not current_status %}bg-slate-800 text-white border border-slate-700 font-semibold{% else %}text-slate-400 hover:text-white{% endif %} transition-colors">
                 All ({{ status_counts.ALL if status_counts else (total_count or releases|length) }})
             </a>
-            <a href="/releases?view={{ current_view }}&status=REQUESTED{% if current_sort %}&sort={{ current_sort }}{% endif %}{% if search_query %}&q={{ search_query|urlencode }}{% endif %}" class="text-xs px-3 py-1.5 rounded-lg flex items-center gap-1.5 {% if current_status == 'REQUESTED' %}bg-amber-500/20 text-amber-300 border border-amber-500/30 font-semibold{% else %}text-slate-400 hover:text-amber-400{% endif %} transition-colors">
+            <a href="/releases?view={{ current_view }}&status=REQUESTED{% if current_sort %}&sort={{ current_sort }}{% endif %}{% if search_query %}&q={{ search_query|urlencode }}{% endif %}" class="text-xs px-1.5 sm:px-3 py-1.5 rounded-lg whitespace-nowrap flex items-center gap-1.5 {% if current_status == 'REQUESTED' %}bg-amber-500/20 text-amber-300 border border-amber-500/30 font-semibold{% else %}text-slate-400 hover:text-amber-400{% endif %} transition-colors">
                 <span class="w-2 h-2 rounded-full bg-amber-400"></span>
                 Requested ({{ status_counts.REQUESTED if status_counts else '' }})
             </a>
-            <a href="/releases?view={{ current_view }}&status=IN_CALIBRE{% if current_sort %}&sort={{ current_sort }}{% endif %}{% if search_query %}&q={{ search_query|urlencode }}{% endif %}" class="text-xs px-3 py-1.5 rounded-lg flex items-center gap-1.5 {% if current_status == 'IN_CALIBRE' %}bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 font-semibold{% else %}text-slate-400 hover:text-emerald-400{% endif %} transition-colors">
+            <a href="/releases?view={{ current_view }}&status=IN_CALIBRE{% if current_sort %}&sort={{ current_sort }}{% endif %}{% if search_query %}&q={{ search_query|urlencode }}{% endif %}" class="text-xs px-1.5 sm:px-3 py-1.5 rounded-lg whitespace-nowrap flex items-center gap-1.5 {% if current_status == 'IN_CALIBRE' %}bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 font-semibold{% else %}text-slate-400 hover:text-emerald-400{% endif %} transition-colors">
                 <span class="w-2 h-2 rounded-full bg-emerald-400"></span>
                 In Calibre ({{ status_counts.IN_CALIBRE if status_counts else '' }})
             </a>
-            <a href="/releases?view={{ current_view }}&status=IGNORED{% if current_sort %}&sort={{ current_sort }}{% endif %}{% if search_query %}&q={{ search_query|urlencode }}{% endif %}" class="text-xs px-3 py-1.5 rounded-lg flex items-center gap-1.5 {% if current_status == 'IGNORED' %}bg-slate-800 text-slate-300 border border-slate-700 font-semibold{% else %}text-slate-400 hover:text-white{% endif %} transition-colors">
+            <a href="/releases?view={{ current_view }}&status=IGNORED{% if current_sort %}&sort={{ current_sort }}{% endif %}{% if search_query %}&q={{ search_query|urlencode }}{% endif %}" class="text-xs px-1.5 sm:px-3 py-1.5 rounded-lg whitespace-nowrap flex items-center gap-1.5 {% if current_status == 'IGNORED' %}bg-slate-800 text-slate-300 border border-slate-700 font-semibold{% else %}text-slate-400 hover:text-white{% endif %} transition-colors">
                 Ignored ({{ status_counts.IGNORED if status_counts else '' }})
             </a>
         </div>
@@ -106,7 +106,7 @@
             {% include "partials/series_card_chunk.html" %}
         {% else %}
         <div id="series-loading-skeleton" class="space-y-4">
-            <div class="bg-slate-900/90 border border-slate-800 rounded-2xl p-5 animate-pulse flex flex-col md:flex-row gap-5 items-start">
+            <div class="bg-darkcard border border-slate-800/80 rounded-2xl p-5 animate-pulse flex flex-col md:flex-row gap-5 items-start">
                 <div class="w-24 h-36 bg-slate-800 rounded-xl flex-shrink-0"></div>
                 <div class="flex-1 w-full space-y-3">
                     <div class="h-5 bg-slate-800 rounded w-1/3"></div>
@@ -118,7 +118,7 @@
                     <div class="h-10 bg-slate-800/40 rounded w-full mt-2"></div>
                 </div>
             </div>
-            <div class="bg-slate-900/90 border border-slate-800 rounded-2xl p-5 animate-pulse flex flex-col md:flex-row gap-5 items-start">
+            <div class="bg-darkcard border border-slate-800/80 rounded-2xl p-5 animate-pulse flex flex-col md:flex-row gap-5 items-start">
                 <div class="w-24 h-36 bg-slate-800 rounded-xl flex-shrink-0"></div>
                 <div class="flex-1 w-full space-y-3">
                     <div class="h-5 bg-slate-800 rounded w-1/4"></div>
@@ -127,7 +127,7 @@
                 </div>
             </div>
         </div>
-        <div class="bg-slate-900/60 border border-slate-800/80 rounded-2xl p-12 text-center" id="no-series-msg" style="display: none;">
+        <div class="bg-darkcard border border-slate-800/80 rounded-2xl p-12 text-center" id="no-series-msg" style="display: none;">
             <div class="w-14 h-14 rounded-2xl bg-brand-500/10 text-brand-400 border border-brand-500/20 flex items-center justify-center mx-auto mb-3">
                 <i data-lucide="sparkles" class="w-7 h-7"></i>
             </div>
@@ -141,11 +141,11 @@
 
     <!-- Progressive Lazy Load More Bar (Series Mode) -->
     <div id="load-more-series-container" class="text-center py-6" {% if total_count <= grouped_series|length %}style="display: none;"{% endif %}>
-        <div id="series-loading-spinner" class="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-slate-900 border border-slate-800 text-xs text-slate-400 font-medium shadow-sm" style="display: none;">
+        <div id="series-loading-spinner" class="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-slate-900/60 border border-slate-800/70 text-xs text-slate-400 font-medium" style="display: none;">
             <i data-lucide="loader-2" class="w-4 h-4 animate-spin text-brand-400"></i>
             <span>Loading more series...</span>
         </div>
-        <button onclick="fetchNextSeriesBatch()" id="btn-load-more-series" class="px-5 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold inline-flex items-center gap-2 shadow-md hover:border-slate-600 transition-all active:scale-95">
+        <button onclick="fetchNextSeriesBatch()" id="btn-load-more-series" class="px-5 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold inline-flex items-center gap-2 transition-colors active:scale-95">
             <i data-lucide="chevrons-down" class="w-4 h-4 text-brand-400"></i>
             <span>Load More Series (<span id="deferred-series-count">{{ [total_count - grouped_series|length, 0]|max }}</span> remaining)</span>
         </button>
@@ -153,7 +153,7 @@
 
     <!-- Pagination Bar (Series View) -->
     {% if total_pages and total_pages > 1 %}
-    <div class="bg-slate-900/80 border border-slate-800 rounded-2xl p-4 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs text-slate-400">
+    <div class="bg-darkcard border border-slate-800/80 rounded-2xl shadow-lg p-4 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs text-slate-400">
         <div>
             Showing <strong class="text-white">{{ (current_page - 1) * page_size + 1 }}</strong> to <strong class="text-white">{{ [current_page * page_size, total_count]|min }}</strong> of <strong class="text-white">{{ total_count }}</strong> series
         </div>
@@ -202,10 +202,10 @@
     <!-- ========================================== -->
     <!-- VIEW MODE: ALL RELEASES (FLAT TABLE)       -->
     <!-- ========================================== -->
-    <div class="bg-slate-900/90 border border-slate-800 rounded-2xl overflow-hidden shadow-xl" id="flatReleasesTable">
+    <div class="bg-darkcard border border-slate-800/80 rounded-2xl overflow-hidden shadow-lg" id="flatReleasesTable">
         <div class="overflow-x-auto">
-            <table class="w-full text-left text-xs">
-                <thead class="bg-[#111827] border-b border-slate-800 text-slate-400 font-semibold uppercase tracking-wider text-[11px]">
+            <table class="w-full text-left text-xs nt-table-cards md:min-w-[900px]">
+                <thead class="bg-slate-900/80 border-b border-slate-800 text-slate-400 font-semibold uppercase tracking-wider text-[11px]">
                     <tr>
                         <th class="py-3.5 px-4 sm:px-6">Novel / Release Title</th>
                         <th class="py-3.5 px-4">Series & Vol</th>
@@ -220,7 +220,7 @@
                         {% include "partials/flat_release_row_chunk.html" %}
                     {% else %}
                     <tr id="flat-loading-skeleton" class="animate-pulse">
-                        <td colspan="6" class="py-8 text-center text-xs text-slate-500 font-medium">
+                        <td colspan="6" class="py-8 text-center text-xs text-slate-500 font-medium nt-table-empty">
                             <div class="inline-flex items-center gap-2">
                                 <i data-lucide="loader-2" class="w-4 h-4 animate-spin text-brand-400"></i>
                                 <span>Loading releases...</span>
@@ -234,12 +234,12 @@
     </div>
 
     <!-- Progressive Lazy Load More Bar (Flat Mode) -->
-    <div id="load-more-flat-container" class="text-center py-4 bg-slate-900/60 border border-slate-800 rounded-2xl mt-4" {% if total_count <= releases|length %}style="display: none;"{% endif %}>
-        <div id="flat-loading-spinner" class="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-slate-900 border border-slate-800 text-xs text-slate-400 font-medium shadow-sm" style="display: none;">
+    <div id="load-more-flat-container" class="text-center py-4 bg-darkcard border border-slate-800/80 rounded-2xl mt-4 shadow-lg" {% if total_count <= releases|length %}style="display: none;"{% endif %}>
+        <div id="flat-loading-spinner" class="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-slate-900/60 border border-slate-800/70 text-xs text-slate-400 font-medium" style="display: none;">
             <i data-lucide="loader-2" class="w-4 h-4 animate-spin text-brand-400"></i>
             <span>Loading releases...</span>
         </div>
-        <button onclick="fetchNextFlatBatch()" id="btn-load-more-flat" class="px-5 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold inline-flex items-center gap-2 shadow-md hover:border-slate-600 transition-all active:scale-95">
+        <button onclick="fetchNextFlatBatch()" id="btn-load-more-flat" class="px-5 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold inline-flex items-center gap-2 transition-colors active:scale-95">
             <i data-lucide="chevrons-down" class="w-4 h-4 text-brand-400"></i>
             <span>Load More Releases (<span id="deferred-flat-count">{{ [total_count - releases|length, 0]|max }}</span> remaining)</span>
         </button>
@@ -247,7 +247,7 @@
 
     <!-- Pagination Bar (Flat Mode) -->
     {% if total_pages and total_pages > 1 %}
-    <div class="bg-slate-900/80 border border-slate-800 rounded-2xl p-4 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs text-slate-400">
+    <div class="bg-darkcard border border-slate-800/80 rounded-2xl shadow-lg p-4 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs text-slate-400">
         <div>
             Showing <strong class="text-white">{{ (current_page - 1) * page_size + 1 }}</strong> to <strong class="text-white">{{ [current_page * page_size, total_count]|min }}</strong> of <strong class="text-white">{{ total_count }}</strong> releases
         </div>
