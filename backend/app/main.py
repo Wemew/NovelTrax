@@ -4,6 +4,7 @@ import re
 import math
 import time
 import threading
+from concurrent.futures import ThreadPoolExecutor
 import difflib
 import logging
 import asyncio
@@ -63,11 +64,12 @@ cover_cache = CoverCache(DATA_DIR)
 task_manager = TaskManager(db, CALIBRE_DIR)
 torbox_manager = TorBoxManager(db)
 
-# The EPUB sidecar is a serial FIFO worker. Serialize NovelTrax's calls too so
-# later requests start their own timeout budget instead of aging in the queue.
-# These must be asyncio locks: waiting on a threading.Lock inside to_thread
-# would consume every default-executor thread and stall /api/tasks.
-_EPUB_FETCH_LOCK = asyncio.Lock()
+# The EPUB sidecar is serial. These dedicated one-thread executors are
+# NovelTrax's queue stages: fetch (browser/sidecar) and local post-processing.
+# Jobs waiting in an executor queue do not consume default-executor threads,
+# so /api/tasks and the rest of the app stay responsive.
+_EPUB_FETCH_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="epub-fetch")
+_EPUB_POST_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="epub-post")
 _EPUB_SOURCE_LOCK = asyncio.Lock()
 
 def get_qbit_client() -> QBitClient:
@@ -2595,7 +2597,7 @@ async def api_fetch_release_epub(release_id: int):
         db.finish_background_task(fetch_task_id, "failed", message)
         raise HTTPException(status_code=400, detail=message)
 
-    def _worker():
+    def _fetch_worker():
         fetch_reporter.report(
             total=100, done=35,
             message="Calling the fetcher sidecar (Turnstile/countdown)…", force=True,
@@ -2609,8 +2611,7 @@ async def api_fetch_release_epub(release_id: int):
         )
         try:
             with urllib.request.urlopen(request, timeout=280) as response:
-                content = response.read()
-                disposition = response.headers.get("Content-Disposition", "")
+                return response.read(), response.headers.get("Content-Disposition", "")
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", "replace")[:500]
             try:
@@ -2621,6 +2622,7 @@ async def api_fetch_release_epub(release_id: int):
         except Exception as exc:
             raise ValueError(f"Fetcher unreachable: {exc}") from exc
 
+    def _post_worker(content: bytes, disposition: str):
         fetch_reporter.report(total=100, done=85, message="Validating downloaded archive…", force=True)
         if len(content) < 1024:
             raise ValueError("Fetcher returned an empty document")
@@ -2660,13 +2662,19 @@ async def api_fetch_release_epub(release_id: int):
         return target, prefill
 
     try:
-        if _EPUB_FETCH_LOCK.locked():
-            fetch_reporter.report(
-                total=100, done=35,
-                message="Waiting for the previous EPUB fetch to finish…", force=True,
-            )
-        async with _EPUB_FETCH_LOCK:
-            path, prefill = await asyncio.to_thread(_worker)
+        fetch_reporter.report(
+            total=100, done=35,
+            message="Queued for the EPUB fetcher…", force=True,
+        )
+        loop = asyncio.get_running_loop()
+        content, disposition = await loop.run_in_executor(_EPUB_FETCH_EXECUTOR, _fetch_worker)
+        fetch_reporter.report(
+            total=100, done=75,
+            message="Download received; queued for validation…", force=True,
+        )
+        path, prefill = await loop.run_in_executor(
+            _EPUB_POST_EXECUTOR, _post_worker, content, disposition
+        )
     except ValueError as exc:
         _mark_failed(str(exc))
         fetch_reporter.report(message=str(exc), force=True)
