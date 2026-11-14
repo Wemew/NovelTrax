@@ -52,8 +52,15 @@ epub-fetcher:
     EPUB_FETCHER_TURNSTILE_WAIT: "30"
     # Docker runs Chromium headful under Xvfb; leave false.
     EPUB_FETCHER_HEADLESS: "false"
+    # 1 = FIFO queue (recommended); 2+ launches parallel browser instances.
+    EPUB_FETCHER_MAX_CONCURRENCY: "1"
   expose: ["8010"]
 ```
+
+Fetch requests are serialized through a FIFO gate by default (one Chromium
+instance). Set `EPUB_FETCHER_MAX_CONCURRENCY=2` only after checking container
+memory; NovelTrax also rejects a second fetch for the same release while one is
+queued/running.
 
 FlareSolverr is still required for Cloudflare/Turnstile; without it a challenge
 fails with a clear error instead of hanging. A solved URL is remembered, so a

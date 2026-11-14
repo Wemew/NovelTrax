@@ -6,8 +6,10 @@ GET  /health -> dependency/config status
 
 from __future__ import annotations
 
+import itertools
 import os
 import tempfile
+import threading
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException
@@ -31,6 +33,36 @@ FLARESOLVERR_URL = os.getenv("EPUB_FETCHER_FLARESOLVERR_URL", "")
 HEADLESS = os.getenv("EPUB_FETCHER_HEADLESS", "false").strip().lower() in (
     "1", "true", "yes", "on"
 )
+try:
+    MAX_CONCURRENCY = max(1, int(os.getenv("EPUB_FETCHER_MAX_CONCURRENCY", "1")))
+except ValueError:
+    MAX_CONCURRENCY = 1
+
+_queue_cv = threading.Condition()
+_queue_tickets = itertools.count()
+_queue_next = 0
+_queue_active = 0
+_queue_waiters = 0
+
+
+def _run_queued(fn):
+    """FIFO gate: extra fetch requests wait instead of launching more browsers."""
+    global _queue_next, _queue_active, _queue_waiters
+    with _queue_cv:
+        ticket = next(_queue_tickets)
+        _queue_waiters += 1
+        while ticket != _queue_next or _queue_active >= MAX_CONCURRENCY:
+            _queue_cv.wait()
+        _queue_waiters -= 1
+        _queue_next += 1
+        _queue_active += 1
+        _queue_cv.notify_all()
+    try:
+        return fn()
+    finally:
+        with _queue_cv:
+            _queue_active -= 1
+            _queue_cv.notify_all()
 
 
 class FetchRequest(BaseModel):
@@ -51,6 +83,9 @@ def health():
         "flaresolverr": bool(FLARESOLVERR_URL),
         "headless": HEADLESS,
         "display": os.getenv("DISPLAY", ""),
+        "max_concurrency": MAX_CONCURRENCY,
+        "active_fetches": _queue_active,
+        "queued_fetches": _queue_waiters,
         "output_dir": OUTPUT_DIR,
     }
 
@@ -58,13 +93,13 @@ def health():
 @app.post("/fetch")
 def fetch_endpoint(payload: FetchRequest):
     try:
-        result = fetch(
+        result = _run_queued(lambda: fetch(
             payload.url,
             OUTPUT_DIR,
             flaresolverr_url=FLARESOLVERR_URL,
             timeout=payload.timeout or DEFAULT_TIMEOUT,
             headless=HEADLESS,
-        )
+        ))
     except FetchError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     return FileResponse(

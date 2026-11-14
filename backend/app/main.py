@@ -2386,6 +2386,14 @@ async def api_fetch_release_epub(release_id: int):
         except Exception:
             logger.exception("Could not persist EPUB fetch failure for release #%s", release_id)
 
+    for active_task in db.list_background_tasks(active_only=True, kind="epub_fetch", limit=200):
+        if str(active_task.get("scope") or "") == str(release_id):
+            return JSONResponse({
+                "status": "busy",
+                "detail": "An EPUB fetch is already queued/running for this release",
+                "task_id": active_task.get("id"),
+            }, status_code=409)
+
     fetch_task_id = db.create_background_task(
         "epub_fetch", f"EPUB: {release.get('title') or release_id}", scope=str(release_id),
     )
