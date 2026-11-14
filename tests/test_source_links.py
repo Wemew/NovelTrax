@@ -76,10 +76,29 @@ def test_persistence():
         "series_name": "Example Novel",
         "volume": 1.0,
     })
+    _, older_id = db.upsert_release({
+        "guid": "jnovels-older",
+        "title": "Older Novel Volume 1 Epub",
+        "link": "https://jnovels.com/older-novel-volume-1-epub/",
+        "series_name": "Older Novel",
+        "volume": 1.0,
+    })
+    _, newer_id = db.upsert_release({
+        "guid": "jnovels-newer",
+        "title": "Newer Novel Volume 2 Epub",
+        "link": "https://jnovels.com/newer-novel-volume-2-epub/",
+        "series_name": "Newer Novel",
+        "volume": 2.0,
+    })
     candidates = db.list_releases_missing_source_link(10)
     check(
         all("jnovels.com" in str(row["link"]) for row in candidates),
         f"backfill scope: {[row['link'] for row in candidates]}",
+    )
+    candidate_ids = [row["id"] for row in candidates]
+    check(
+        candidate_ids.index(newer_id) < candidate_ids.index(older_id),
+        f"backfill newest first: {candidate_ids}",
     )
     check(db.set_release_source_link(release_id, "https://mirror.example/new") is True, "update setter")
     check(db.get_release_by_id(release_id)["source_link"] == "https://mirror.example/new", "updated")
@@ -90,6 +109,7 @@ def test_ui_exposes_source_buttons():
     for name in ("flat_release_row_chunk.html", "series_card_chunk.html"):
         source = open(os.path.join(base, name), encoding="utf-8").read()
         check("r.source_link" in source, f"{name} source button")
+        check("'jnovels.com' in (r.link or '')" in source, f"{name} fetch available before backfill")
         check("rel=\"noopener noreferrer\"" in source, f"{name} noopener")
     settings = open(os.path.join(_BASE, "backend", "app", "templates", "settings.html"), encoding="utf-8").read()
     check("backfillSourceLinks" in settings, "settings backfill action")

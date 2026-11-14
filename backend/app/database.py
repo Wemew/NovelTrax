@@ -3699,7 +3699,7 @@ class Database:
                 SELECT id, title, link FROM releases
                 WHERE (source_link IS NULL OR trim(source_link) = '')
                   AND link IS NOT NULL AND link LIKE '%jnovels.com%'
-                ORDER BY id ASC
+                ORDER BY id DESC
                 LIMIT ?;
                 """,
                 (max(1, int(limit)),),
