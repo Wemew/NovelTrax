@@ -11,6 +11,7 @@ for _p in (_BASE, os.path.join(_BASE, "backend"), _HERE):
         sys.path.insert(0, _p)
 
 from app.database import Database  # noqa: E402
+from app.epub_identity import download_identity_error  # noqa: E402
 from app.providers.jnovels import extract_source_link, find_jnovels_article, is_jnovels_page  # noqa: E402
 
 
@@ -59,6 +60,30 @@ def test_jnovels_pages_are_not_sources():
         == "https://jnovels.com/classroom-of-the-elite-year-3-volume-3-epub/",
         "title picks the right article",
     )
+
+
+def test_source_rejects_ads_and_wrong_volume():
+    html = (
+        '<a href="https://app.adjust.com/12mstyjh">Download</a>'
+        '<a href="https://charexempire.com/wrong">VOLUME 02</a>'
+        '<a href="https://charexempire.com/right">VOLUME 03</a>'
+    )
+    check(extract_source_link(html, expected_volume=3) == "https://charexempire.com/right", "expected volume wins")
+    check(extract_source_link(html, expected_volume=7) == "", "no wrong-volume fallback")
+
+
+def test_download_identity_rejects_mismatched_release():
+    release = {
+        "title": "I Like Villains, so I Reincarnated as One Volume 3 Epub",
+        "series_name": "I Like Villains, so I Reincarnated as One",
+        "volume": 3,
+    }
+    wrong = "History of the Kingdom of Orcsen Volume 02.epub"
+    check(bool(download_identity_error(release, wrong)), "wrong volume/series rejected")
+    right = "I Like Villains, so I Reincarnated as One Vol. 3.epub"
+    check(not download_identity_error(release, right), "matching release accepted")
+    generic = "novel.epub"
+    check(not download_identity_error(release, generic), "generic filename is not guessed")
 
 
 def test_persistence():

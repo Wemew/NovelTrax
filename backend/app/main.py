@@ -29,13 +29,15 @@ from app import background_tasks, task_projection
 from app.download_inventory import scan_download_tree
 from app.download_status_sync import sync_qbit_completed
 from app.epub_prefill import backfill_downloaded_epubs, prepare_downloaded_epub
+from app.epub_identity import download_identity_error
 from app.epub_metadata import EpubMetadataError, write_epub_metadata
 from app.calibre.scanner import CalibreScanner
+from app.parser import extract_series_and_volume
 from app.providers.registry import create_provider
 from app.scheduler import TaskManager
 from app.covers import CoverCache
 from app.security import is_safe_public_url, sanitize_calibre_path, safe_fetch_text
-from app.providers.jnovels import extract_source_link, find_jnovels_article, is_jnovels_listing, is_jnovels_page
+from app.providers.jnovels import extract_source_link, find_jnovels_article, is_ad_tracking_url, is_jnovels_listing, is_jnovels_page
 from app.downloader.qbit import QBitClient, qbit_client_from_settings
 from app.download_state import release_download_state
 from app.torbox_manager import TorBoxManager
@@ -75,6 +77,7 @@ _EPUB_POST_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="epub
 # in memory while prepare_downloaded_epub waits on AniList/Kitsu.
 _EPUB_PIPELINE_SLOTS = asyncio.Semaphore(2)
 _EPUB_SOURCE_LOCK = asyncio.Lock()
+
 
 def get_qbit_client() -> QBitClient:
     """Instantiates QBitClient configured from current app_settings in database."""
@@ -2487,7 +2490,12 @@ async def api_backfill_source_links(payload: Optional[Dict[str, Any]] = None):
             )
             try:
                 html = safe_fetch_text(str(row.get("link") or ""), timeout=10.0)
-                link = extract_source_link(html, str(row.get("link") or ""))
+                from app.parser import extract_series_and_volume
+                parsed = extract_series_and_volume(str(row.get("title") or ""))
+                link = extract_source_link(
+                    html, str(row.get("link") or ""),
+                    expected_volume=parsed.get("volume"),
+                )
                 if link and db.set_release_source_link(int(row["id"]), link):
                     updated += 1
             except Exception as exc:
@@ -2555,11 +2563,15 @@ async def api_fetch_release_epub(release_id: int):
     source = str(release.get("source_link") or "").strip()
     article = str(release.get("link") or "").strip()
     title = str(release.get("title") or "")
-    if source and is_jnovels_page(source):
-        logger.info("Ignoring J-Novels page as source for release #%s: %s", release_id, source)
+    original_source = source
+    if source and (is_jnovels_page(source) or is_ad_tracking_url(source)):
+        logger.info("Ignoring non-source J-Novels/ad URL for release #%s: %s", release_id, source)
         source = ""
-    if not source and (article or release.get("source_link")):
-        candidate_page = article or str(release.get("source_link") or "").strip()
+    # Re-resolve against the article for J-Novels releases, not only when the
+    # source is empty: stale extractor results can point at a related volume or
+    # an ad/tracker. The article/volume is authoritative.
+    if article and (is_jnovels_page(article) or not source):
+        candidate_page = article
         async with _EPUB_SOURCE_LOCK:
             try:
                 html = await asyncio.to_thread(safe_fetch_text, candidate_page, 10.0)
@@ -2571,13 +2583,21 @@ async def api_fetch_release_epub(release_id: int):
                     else:
                         html = ""
                 if html:
-                    source = extract_source_link(html, candidate_page)
-                if source and is_jnovels_page(source):
+                    extracted = extract_source_link(
+                        html, candidate_page, expected_volume=release.get("volume")
+                    )
+                    if extracted:
+                        source = extracted
+                if source and (is_jnovels_page(source) or is_ad_tracking_url(source)):
                     source = ""
             except Exception as exc:
                 logger.debug("Source-link extraction failed for #%s: %s", release_id, exc)
-        if source and db.set_release_source_link(release_id, source):
-            db.log_activity("SOURCE_LINK_FILLED", f"Source link found for {release.get('title')}", candidate_page)
+        if source and source != original_source and db.set_release_source_link(release_id, source):
+            db.log_activity(
+                "SOURCE_LINK_CORRECTED",
+                f"Source link corrected for {release.get('title')}",
+                f"{original_source or '(empty)'} -> {source}",
+            )
     if source and is_jnovels_page(source):
         message = "Source link points at a J-Novels page, not a download destination; re-run source-link backfill"
         _mark_failed(message)
@@ -2649,6 +2669,19 @@ async def api_fetch_release_epub(release_id: int):
             counter += 1
         with open(target, "wb") as handle:
             handle.write(content)
+        identity_error = download_identity_error(release, target)
+        if identity_error:
+            try:
+                os.unlink(target)
+            except OSError:
+                pass
+            logger.warning("Rejected EPUB identity for release #%s: %s", release_id, identity_error)
+            db.log_activity(
+                "EPUB_IDENTITY_REJECTED",
+                f"Rejected mismatched EPUB for {release.get('title')}",
+                f"{os.path.basename(target)}: {identity_error}",
+            )
+            raise ValueError(f"Downloaded archive does not match {release.get('title')!r}: {identity_error}")
         db.clear_download_error(release_id)
         db.update_downloader_state(release_id, "COMPLETED", "http")
         db.mark_release_downloaded(release_id)

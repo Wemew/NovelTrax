@@ -92,33 +92,80 @@ def find_jnovels_article(html: str, base_url: str, title: str) -> str:
     return best_href if best_score >= 0.55 else ""
 
 
-def extract_source_link(summary: str, base_url: str = "") -> str:
-    """Extract the direct file link behind a shortener/hider anchor."""
+_AD_SOURCE_HOSTS = (
+    "adjust.com",
+    "apps.apple.com",
+    "play.google.com",
+    "facebook.com",
+    "instagram.com",
+    "tiktok.com",
+    "twitter.com",
+    "x.com",
+    "whitebit.com",
+)
+
+
+def is_ad_tracking_url(href: str) -> bool:
+    """True for app-store/tracker destinations that are never book sources."""
+    host = (urlsplit(str(href or "")).hostname or "").lower()
+    return any(host == blocked or host.endswith("." + blocked) for blocked in _AD_SOURCE_HOSTS)
+
+
+def _anchor_volume(text: str):
+    match = re.search(r"\b(?:volume|vol\.?)\s*(\d+(?:\.\d+)?)\b", str(text or ""), re.IGNORECASE)
+    if not match:
+        return None
+    try:
+        return float(match.group(1))
+    except (TypeError, ValueError):
+        return None
+
+
+def extract_source_link(summary: str, base_url: str = "",
+                        expected_volume: Optional[float] = None) -> str:
+    """Extract the direct file link behind a shortener/hider anchor.
+
+    When *expected_volume* is known, only an anchor for that volume is accepted;
+    related-post links for another volume must never win over the real source.
+    """
     html = str(summary or "")
     if not html:
         return ""
     soup = BeautifulSoup(html, "html.parser")
-    anchors = [
-        (a.get_text(" ", strip=True), str(a.get("href") or "").strip())
-        for a in soup.find_all("a", href=True)
-    ]
-    # Volume anchors win over generic download/get anchors. J-Novels tag and
-    # search links also say "Volume 3", but point back into the site rather
-    # than at a file; skip those before choosing.
-    patterns = (
-        re.compile(r"\b(?:volume|vol\.?)\s*\d+\b", re.IGNORECASE),
-        re.compile(r"\b(?:download|get)\b", re.IGNORECASE),
-    )
-    for pattern in patterns:
-        for text, href in anchors:
-            if not href or not pattern.search(text):
-                continue
-            resolved = urljoin(str(base_url or ""), href)
-            if urlsplit(resolved).scheme.lower() not in ("http", "https"):
-                continue
-            if is_jnovels_page(resolved):
-                continue
-            return resolved
+    volume_candidates = []
+    download_candidates = []
+    for anchor in soup.find_all("a", href=True):
+        text = anchor.get_text(" ", strip=True)
+        href = str(anchor.get("href") or "").strip()
+        if not href:
+            continue
+        resolved = urljoin(str(base_url or ""), href)
+        if urlsplit(resolved).scheme.lower() not in ("http", "https"):
+            continue
+        if is_jnovels_page(resolved) or is_ad_tracking_url(resolved):
+            continue
+        anchor_volume = _anchor_volume(text)
+        if anchor_volume is not None:
+            volume_candidates.append((anchor_volume, resolved))
+        elif re.search(r"\b(?:download|get)\b", text, re.IGNORECASE):
+            download_candidates.append(resolved)
+    if expected_volume is not None:
+        try:
+            expected = float(expected_volume)
+        except (TypeError, ValueError):
+            expected = None
+        if expected is not None:
+            for volume, resolved in volume_candidates:
+                if abs(volume - expected) < 0.01:
+                    return resolved
+            # There are volume links, but none match this release. Do not fall
+            # through to a related volume's file.
+            if volume_candidates:
+                return ""
+    if volume_candidates:
+        return volume_candidates[0][1]
+    if download_candidates:
+        return download_candidates[0]
     return ""
 
 
@@ -772,7 +819,7 @@ class JNovelsProvider(BaseFeedProvider):
                     series_link=series_link,
                     # Search/article cards keep the VOLUME link in the card DOM;
                     # the excerpt element alone often strips it.
-                    source_link=extract_source_link(str(art), link),
+                    source_link=extract_source_link(str(art), link, expected_volume=parsed["volume"]),
                     raw_data={"confidence": parsed["confidence"], "subtitle": parsed["subtitle"]}
                 )
 
@@ -880,7 +927,7 @@ class JNovelsProvider(BaseFeedProvider):
                 cover_url=cover_url,
                 description=re.sub(r'<[^>]+>', '', summary)[:300],
                 series_link=series_link,
-                source_link=extract_source_link(summary, link),
+                source_link=extract_source_link(summary, link, expected_volume=parsed["volume"]),
                 raw_data={"confidence": parsed["confidence"]}
             ))
 
