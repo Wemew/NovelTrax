@@ -9,6 +9,36 @@
 {% set dl_dir = download_dir if download_dir is defined and download_dir else (settings.downloads_dir if settings is defined and settings.downloads_dir else '/downloads') %}
 {% set torbox_torrents = torrents if torrents is defined and torrents else [] %}
 
+{% macro render_download_nodes(nodes, depth=0) %}
+    {% for node in nodes %}
+        {% if node.is_dir %}
+        <details class="group/folder rounded-lg border border-slate-800/60 bg-slate-950/30" {% if depth == 0 %}open{% endif %}>
+            <summary class="flex items-center gap-2 px-2.5 py-2 cursor-pointer list-none select-none hover:bg-slate-900/60 rounded-lg">
+                <i data-lucide="folder" class="w-3.5 h-3.5 text-amber-400 flex-shrink-0"></i>
+                <span class="font-semibold text-slate-200 truncate">{{ node.name }}</span>
+                {% if node.is_symlink %}<span class="text-[10px] text-slate-500">(symlink)</span>{% endif %}
+                <span class="ml-auto text-[10px] text-slate-500 font-mono whitespace-nowrap">{{ node.child_count }} items &middot; {{ node.size_label }}</span>
+                <i data-lucide="chevron-right" class="w-3 h-3 text-slate-500 group-open/folder:rotate-90 transition-transform"></i>
+            </summary>
+            <div class="ml-4 pl-3 border-l border-slate-800/60 space-y-1 pb-1">
+                {% if node.children %}
+                    {{ render_download_nodes(node.children, depth + 1) }}
+                {% else %}
+                <p class="text-[11px] text-slate-500 py-1">Empty folder</p>
+                {% endif %}
+            </div>
+        </details>
+        {% else %}
+        <div class="flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-slate-900/60">
+            <i data-lucide="file-text" class="w-3.5 h-3.5 text-slate-500 flex-shrink-0"></i>
+            <span class="text-slate-300 truncate" title="{{ node.name }}">{{ node.name }}</span>
+            {% if node.is_symlink %}<span class="text-[10px] text-slate-500">(symlink)</span>{% endif %}
+            <span class="ml-auto text-[10px] text-slate-500 font-mono whitespace-nowrap">{{ node.size_label }}{% if node.modified %} &middot; {{ node.modified }}{% endif %}</span>
+        </div>
+        {% endif %}
+    {% endfor %}
+{% endmacro %}
+
 {% macro torbox_progress_cell(t) %}
     {% set phase = (t.phase or '')|lower %}
     {% set pct_raw = t.progress_pct if (t.progress_pct is defined and t.progress_pct is not none) else ((t.progress or 0) * 100) %}
@@ -397,6 +427,42 @@
         </div>
     </div>
     {% endif %}
+
+    <!-- Local Downloads Folder Browser -->
+    <div class="bg-darkcard border border-slate-800/80 rounded-2xl p-5 sm:p-6 shadow-lg">
+        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
+            <div>
+                <h2 class="text-lg font-display font-bold tracking-tight text-white flex items-center gap-2">
+                    <i data-lucide="folder-open" class="w-5 h-5 text-amber-400"></i>
+                    Download Folder
+                </h2>
+                <p class="text-[11px] text-slate-500 font-mono mt-1">{{ dl_dir }}</p>
+            </div>
+            <div class="flex items-center gap-3 text-[11px] text-slate-400 font-mono">
+                <span>{{ download_tree.file_count if download_tree else 0 }} files</span>
+                <span>{{ download_tree.folder_count if download_tree else 0 }} folders</span>
+                <span>{{ download_tree.size_label if download_tree else '' }}</span>
+            </div>
+        </div>
+        {% if not download_tree or download_tree.error %}
+        <div class="rounded-xl border border-amber-500/20 bg-amber-500/5 p-4 text-xs text-amber-300">
+            <i data-lucide="alert-triangle" class="w-4 h-4 inline mr-1"></i>
+            {{ download_tree.error if download_tree else 'Downloads folder unavailable.' }}
+        </div>
+        {% elif not download_tree.children %}
+        <div class="rounded-xl border border-slate-800 bg-slate-950/30 p-5 text-center text-xs text-slate-500">
+            <i data-lucide="folder" class="w-6 h-6 mx-auto mb-2 text-slate-600"></i>
+            The downloads folder is empty.
+        </div>
+        {% else %}
+        <div class="space-y-1 max-h-96 overflow-y-auto custom-scrollbar pr-1">
+            {{ render_download_nodes(download_tree.children) }}
+        </div>
+        {% if download_tree.truncated %}
+        <p class="mt-3 text-[10px] text-amber-400">Listing truncated after {{ download_tree.file_count + download_tree.folder_count }} entries.</p>
+        {% endif %}
+        {% endif %}
+    </div>
 
 </div>
 

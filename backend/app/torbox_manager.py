@@ -1479,6 +1479,7 @@ class TorBoxManager:
                 )
                 self.db.clear_download_error(release_id)
                 self.db.update_downloader_state(release_id, "COMPLETED", "torbox")
+                self.db.mark_release_downloaded(release_id)
                 self.db.update_torbox_progress(release_id, phase="done")
             except Exception as exc:
                 logger.warning("Could not persist TorBox completion for release %s: %s", release_id, exc)

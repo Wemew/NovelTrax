@@ -4243,6 +4243,29 @@ class Database:
             """, (clean_status, ignored_val, matched_book_id, release_id))
             conn.commit()
 
+    def mark_release_downloaded(self, release_id: int) -> None:
+        """A fetched release is no longer Wanted until Calibre confirms it."""
+        with self.get_connection() as conn:
+            conn.execute(
+                "UPDATE releases SET status = 'DOWNLOADED', ignored = 0, "
+                "updated_at = CURRENT_TIMESTAMP WHERE id = ? "
+                "AND status NOT IN ('IN_CALIBRE', 'IGNORED', 'BLACKLISTED');",
+                (int(release_id),),
+            )
+            conn.commit()
+
+    def backfill_completed_download_statuses(self) -> int:
+        """One-shot repair for rows downloaded before DOWNLOADED existed."""
+        with self.get_connection() as conn:
+            cur = conn.execute(
+                "UPDATE releases SET status = 'DOWNLOADED', ignored = 0, "
+                "updated_at = CURRENT_TIMESTAMP "
+                "WHERE download_status = 'COMPLETED' "
+                "AND status IN ('NEW', 'REQUESTED');"
+            )
+            conn.commit()
+            return max(0, int(cur.rowcount or 0))
+
     def ignore_release(self, release_id: int) -> bool:
         """Marks a release as IGNORED (sets status='IGNORED' and ignored=1)."""
         with self.get_connection() as conn:
@@ -5126,6 +5149,7 @@ class Database:
                         "all_volumes_set": set(),
                         "missing_volumes_set": set(),
                         "has_wanted": False,
+                        "has_downloaded": False,
                         "has_discovery": False,
                         "has_in_calibre": False,
                         "has_prioritized": False
@@ -5165,6 +5189,8 @@ class Database:
                 st = rel.get("status")
                 if st == "REQUESTED":
                     group["has_wanted"] = True
+                elif st == "DOWNLOADED":
+                    group["has_downloaded"] = True
                 elif st == "NEW":
                     group["has_discovery"] = True
                 elif st == "IN_CALIBRE":
@@ -5289,6 +5315,7 @@ class Database:
                 SELECT 
                     count(*) as total,
                     sum(CASE WHEN status = 'REQUESTED' THEN 1 ELSE 0 END) as requested,
+                    sum(CASE WHEN status = 'DOWNLOADED' THEN 1 ELSE 0 END) as downloaded,
                     sum(CASE WHEN status = 'IN_CALIBRE' THEN 1 ELSE 0 END) as in_calibre,
                     sum(CASE WHEN status = 'IGNORED' THEN 1 ELSE 0 END) as ignored
                 FROM releases;
@@ -5297,6 +5324,7 @@ class Database:
             return {
                 "ALL": row["total"] or 0,
                 "REQUESTED": row["requested"] or 0,
+                "DOWNLOADED": row["downloaded"] or 0,
                 "IN_CALIBRE": row["in_calibre"] or 0,
                 "IGNORED": row["ignored"] or 0
             }

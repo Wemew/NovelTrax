@@ -50,6 +50,10 @@
                 <span class="w-2 h-2 rounded-full bg-amber-400"></span>
                 Requested ({{ status_counts.REQUESTED if status_counts else '' }})
             </a>
+            <a href="/releases?view={{ current_view }}&status=DOWNLOADED{% if current_sort %}&sort={{ current_sort }}{% endif %}{% if search_query %}&q={{ search_query|urlencode }}{% endif %}" class="text-xs px-1.5 sm:px-3 py-1.5 rounded-lg whitespace-nowrap flex items-center gap-1.5 {% if current_status == 'DOWNLOADED' %}bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 font-semibold{% else %}text-slate-400 hover:text-cyan-300{% endif %} transition-colors">
+                <span class="w-2 h-2 rounded-full bg-cyan-400"></span>
+                Downloaded ({{ status_counts.DOWNLOADED if status_counts else '' }})
+            </a>
             <a href="/releases?view={{ current_view }}&status=IN_CALIBRE{% if current_sort %}&sort={{ current_sort }}{% endif %}{% if search_query %}&q={{ search_query|urlencode }}{% endif %}" class="text-xs px-1.5 sm:px-3 py-1.5 rounded-lg whitespace-nowrap flex items-center gap-1.5 {% if current_status == 'IN_CALIBRE' %}bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 font-semibold{% else %}text-slate-400 hover:text-emerald-400{% endif %} transition-colors">
                 <span class="w-2 h-2 rounded-full bg-emerald-400"></span>
                 In Calibre ({{ status_counts.IN_CALIBRE if status_counts else '' }})

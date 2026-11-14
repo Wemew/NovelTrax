@@ -25,6 +25,7 @@ from starlette.background import BackgroundTask
 from app.database import Database
 from app import diagnostics
 from app import background_tasks, task_projection
+from app.download_inventory import scan_download_tree
 from app.calibre.scanner import CalibreScanner
 from app.providers.registry import create_provider
 from app.scheduler import TaskManager
@@ -742,6 +743,9 @@ async def lifespan(app: FastAPI):
     try:
         db.ensure_prioritized_groups_table()
         db.deduplicate_and_clean_discovery()
+        repaired = db.backfill_completed_download_statuses()
+        if repaired:
+            logger.info("Marked %s completed download(s) as DOWNLOADED", repaired)
         logger.info("Startup database maintenance completed: PDF releases purged, series deduplicated, prioritized groups seeded.")
     except Exception as e:
         logger.warning(f"Startup database maintenance warning: {e}")
@@ -1168,6 +1172,11 @@ async def downloads_view(request: Request):
     """Renders Downloader & Queue Management page with live status and active torrents."""
     engine = _active_downloader_engine()
     settings = _masked_settings()
+    local_download_dir = (
+        _torbox_downloads_dir() if engine == "torbox"
+        else str(settings.get("qbit_savepath") or settings.get("downloads_dir") or "/downloads")
+    )
+    download_tree = await asyncio.to_thread(scan_download_tree, local_download_dir)
 
     if engine == "torbox":
         status_payload = await asyncio.to_thread(torbox_manager.build_status, 1.2)
@@ -1183,7 +1192,8 @@ async def downloads_view(request: Request):
                 "torbox_status": status_payload.get("downloader") or {},
                 "torbox_last_checked_seconds_ago": _torbox_last_poll_seconds_ago(),
                 "settings": settings,
-                "download_dir": _torbox_downloads_dir()
+                "download_dir": local_download_dir,
+                "download_tree": download_tree,
             }
         )
 
@@ -1201,7 +1211,8 @@ async def downloads_view(request: Request):
             "qbit_status": status,
             "torrents": torrents,
             "settings": settings,
-            "download_dir": settings.get("qbit_savepath", "/downloads")
+            "download_dir": local_download_dir,
+            "download_tree": download_tree,
         }
     )
 
@@ -2479,6 +2490,7 @@ async def api_fetch_release_epub(release_id: int):
             handle.write(content)
         db.clear_download_error(release_id)
         db.update_downloader_state(release_id, "COMPLETED", "http")
+        db.mark_release_downloaded(release_id)
         db.set_download_files(release_id, [target])
         db.log_activity("EPUB_FETCHED", f"Fetched EPUB for {release.get('title')}", target)
         fetch_reporter.report(message=f"Saved {os.path.basename(target)}", progress_pct=100, force=True)

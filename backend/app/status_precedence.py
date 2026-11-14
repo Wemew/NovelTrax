@@ -7,7 +7,7 @@ must therefore pass through :func:`resolve_status`, which protects user intent:
 1. a blank/``None`` incoming value never clears an existing status;
 2. an unset existing value adopts the incoming one;
 3. ``DISCOVERY`` / ``NEW`` are automation-owned and therefore recomputable;
-4. ``REQUESTED`` / ``IN_CALIBRE`` are never downgraded to a classification;
+4. ``REQUESTED`` / ``DOWNLOADED`` / ``IN_CALIBRE`` are never downgraded to a classification;
 5. ``IGNORED`` / ``BLACKLISTED`` form a user-veto tier automation cannot lift.
 
 Deliberate API transitions (the UI calling ``update_release_status``) pass
@@ -23,7 +23,7 @@ from typing import Optional
 CLASSIFICATION_STATUSES = frozenset({"NEW", "DISCOVERY"})
 
 # User intent / library fact statuses that a classification must never lower.
-PROTECTED_STATUSES = frozenset({"REQUESTED", "IN_CALIBRE"})
+PROTECTED_STATUSES = frozenset({"REQUESTED", "DOWNLOADED", "IN_CALIBRE"})
 
 # User-veto tier: only an explicit API action can lift these.
 VETO_STATUSES = frozenset({"IGNORED", "BLACKLISTED"})
@@ -85,11 +85,17 @@ def resolve_status(
             return existing_n
         return incoming_n
 
+    if existing_n == "DOWNLOADED":
+        # A feed poll must not turn a fetched release back into Wanted.
+        if incoming_n in CLASSIFICATION_STATUSES or incoming_n == "REQUESTED":
+            return existing_n
+        return incoming_n
+
     if existing_n == "IN_CALIBRE":
         if incoming_n in CLASSIFICATION_STATUSES:
             return existing_n
         # A feed poll must not resurrect a fulfilled request over a library fact.
-        if incoming_n == "REQUESTED":
+        if incoming_n == "REQUESTED" or incoming_n == "DOWNLOADED":
             return existing_n
         return incoming_n
 
