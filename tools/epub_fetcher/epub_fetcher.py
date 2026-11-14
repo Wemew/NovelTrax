@@ -308,8 +308,7 @@ def _turnstile_token(page) -> str:
 def _wait_for_turnstile_token(page, timeout: float = 30.0) -> str:
     """Wait for the widget to issue a token; never treat a click as clearance."""
     deadline = time.monotonic() + max(1.0, float(timeout))
-    next_widget_click = 0.0
-    next_checkbox_click = 0.0
+    interacted = False
     while time.monotonic() < deadline:
         token = _turnstile_token(page)
         logger.debug("Turnstile wait url=%s token_len=%d", page.url, len(token or ""))
@@ -318,35 +317,36 @@ def _wait_for_turnstile_token(page, timeout: float = 30.0) -> str:
         # Funding Choices can render well after the form; keep trying while
         # waiting instead of blocking the widget behind its modal.
         _dismiss_consent(page)
-        now = time.monotonic()
-        if now >= next_widget_click:
-            next_widget_click = now + 3.0
+        if not interacted:
+            interacted = True
+            # Click the real checkbox first; clicking the wrapper afterwards
+            # would immediately reset the in-flight challenge.
             try:
-                widget = page.locator(".cf-turnstile").first
-                if widget.count() and widget.is_visible():
-                    box = widget.bounding_box()
-                    if box and box.get("width") and box.get("height"):
-                        widget.click(
-                            position={"x": box["width"] / 2, "y": box["height"] / 2},
-                            timeout=3000,
-                        )
-                        logger.debug("Turnstile widget clicked url=%s", page.url)
-            except Exception as exc:
-                logger.debug("Turnstile widget click failed: %s", exc)
-        if now >= next_checkbox_click:
-            next_checkbox_click = now + 3.0
-            try:
+                clicked = False
                 for frame in page.frames:
                     if "challenges.cloudflare.com" in (frame.url or ""):
                         checkbox = frame.get_by_role("checkbox").first
                         if checkbox.count() and checkbox.is_visible():
                             checkbox.click(timeout=3000)
+                            clicked = True
+                            logger.debug("Turnstile checkbox clicked url=%s", page.url)
                             break
-            except Exception:
-                pass
-        time.sleep(1.0)
+                if not clicked:
+                    widget = page.locator(".cf-turnstile").first
+                    if widget.count() and widget.is_visible():
+                        box = widget.bounding_box()
+                        if box and box.get("width") and box.get("height"):
+                            widget.click(
+                                position={"x": box["width"] / 2, "y": box["height"] / 2},
+                                timeout=3000,
+                            )
+                            logger.debug("Turnstile widget clicked url=%s", page.url)
+            except Exception as exc:
+                logger.debug("Turnstile interaction failed: %s", exc)
+        # Repeated clicks reset an in-flight Turnstile challenge; after the
+        # one-time interaction this is a passive wait for the token.
+        time.sleep(0.5)
     return _turnstile_token(page)
-
 
 def _submit_turnstile_form(page, token: str = "") -> bool:
     """Fill/submit the form only after a token exists.
