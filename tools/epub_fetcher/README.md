@@ -16,10 +16,12 @@ the final EPUB. NovelTrax calls it over HTTP; it can also be used standalone.
    would solve the cookie-less homepage and never see the form. Once a real
    `cf-turnstile-response` token exists, the form is submitted explicitly. A
    browser click is never treated as proof that the widget passed.
-4. Playwright follows countdown pages, clicks visible `Get Link`/`Download`/
-   `Continue` controls, and captures the browser download (also handles a
-   direct `*.epub` anchor).
-5. The file is returned with its original filename. If no token/download is
+4. Playwright follows countdown pages, dismisses `Got it!`/consent overlays,
+   and prefers trusted file-host links (Google Drive, Dropbox, MediaFire,
+   pixeldrain, direct `*.epub`) over clicking ad-covered buttons.
+5. Multiple same-label `Get Link` links are tried in order. Fake downloads
+   (installers/HTML) are discarded; only `PK`/`%PDF` archives are returned.
+6. The file is returned with its original filename. If no token/download is
    produced, the service returns a clear 502 instead of waiting forever.
 
 Ads/popups are ignored: only the tab that emits a download is used, and each

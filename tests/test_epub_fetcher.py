@@ -25,6 +25,23 @@ def test_book_archive_signatures():
     check(not epub_fetcher._is_book_bytes(b"<html>"), "html rejected")
 
 
+def test_trusted_download_link_extraction():
+    class FakePage:
+        def eval_on_selector_all(self, selector, script):
+            return [
+                {"text": "get link", "href": "https://docs.google.com/uc?export=download&id=abc", "cls": "get-link"},
+                {"text": "download", "href": "https://ads.example/installer.exe", "cls": ""},
+                {"text": "download", "href": "https://cdn.example/book.epub", "cls": ""},
+                {"text": "click here", "href": "https://docs.google.com/uc?export=download&id=no", "cls": ""},
+            ]
+
+    hrefs = epub_fetcher._download_link_candidates(FakePage())
+    check(hrefs == [
+        "https://docs.google.com/uc?export=download&id=abc",
+        "https://cdn.example/book.epub",
+    ], hrefs)
+
+
 def test_executable_download_rejected_before_save():
     class FakeDownload:
         suggested_filename = "OperaSetup.exe"
@@ -226,6 +243,7 @@ def main():
     test_safe_filename()
     test_book_archive_signatures()
     test_executable_download_rejected_before_save()
+    test_trusted_download_link_extraction()
     test_flow_heuristics()
     test_challenge_visibility_after_manual_click()
     test_flaresolverr_cookies()

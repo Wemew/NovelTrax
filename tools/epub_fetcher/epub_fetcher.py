@@ -30,13 +30,23 @@ logger = logging.getLogger("epub_fetcher")
 
 #: Buttons/links that advance the interstitial chain, highest priority first.
 CLICK_LABELS: Tuple[str, ...] = (
-    "get link", "getlink", "download now", "download", "continue", "proceed",
-    "next", "click here", "verify you are human", "i am human",
+    "get link", "getlink", "download now", "download", "click here to continue",
+    "continue", "proceed", "next", "click here", "verify you are human",
+    "i am human",
 )
 #: Anchors/URL suffixes that mean "this is already the file".
 FILE_SUFFIXES: Tuple[str, ...] = (".epub", ".pdf", ".cbz", ".zip", ".mobi", ".azw3")
 TURNSTILE_RESPONSE_SELECTOR = "input[name='cf-turnstile-response']"
 EXECUTABLE_SUFFIXES = (".exe", ".msi", ".dmg", ".pkg", ".apk", ".bat", ".cmd", ".sh")
+TRUSTED_DOWNLOAD_HOSTS = (
+    "docs.google.com",
+    "drive.google.com",
+    "drive.usercontent.google.com",
+    "pixeldrain.com",
+    "mediafire.com",
+    "dropbox.com",
+    "dropboxusercontent.com",
+)
 #: Text that indicates a Cloudflare/Turnstile gate rather than the file page.
 CHALLENGE_MARKERS: Tuple[str, ...] = (
     "just a moment", "verify you are human", "checking your browser",
@@ -235,7 +245,7 @@ def _dismiss_consent(page) -> bool:
         clicked = bool(page.evaluate(
             """
             () => {
-                const labels = ['Consent', 'Accept all', 'Accept', 'I agree'];
+                const labels = ['Consent', 'Accept all', 'Accept', 'I agree', 'Got it!', 'Got it'];
                 for (const button of document.querySelectorAll('button')) {
                     const rect = button.getBoundingClientRect();
                     if (rect.width === 0 || rect.height === 0) continue;
@@ -399,26 +409,67 @@ def _visible_controls(page) -> List[str]:
     return texts
 
 
-def _click_label(page, label: str) -> bool:
+def _click_label(page, label: str, occurrence: int = 0) -> bool:
     pattern = re.compile(r"^\s*" + re.escape(label) + r"\s*$", re.IGNORECASE)
     for role in ("button", "link"):
         try:
-            locator = page.get_by_role(role, name=pattern).first
-            if locator.count() and locator.is_visible() and locator.is_enabled():
-                locator.click(timeout=2000)
-                return True
+            locator = page.get_by_role(role, name=pattern)
+            if occurrence < locator.count():
+                candidate = locator.nth(occurrence)
+                if candidate.is_visible() and candidate.is_enabled():
+                    candidate.click(timeout=2000)
+                    return True
         except Exception:
             continue
     # Shortener countdown controls are sometimes plain spans/divs with an
     # onclick handler rather than semantic buttons or links.
-    try:
-        locator = page.get_by_text(label, exact=True).first
-        if locator.count() and locator.is_visible() and locator.is_enabled():
-            locator.click(timeout=2000)
-            return True
-    except Exception:
-        pass
+    if occurrence == 0:
+        try:
+            locator = page.get_by_text(label, exact=True).first
+            if locator.count() and locator.is_visible() and locator.is_enabled():
+                locator.click(timeout=2000)
+                return True
+        except Exception:
+            pass
     return False
+
+
+def _download_link_candidates(page) -> List[str]:
+    """Return Get-Link/Download anchors that point at a known file host."""
+    try:
+        anchors = page.eval_on_selector_all(
+            "a[href]",
+            """
+            els => els.map(e => ({
+                text: (e.innerText || '').trim().toLowerCase(),
+                href: e.href,
+                cls: String(e.className || '').toLowerCase(),
+            }))
+            """,
+        )
+    except Exception:
+        return []
+    hrefs: List[str] = []
+    for item in anchors or []:
+        text = str(item.get("text") or "")
+        href = str(item.get("href") or "")
+        classes = str(item.get("cls") or "")
+        if not href.lower().startswith(("http://", "https://")):
+            continue
+        if not (
+            text.startswith("get link")
+            or text.startswith("download")
+            or "get-link" in classes
+        ):
+            continue
+        host = urllib.parse.urlsplit(href).hostname or ""
+        if any(host == allowed or host.endswith("." + allowed) for allowed in TRUSTED_DOWNLOAD_HOSTS):
+            if href not in hrefs:
+                hrefs.append(href)
+        elif looks_like_file_url(href):
+            if href not in hrefs:
+                hrefs.append(href)
+    return hrefs
 
 
 def _find_file_href(page) -> str:
@@ -541,10 +592,12 @@ def fetch(
             ],
         )
         downloads: List[Any] = []
-        clicked_keys = set()
+        clicked_counts: Dict[Tuple[str, str], int] = {}
         cleared_urls = set()
         manual_attempts = set()
         turnstile_submissions = set()
+        delay_submissions = set()
+        tried_download_links = set()
         consent_dismissed = False
         pages: List[Any] = []
 
@@ -578,21 +631,37 @@ def fetch(
         try:
             page.goto(target_url, wait_until="domcontentloaded", timeout=45000)
             while time.monotonic() < deadline:
-                live_pages = [p for p in pages if not p.is_closed()]
-                if page.is_closed():
-                    if not live_pages:
-                        raise FetchError("Browser page closed before a download appeared")
-                    page = live_pages[-1]
-                    steps.append(f"page-switch:{page.url}")
+                # A download can be emitted while its page closes; process it
+                # before deciding that no live page remains.
                 if downloads:
                     try:
                         result = _save_download(downloads[0], out_dir)
                         result.steps = steps
                         return result
-                    except FetchError:
-                        raise
+                    except FetchError as exc:
+                        # Fake download buttons often emit installers/HTML. Drop
+                        # them and keep traversing; the real archive may follow.
+                        steps.append(f"rejected-download:{str(exc)[:120]}")
+                        downloads.pop(0)
                     except Exception:
                         downloads.pop(0)
+                live_pages = [p for p in pages if not p.is_closed()]
+                if page.is_closed():
+                    if not live_pages:
+                        # The POST can close the old tab just before the new
+                        # destination tab is announced; give the context a
+                        # short grace window instead of failing instantly.
+                        for _ in range(10):
+                            time.sleep(0.3)
+                            live_pages = [p for p in pages if not p.is_closed()]
+                            if live_pages:
+                                break
+                    if not live_pages:
+                        if downloads:
+                            continue
+                        raise FetchError("Browser page closed before a download appeared")
+                    page = live_pages[-1]
+                    steps.append(f"page-switch:{page.url}")
                 for candidate in list(pages):
                     try:
                         if candidate.is_closed():
@@ -805,6 +874,18 @@ def fetch(
                     time.sleep(1.0)
                     continue
 
+                for direct_href in _download_link_candidates(page):
+                    if direct_href in tried_download_links:
+                        continue
+                    tried_download_links.add(direct_href)
+                    steps.append(f"direct-download:{urllib.parse.urlsplit(direct_href).hostname}")
+                    try:
+                        result = _download_via_request(context, direct_href, out_dir)
+                        result.steps = steps
+                        return result
+                    except FetchError as exc:
+                        steps.append(f"direct-rejected:{str(exc)[:100]}")
+
                 href = _find_file_href(page)
                 if href:
                     steps.append(f"file-link:{href}")
@@ -823,8 +904,35 @@ def fetch(
                         except Exception:
                             pass
 
+                # Cookie banners ("Got it!") can cover the Get Link control.
+                if _dismiss_consent(page):
+                    time.sleep(0.5)
+                    continue
                 labels = candidate_click_labels(_visible_controls(page))
                 countdown_pct = _countdown_percent(body_text)
+                if (
+                    countdown_pct is not None
+                    and countdown_pct >= 100
+                    and current_url not in delay_submissions
+                    and page.query_selector("input[name='delay_token']")
+                ):
+                    try:
+                        page.eval_on_selector(
+                            "input[name='delay_token']",
+                            """
+                            (el) => setTimeout(() => {
+                                const form = el.closest('form');
+                                const button = form && form.querySelector('button[type="submit"]');
+                                if (form) form.requestSubmit(button);
+                            }, 0);
+                            """,
+                        )
+                        delay_submissions.add(current_url)
+                        steps.append("countdown-submit")
+                        time.sleep(2.0)
+                        continue
+                    except Exception:
+                        pass
                 logger.debug(
                     "loop url=%s closed=%s labels=%s pct=%s pages=%s body=%r",
                     current_url, page.is_closed(), labels, countdown_pct,
@@ -839,24 +947,23 @@ def fetch(
                             steps.append(wait_step)
                         break
                     key = (page.url, label)
-                    if key in clicked_keys:
-                        continue
+                    occurrence = clicked_counts.get(key, 0)
                     try:
                         with page.expect_download(timeout=2500) as download_info:
-                            if not _click_label(page, label):
+                            if not _click_label(page, label, occurrence):
                                 continue
                             clicked = True
-                            clicked_keys.add(key)
+                            clicked_counts[key] = occurrence + 1
                         download = download_info.value
                         if not downloads:
                             downloads.append(download)
-                        steps.append(f"click:{label}")
+                        steps.append(f"click:{label}#{occurrence}")
                         break
                     except PlaywrightTimeoutError:
                         # No download from this click: the page advanced instead.
                         if clicked:
-                            clicked_keys.add(key)
-                            steps.append(f"click:{label}")
+                            clicked_counts[key] = occurrence + 1
+                            steps.append(f"click:{label}#{occurrence}")
                             break
                     except Exception:
                         continue
