@@ -34,7 +34,7 @@ from app.providers.registry import create_provider
 from app.scheduler import TaskManager
 from app.covers import CoverCache
 from app.security import is_safe_public_url, sanitize_calibre_path, safe_fetch_text
-from app.providers.jnovels import extract_source_link
+from app.providers.jnovels import extract_source_link, find_jnovels_article, is_jnovels_listing, is_jnovels_page
 from app.downloader.qbit import QBitClient, qbit_client_from_settings
 from app.download_state import release_download_state
 from app.torbox_manager import TorBoxManager
@@ -2540,16 +2540,36 @@ async def api_fetch_release_epub(release_id: int):
     fetch_reporter.report(total=100, done=5, message="Resolving source link…", force=True)
 
     source = str(release.get("source_link") or "").strip()
-    if not source:
-        article = str(release.get("link") or "").strip()
-        if article:
-            try:
-                html = safe_fetch_text(article, timeout=10.0)
-                source = extract_source_link(html, article)
-            except Exception as exc:
-                logger.debug("Source-link extraction failed for #%s: %s", release_id, exc)
-            if source and db.set_release_source_link(release_id, source):
-                db.log_activity("SOURCE_LINK_FILLED", f"Source link found for {release.get('title')}", article)
+    article = str(release.get("link") or "").strip()
+    title = str(release.get("title") or "")
+    if source and is_jnovels_page(source):
+        logger.info("Ignoring J-Novels page as source for release #%s: %s", release_id, source)
+        source = ""
+    if not source and (article or release.get("source_link")):
+        candidate_page = article or str(release.get("source_link") or "").strip()
+        try:
+            html = safe_fetch_text(candidate_page, timeout=10.0)
+            if is_jnovels_listing(candidate_page):
+                resolved_article = find_jnovels_article(html, candidate_page, title)
+                if resolved_article:
+                    candidate_page = resolved_article
+                    html = safe_fetch_text(candidate_page, timeout=10.0)
+                else:
+                    html = ""
+            if html:
+                source = extract_source_link(html, candidate_page)
+            if source and is_jnovels_page(source):
+                source = ""
+        except Exception as exc:
+            logger.debug("Source-link extraction failed for #%s: %s", release_id, exc)
+        if source and db.set_release_source_link(release_id, source):
+            db.log_activity("SOURCE_LINK_FILLED", f"Source link found for {release.get('title')}", candidate_page)
+    if source and is_jnovels_page(source):
+        message = "Source link points at a J-Novels page, not a download destination; re-run source-link backfill"
+        _mark_failed(message)
+        fetch_reporter.report(message=message, force=True)
+        db.finish_background_task(fetch_task_id, "failed", message)
+        raise HTTPException(status_code=400, detail=message)
     if source:
         fetch_reporter.report(total=100, done=20, message="Source link resolved; preparing fetcher…", force=True)
     if not source:

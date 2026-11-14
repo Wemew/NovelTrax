@@ -11,7 +11,7 @@ for _p in (_BASE, os.path.join(_BASE, "backend"), _HERE):
         sys.path.insert(0, _p)
 
 from app.database import Database  # noqa: E402
-from app.providers.jnovels import extract_source_link  # noqa: E402
+from app.providers.jnovels import extract_source_link, find_jnovels_article, is_jnovels_page  # noqa: E402
 
 
 def check(condition, message):
@@ -34,6 +34,31 @@ def test_extractor():
     )
     check(extract_source_link('<a href="javascript:void(0)">VOLUME 2</a>') == "", "non-http ignored")
     check(extract_source_link('<a href="https://example.com/x">Other</a>') == "", "no match")
+
+
+def test_jnovels_pages_are_not_sources():
+    html = (
+        '<a href="https://jnovels.com/tag/volume-3-epub/">Volume 3 Epub</a>'
+        '<a href="https://jnovels.com/classroom-of-the-elite-year-3-volume-3-epub/">'
+        'Classroom of the Elite year 3 Volume 3 Epub</a>'
+        '<a href="https://charexempire.com/jg7AN">YEAR 3 VOLUME 3</a>'
+    )
+    check(extract_source_link(html, "https://jnovels.com/tag/volume-3-epub/") == "https://charexempire.com/jg7AN", "external volume link")
+    check(is_jnovels_page("https://jnovels.com/tag/volume-3-epub/"), "tag page detected")
+    only_tags = '<a href="https://jnovels.com/tag/volume-3-epub/">Volume 3</a>'
+    check(extract_source_link(only_tags) == "", "tag-only is not a source")
+
+    listing = (
+        '<a href="https://jnovels.com/fired-but-i-maintain-all-the-software-volume-3-epub/">'
+        'Fired? But I Maintain All the Software! Volume 3 Epub</a>'
+        '<a href="https://jnovels.com/classroom-of-the-elite-year-3-volume-3-epub/">'
+        'Classroom of the Elite year 3 Volume 3 Epub</a>'
+    )
+    check(
+        find_jnovels_article(listing, "https://jnovels.com/tag/volume-3-epub/", "Classroom of the Elite year 3 Volume 3 Epub")
+        == "https://jnovels.com/classroom-of-the-elite-year-3-volume-3-epub/",
+        "title picks the right article",
+    )
 
 
 def test_persistence():

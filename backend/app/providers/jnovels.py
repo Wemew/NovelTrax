@@ -1,7 +1,8 @@
 import re
+import difflib
 import logging
 from typing import List, Dict, Any, Optional
-from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+from urllib.parse import urljoin, urlparse, parse_qs, urlencode, urlunparse, urlsplit
 import urllib.request
 try:
     import httpx
@@ -35,23 +36,90 @@ _SOURCE_DOWNLOAD_ANCHOR_RE = re.compile(
 )
 
 
+def _jnovels_host(href: str) -> bool:
+    host = (urlsplit(str(href or "")).hostname or "").lower()
+    return host == "jnovels.com" or host.endswith(".jnovels.com")
+
+
+def is_jnovels_page(href: str) -> bool:
+    """True for J-Novels article/index pages, not an actual file destination."""
+    if not _jnovels_host(href):
+        return False
+    path = (urlsplit(str(href or "")).path or "/").lower()
+    if "/wp-content/uploads/" in path:
+        return False
+    if path.endswith((".epub", ".pdf", ".cbz", ".zip", ".mobi", ".azw3")):
+        return False
+    return True
+
+
+def is_jnovels_listing(href: str) -> bool:
+    """True for J-Novels tag/search/index pages that contain many releases."""
+    if not _jnovels_host(href):
+        return False
+    parsed = urlsplit(str(href or ""))
+    path = (parsed.path or "/").lower()
+    if path.startswith(("/tag/", "/category/", "/page/")):
+        return True
+    if path in ("", "/", "/light-novel-epub-jp/"):
+        return True
+    return bool(parsed.query and ("s=" in parsed.query or "paged=" in parsed.query))
+
+
+def find_jnovels_article(html: str, base_url: str, title: str) -> str:
+    """Pick the J-Novels article link on a listing page that matches *title*."""
+    target = re.sub(r"[^a-z0-9]+", " ", re.sub(r"\b(?:epub|pdf)\b", " ", str(title or "").lower())).strip()
+    if not target:
+        return ""
+    soup = BeautifulSoup(str(html or ""), "html.parser")
+    best_href = ""
+    best_score = 0.0
+    seen = set()
+    for anchor in soup.find_all("a", href=True):
+        href = urljoin(str(base_url or ""), str(anchor.get("href") or "").strip())
+        if href in seen or not _jnovels_host(href) or is_jnovels_listing(href):
+            continue
+        if href.split("#", 1)[0] == str(base_url or "").split("#", 1)[0]:
+            continue
+        seen.add(href)
+        text = re.sub(r"[^a-z0-9]+", " ", re.sub(r"\b(?:epub|pdf)\b", " ", anchor.get_text(" ", strip=True).lower())).strip()
+        if not text:
+            continue
+        score = difflib.SequenceMatcher(None, target, text).ratio()
+        if score > best_score:
+            best_score = score
+            best_href = href
+    return best_href if best_score >= 0.55 else ""
+
+
 def extract_source_link(summary: str, base_url: str = "") -> str:
     """Extract the direct file link behind a shortener/hider anchor."""
-    from urllib.parse import urljoin, urlsplit
-
     html = str(summary or "")
     if not html:
         return ""
-    href = ""
-    for pattern in (_SOURCE_VOLUME_ANCHOR_RE, _SOURCE_DOWNLOAD_ANCHOR_RE):
-        match = pattern.search(html)
-        if match:
-            href = str(match.group("href") or "").strip()
-            break
-    if not href:
-        return ""
-    resolved = urljoin(str(base_url or ""), href)
-    return resolved if urlsplit(resolved).scheme.lower() in ("http", "https") else ""
+    soup = BeautifulSoup(html, "html.parser")
+    anchors = [
+        (a.get_text(" ", strip=True), str(a.get("href") or "").strip())
+        for a in soup.find_all("a", href=True)
+    ]
+    # Volume anchors win over generic download/get anchors. J-Novels tag and
+    # search links also say "Volume 3", but point back into the site rather
+    # than at a file; skip those before choosing.
+    patterns = (
+        re.compile(r"\b(?:volume|vol\.?)\s*\d+\b", re.IGNORECASE),
+        re.compile(r"\b(?:download|get)\b", re.IGNORECASE),
+    )
+    for pattern in patterns:
+        for text, href in anchors:
+            if not href or not pattern.search(text):
+                continue
+            resolved = urljoin(str(base_url or ""), href)
+            if urlsplit(resolved).scheme.lower() not in ("http", "https"):
+                continue
+            if is_jnovels_page(resolved):
+                continue
+            return resolved
+    return ""
 
 
 DEFAULT_HEADERS = {
