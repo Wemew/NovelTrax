@@ -63,6 +63,10 @@ cover_cache = CoverCache(DATA_DIR)
 task_manager = TaskManager(db, CALIBRE_DIR)
 torbox_manager = TorBoxManager(db)
 
+# The EPUB sidecar is a serial FIFO worker. Serialize NovelTrax's calls too so
+# later requests start their own timeout budget instead of aging in the queue.
+_EPUB_FETCH_LOCK = threading.Lock()
+
 def get_qbit_client() -> QBitClient:
     """Instantiates QBitClient configured from current app_settings in database."""
     return qbit_client_from_settings(db.get_all_settings())
@@ -2590,28 +2594,33 @@ async def api_fetch_release_epub(release_id: int):
     def _worker():
         fetch_reporter.report(
             total=100, done=35,
-            message="Waiting for the fetcher sidecar (Turnstile/countdown)…", force=True,
+            message="Waiting for the previous EPUB fetch to finish…", force=True,
         )
-        body = json.dumps({"url": source, "timeout": 240}).encode("utf-8")
-        request = urllib.request.Request(
-            base + "/fetch",
-            data=body,
-            headers={"Content-Type": "application/json", "Accept": "*/*"},
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=280) as response:
-                content = response.read()
-                disposition = response.headers.get("Content-Disposition", "")
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", "replace")[:500]
+        with _EPUB_FETCH_LOCK:
+            fetch_reporter.report(
+                total=100, done=35,
+                message="Calling the fetcher sidecar (Turnstile/countdown)…", force=True,
+            )
+            body = json.dumps({"url": source, "timeout": 240}).encode("utf-8")
+            request = urllib.request.Request(
+                base + "/fetch",
+                data=body,
+                headers={"Content-Type": "application/json", "Accept": "*/*"},
+                method="POST",
+            )
             try:
-                detail = json.loads(detail).get("detail") or detail
-            except Exception:
-                pass
-            raise ValueError(f"Fetcher rejected the request: {detail}")
-        except Exception as exc:
-            raise ValueError(f"Fetcher unreachable: {exc}") from exc
+                with urllib.request.urlopen(request, timeout=280) as response:
+                    content = response.read()
+                    disposition = response.headers.get("Content-Disposition", "")
+            except urllib.error.HTTPError as exc:
+                detail = exc.read().decode("utf-8", "replace")[:500]
+                try:
+                    detail = json.loads(detail).get("detail") or detail
+                except Exception:
+                    pass
+                raise ValueError(f"Fetcher rejected the request: {detail}")
+            except Exception as exc:
+                raise ValueError(f"Fetcher unreachable: {exc}") from exc
 
         fetch_reporter.report(total=100, done=85, message="Validating downloaded archive…", force=True)
         if len(content) < 1024:
