@@ -11,9 +11,10 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY epub_fetcher.py server.py ./
+COPY epub_fetcher.py server.py entrypoint.sh ./
+RUN chmod +x /app/entrypoint.sh
 ENV EPUB_FETCHER_OUTPUT_DIR=/tmp/epub_fetcher \
     EPUB_FETCHER_TIMEOUT=150 \
     EPUB_FETCHER_HEADLESS=false
 EXPOSE 8010
-CMD ["xvfb-run", "-a", "-s", "-screen 0 1366x900x24", "uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8010"]
+CMD ["/app/entrypoint.sh"]
