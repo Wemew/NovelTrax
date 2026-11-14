@@ -71,6 +71,23 @@ def test_stale_tasks_marked_failed():
     check(db.get_background_task(running)["status"] == "failed", "running stale")
 
 
+def test_stalled_task_signal():
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    db = Database(path)
+    db.init_db()
+    task_id = db.create_background_task("backfill", "Slow backfill", status="running")
+    with db.get_connection() as conn:
+        conn.execute("UPDATE background_tasks SET updated_at = datetime('now', '-10 minutes') WHERE id = ?;", (task_id,))
+        conn.commit()
+    payload = background_tasks.serialize_task(db.get_background_task(task_id))
+    check(payload["stalled"] is True, payload)
+    check(payload["seconds_since_update"] >= 590, payload)
+    db.update_background_task(task_id, message="heartbeat")
+    payload = background_tasks.serialize_task(db.get_background_task(task_id))
+    check(payload["stalled"] is False, payload)
+
+
 def test_success_marks_complete():
     fd, path = tempfile.mkstemp(suffix=".db")
     os.close(fd)
@@ -158,6 +175,7 @@ def test_global_board_markup():
 def main():
     test_lifecycle_and_persistence()
     test_stale_tasks_marked_failed()
+    test_stalled_task_signal()
     test_success_marks_complete()
     test_decorator_lifecycle()
     test_taskmanager_decorators_are_wired()

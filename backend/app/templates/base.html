@@ -640,8 +640,9 @@
                     const bar = task.items_total
                         ? `<div class="h-1.5 bg-slate-800 rounded-full overflow-hidden mt-1"><div class="h-full bg-brand-500" style="width:${pct}%"></div></div>`
                         : (task.active ? '<div class="h-1.5 bg-slate-800 rounded-full overflow-hidden mt-1"><div class="h-full bg-brand-500 animate-pulse w-1/2"></div></div>' : '');
-                    const cls = STATUS_CLASS[task.status] || 'text-slate-300 border-slate-700';
-                    const statusText = task.active ? (task.items_total ? pct.toFixed(0) + '%' : 'running') : (task.status === 'success' ? 'completed' : String(task.status || ''));
+                    const stalled = !!task.stalled;
+                    const cls = stalled ? 'text-amber-300 border-amber-500/40' : (STATUS_CLASS[task.status] || 'text-slate-300 border-slate-700');
+                    const statusText = stalled ? 'stalled' : (task.active ? (task.items_total ? pct.toFixed(0) + '%' : 'running') : (task.status === 'success' ? 'completed' : String(task.status || '')));
                     return `<div class="rounded-lg border ${cls} p-2">
                         <div class="flex items-center justify-between gap-2"><span class="font-semibold truncate">${esc(task.title)}</span><span class="font-mono text-[10px]">${esc(statusText)}</span></div>
                         ${bar}

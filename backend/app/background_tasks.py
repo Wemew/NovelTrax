@@ -50,6 +50,16 @@ def _elapsed_seconds(task: Dict[str, Any]) -> float:
     return max(0.0, (end - start).total_seconds())
 
 
+def _age_seconds(value: Any) -> Optional[float]:
+    if not value:
+        return None
+    try:
+        stamp = datetime.strptime(str(value), "%Y-%m-%d %H:%M:%S")
+    except (TypeError, ValueError):
+        return None
+    return max(0.0, (datetime.utcnow() - stamp).total_seconds())
+
+
 def serialize_task(task: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     if not task:
         return None
@@ -61,6 +71,11 @@ def serialize_task(task: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         payload["progress_pct"] = 0.0
     payload["active"] = payload.get("status") in ("queued", "running")
     payload["cancellable"] = False
+    update_age = _age_seconds(task.get("updated_at"))
+    payload["seconds_since_update"] = round(update_age, 1) if update_age is not None else None
+    # Five minutes without a heartbeat is a useful stuck signal; it is exposed
+    # for debugging but does not silently rewrite the task status.
+    payload["stalled"] = bool(payload["active"] and update_age is not None and update_age >= 300)
     payload["result"] = {}
     if task.get("result_json"):
         try:
