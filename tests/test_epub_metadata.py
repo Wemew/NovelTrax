@@ -132,6 +132,39 @@ def test_prefill_uses_real_series_row():
     check(fields["is_new_volume"] is True, fields)
 
 
+def test_existing_download_backfill():
+    fd, db_path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    db = Database(db_path)
+    db.init_db()
+    db.sync_calibre_series([{
+        "series_id": 4, "series_name": "Backfill Series",
+        "book_count": 1, "latest_index": 1.0, "authors": "Backfill Author",
+    }])
+    fd, path = tempfile.mkstemp(suffix=".epub")
+    os.close(fd)
+    make_epub(path)
+    _, release_id = db.upsert_release({
+        "guid": "backfill-epub", "title": "Backfill Series Volume 2 Epub",
+        "link": "https://jnovels.com/backfill/", "series_name": "Backfill Series", "volume": 2.0,
+    })
+    db.set_download_files(release_id, [path])
+    original = epub_prefill.NovelMetadataProvider.fetch_series_metadata
+    epub_prefill.NovelMetadataProvider.fetch_series_metadata = classmethod(
+        lambda cls, title: {"english_title": "Backfill Series", "author": "Backfill Author", "synonyms": []}
+    )
+    try:
+        result = epub_prefill.backfill_downloaded_epubs(db)
+        again = epub_prefill.backfill_downloaded_epubs(db)
+    finally:
+        epub_prefill.NovelMetadataProvider.fetch_series_metadata = original
+    check(result["queued"] == 1, result)
+    check(again["found"] == 0, again)
+    rows = db.list_epub_metadata_reviews()
+    check(len(rows) == 1 and rows[0]["file_path"] == path, rows)
+    check(rows[0]["is_new_volume"] == 1, rows)
+
+
 def test_read_missing_and_non_epub():
     try:
         read_epub_metadata("book.pdf")
@@ -145,6 +178,7 @@ def main():
     test_roundtrip_preserves_epub()
     test_prefill_writes_and_queues_review()
     test_prefill_uses_real_series_row()
+    test_existing_download_backfill()
     test_read_missing_and_non_epub()
     print("epub metadata suite PASSED")
 

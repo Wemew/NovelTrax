@@ -149,3 +149,44 @@ def prepare_downloaded_epub(db: Any, release: Dict[str, Any], file_path: str) ->
         "series": fields.get("series"), "series_index": fields.get("series_index"),
         "is_new_volume": bool(fields.get("is_new_volume")),
     }
+
+
+def backfill_downloaded_epubs(db: Any, reporter: Any = None) -> Dict[str, int]:
+    """Tag/download-review EPUBs recorded before the prefill feature existed."""
+    rows = db.list_releases_with_download_files(limit=1000)
+    paths = []
+    releases = {}
+    for release in rows:
+        try:
+            recorded = json.loads(release.get("download_files_json") or "[]")
+        except (TypeError, ValueError):
+            recorded = []
+        for path in recorded:
+            path = str(path or "")
+            if not path.lower().endswith(".epub") or not os.path.isfile(path):
+                continue
+            if db.get_epub_metadata_review_by_path(path):
+                continue
+            if path not in releases:
+                paths.append(path)
+                releases[path] = release
+    total = len(paths)
+    if reporter is not None:
+        reporter.report(total=total, message=f"Scanning {total} existing EPUB(s)…", force=True)
+    queued = 0
+    failed = 0
+    for index, path in enumerate(paths, 1):
+        try:
+            if prepare_downloaded_epub(db, releases[path], path):
+                queued += 1
+        except Exception as exc:
+            failed += 1
+            logger.debug("Existing EPUB prefill failed for %s: %s", path, exc)
+        if reporter is not None:
+            reporter.report(
+                done=index - 1, total=total,
+                message=f"Prefilling EPUB {index}/{total}: {os.path.basename(path)}",
+            )
+    if reporter is not None:
+        reporter.report(done=total, total=total, message=f"Queued {queued} EPUB review(s)", force=True)
+    return {"found": total, "queued": queued, "failed": failed}

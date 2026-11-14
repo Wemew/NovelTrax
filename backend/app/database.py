@@ -3907,6 +3907,23 @@ class Database:
             row = conn.execute("SELECT id FROM epub_metadata_reviews WHERE file_path = ?;", (str(file_path),)).fetchone()
             return int(row["id"]) if row else 0
 
+    def get_epub_metadata_review_by_path(self, file_path: str) -> Optional[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM epub_metadata_reviews WHERE file_path = ? LIMIT 1;",
+                (str(file_path),),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def list_releases_with_download_files(self, limit: int = 500) -> List[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM releases WHERE download_files_json LIKE '%.epub%' "
+                "ORDER BY id DESC LIMIT ?;",
+                (max(1, min(int(limit), 2000)),),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def list_epub_metadata_reviews(self, status: Optional[str] = None, limit: int = 200) -> List[Dict[str, Any]]:
         clauses, params = [], []
         if status:

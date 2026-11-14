@@ -27,7 +27,7 @@ from app import diagnostics
 from app import background_tasks, task_projection
 from app.download_inventory import scan_download_tree
 from app.download_status_sync import sync_qbit_completed
-from app.epub_prefill import prepare_downloaded_epub
+from app.epub_prefill import backfill_downloaded_epubs, prepare_downloaded_epub
 from app.epub_metadata import EpubMetadataError, write_epub_metadata
 from app.calibre.scanner import CalibreScanner
 from app.providers.registry import create_provider
@@ -742,6 +742,14 @@ async def lifespan(app: FastAPI):
     logger.info("Starting NovelTrax application...")
     task_manager.start()
     torbox_manager.start()
+    try:
+        background_tasks.run_in_background(
+            db, "metadata_scan", "Scan EPUB downloads",
+            lambda reporter: backfill_downloaded_epubs(db, reporter),
+            actor="system",
+        )
+    except Exception as exc:
+        logger.warning("Could not start EPUB metadata backfill: %s", exc)
     # Trigger initial database cleanup (PDF purge and discovery deduplication)
     try:
         db.ensure_prioritized_groups_table()
@@ -1181,6 +1189,16 @@ async def metadata_review_view(request: Request):
     )
 
 
+@app.post("/api/metadata-review/scan")
+async def api_metadata_review_scan():
+    info = background_tasks.run_in_background(
+        db, "metadata_scan", "Scan EPUB downloads",
+        lambda reporter: backfill_downloaded_epubs(db, reporter),
+        actor="user",
+    )
+    return JSONResponse({"status": "success", **info})
+
+
 @app.post("/api/metadata-review/{review_id}")
 async def api_metadata_review_update(review_id: int, payload: Dict[str, Any]):
     row = db.get_epub_metadata_review(review_id)
@@ -1324,9 +1342,23 @@ def _qbit_epub_paths(torrent: Dict[str, Any]) -> List[str]:
 
 
 def _tag_qbit_completed(release: Dict[str, Any], torrent: Dict[str, Any]) -> None:
-    for path in _qbit_epub_paths(torrent):
+    paths = _qbit_epub_paths(torrent)
+    for path in paths:
         try:
-            prepare_downloaded_epub(db, release, path)
+            if len(paths) == 1:
+                prepare_downloaded_epub(db, release, path)
+                continue
+            # Multi-volume torrent: never stamp the release-level bundle
+            # volume onto every file. Parse each filename and skip ambiguous.
+            from app.parser import extract_series_and_volume
+            parsed = extract_series_and_volume(os.path.basename(path))
+            volume = parsed.get("volume")
+            if volume is None:
+                continue
+            per_file = dict(release)
+            per_file["volume"] = volume
+            per_file["title"] = os.path.basename(path)
+            prepare_downloaded_epub(db, per_file, path)
         except Exception as exc:
             logger.debug("qBittorrent EPUB metadata prefill failed for %s: %s", path, exc)
 
