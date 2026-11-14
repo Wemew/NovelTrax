@@ -7,6 +7,7 @@ GET  /health -> dependency/config status
 from __future__ import annotations
 
 import itertools
+import logging
 import os
 import tempfile
 import threading
@@ -18,6 +19,11 @@ from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
 from epub_fetcher import FetchError, fetch
+
+LOG_LEVEL = os.getenv("EPUB_FETCHER_LOG_LEVEL", "INFO").strip().upper() or "INFO"
+logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO),
+                    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+logger = logging.getLogger("epub_fetcher.server")
 
 
 def _remove_after_response(path: str) -> None:
@@ -83,6 +89,7 @@ def health():
         "flaresolverr": bool(FLARESOLVERR_URL),
         "headless": HEADLESS,
         "display": os.getenv("DISPLAY", ""),
+        "log_level": LOG_LEVEL,
         "max_concurrency": MAX_CONCURRENCY,
         "active_fetches": _queue_active,
         "queued_fetches": _queue_waiters,
@@ -92,6 +99,8 @@ def health():
 
 @app.post("/fetch")
 def fetch_endpoint(payload: FetchRequest):
+    logger.info("Fetch request accepted: %s (queue: %s active, %s waiting)",
+                payload.url, _queue_active, _queue_waiters)
     try:
         result = _run_queued(lambda: fetch(
             payload.url,
@@ -101,7 +110,9 @@ def fetch_endpoint(payload: FetchRequest):
             headless=HEADLESS,
         ))
     except FetchError as exc:
+        logger.warning("Fetch failed: %s", exc)
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+    logger.info("Fetch succeeded: %s (%s bytes)", result.filename, os.path.getsize(result.path))
     return FileResponse(
         result.path,
         filename=result.filename,

@@ -54,6 +54,8 @@ epub-fetcher:
     EPUB_FETCHER_HEADLESS: "false"
     # 1 = FIFO queue (recommended); 2+ launches parallel browser instances.
     EPUB_FETCHER_MAX_CONCURRENCY: "1"
+    # INFO for lifecycle lines; DEBUG for per-loop page labels/body snippets.
+    EPUB_FETCHER_LOG_LEVEL: "INFO"
   expose: ["8010"]
 ```
 

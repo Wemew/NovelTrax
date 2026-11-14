@@ -131,6 +131,12 @@ class FlareSolverrClient:
     def _post(self, body: Dict[str, Any]) -> Dict[str, Any]:
         if not self.enabled:
             raise FetchError("FlareSolverr is not configured")
+        logger.info(
+            "FlareSolverr cmd=%s url=%s session=%s tabs=%s cookies=%s",
+            body.get("cmd"), body.get("url"), bool(body.get("session")),
+            body.get("tabs_till_verify"),
+            [cookie.get("name") for cookie in body.get("cookies", [])],
+        )
         payload = json.dumps(body).encode("utf-8")
         request = urllib.request.Request(
             self.base_url + "/v1",
@@ -194,6 +200,9 @@ class FlareSolverrClient:
         solution = data.get("solution") or {}
         if not isinstance(solution, dict) or not solution.get("url"):
             raise FetchError("FlareSolverr returned no solution URL")
+        logger.info("FlareSolverr solution url=%s token_len=%s cookies=%s",
+                    solution.get("url"), len(str(solution.get("turnstile_token") or "")),
+                    len(solution.get("cookies") or []))
         return solution
 
     @staticmethod
@@ -581,6 +590,7 @@ def fetch(
     if not target_url.lower().startswith(("http://", "https://")):
         raise FetchError("url must be an absolute http(s) URL")
 
+    logger.info("Starting EPUB fetch: url=%s headless=%s timeout=%.0fs", target_url, headless, timeout)
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(
             headless=headless,
@@ -643,6 +653,7 @@ def fetch(
                     except FetchError as exc:
                         # Fake download buttons often emit installers/HTML. Drop
                         # them and keep traversing; the real archive may follow.
+                        logger.warning("Rejected download: %s", exc)
                         steps.append(f"rejected-download:{str(exc)[:120]}")
                         downloads.pop(0)
                     except Exception:
@@ -709,11 +720,13 @@ def fetch(
                     steps.append("turnstile-form-wait")
                     token = _wait_for_turnstile_token(page, wait_budget)
                     if token and _submit_turnstile_form(page, token):
+                        logger.info("Submitted Turnstile form with page token (%s chars) at %s", len(token), current_url)
                         turnstile_submissions.add(current_url)
                         cleared_urls.add(current_url)
                         steps.append("turnstile-form-submit")
                         time.sleep(2.0)
                         continue
+                    logger.warning("Turnstile token missing on form page %s", current_url)
                     steps.append("turnstile-token-missing")
 
                 try:
@@ -832,7 +845,13 @@ def fetch(
                                 context.add_cookies(cookies)
                             except Exception:
                                 pass
+                        if solution_ua and solution_ua != context_ua:
+                            try:
+                                context.set_extra_http_headers({"User-Agent": solution_ua})
+                            except Exception:
+                                pass
                         if _submit_turnstile_form(page, solution_token):
+                            logger.info("Submitted Turnstile form with FlareSolverr token (%s chars) at %s", len(solution_token), current_url)
                             cleared_urls.add(current_url)
                             turnstile_submissions.add(current_url)
                             steps.append("flare-turnstile-form-submit")
