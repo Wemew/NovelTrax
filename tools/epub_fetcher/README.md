@@ -9,10 +9,15 @@ the final EPUB. NovelTrax calls it over HTTP; it can also be used standalone.
    `zshort.link`/`charexempire`/turnstile gate).
 2. If the page is a Cloudflare/Turnstile challenge, FlareSolverr
    (`request.get`) returns the cleared URL and cookies; Playwright adopts them.
-3. Playwright follows countdown pages, clicks visible `Get Link`/`Download`/
+3. Standalone Turnstile forms are handled explicitly: dismiss the consent
+   overlay, forward page cookies (including the shortener's link cookie) to
+   FlareSolverr, wait for a real `cf-turnstile-response` token, then submit the
+   form. A browser click is never treated as proof that the widget passed.
+4. Playwright follows countdown pages, clicks visible `Get Link`/`Download`/
    `Continue` controls, and captures the browser download (also handles a
    direct `*.epub` anchor).
-4. The file is returned with its original filename.
+5. The file is returned with its original filename. If no token/download is
+   produced, the service returns a clear 502 instead of waiting forever.
 
 Ads/popups are ignored: only the tab that emits a download is used, and each
 clicks is bounded by a timeout so a non-navigating button cannot stall the
@@ -34,10 +39,12 @@ epub-fetcher:
   build: ./tools/epub_fetcher
   environment:
     EPUB_FETCHER_FLARESOLVERR_URL: http://flaresolverr:8191
-    # Optional: Tab count when a source's standalone Turnstile needs focus.
+    # Required for sites whose standalone Turnstile only passes via keyboard focus.
     EPUB_FETCHER_FLARESOLVERR_TABS: "1"
     # Post-solve wait so the challenged page can swap in its download controls.
     EPUB_FETCHER_FLARESOLVERR_WAIT: "2"
+    # Wait for the page's Turnstile form to issue a token before FlareSolverr.
+    EPUB_FETCHER_TURNSTILE_WAIT: "30"
   expose: ["8010"]
 ```
 
@@ -75,5 +82,7 @@ the internal Docker network or loopback only, never expose port 8010 publicly.
   and failures return the last flow steps in `X-Fetch-Steps`.
 - No CAPTCHA billing service is used: interactive captchas (not Turnstile) still
   block the flow by design.
+- A Turnstile widget can refuse to issue a token (expired/blocked shortener);
+  NovelTrax then records the release as `FAILED` with the returned error.
 - The file is fetched over the browser/HTTP client, so the fetcher must be able
   to reach the CDN host; it does not bypass DRM or paywalls.

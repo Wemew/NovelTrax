@@ -37,6 +37,7 @@ CLICK_LABELS: Tuple[str, ...] = (
 )
 #: Anchors/URL suffixes that mean "this is already the file".
 FILE_SUFFIXES: Tuple[str, ...] = (".epub", ".pdf", ".cbz", ".zip", ".mobi", ".azw3")
+TURNSTILE_RESPONSE_SELECTOR = "input[name='cf-turnstile-response']"
 #: Text that indicates a Cloudflare/Turnstile gate rather than the file page.
 CHALLENGE_MARKERS: Tuple[str, ...] = (
     "just a moment", "verify you are human", "checking your browser",
@@ -118,7 +119,7 @@ class FlareSolverrClient:
     def enabled(self) -> bool:
         return bool(self.base_url)
 
-    def request_get(self, url: str) -> Dict[str, Any]:
+    def request_get(self, url: str, cookies: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
         if not self.enabled:
             raise FetchError("FlareSolverr is not configured")
         body: Dict[str, Any] = {
@@ -130,6 +131,17 @@ class FlareSolverrClient:
             body["waitInSeconds"] = self.wait_in_seconds
         if self.tabs_till_verify > 0:
             body["tabs_till_verify"] = self.tabs_till_verify
+        browser_cookies = [
+            {"name": str(cookie["name"]), "value": str(cookie.get("value") or "")}
+            for cookie in (cookies or [])
+            if isinstance(cookie, dict) and cookie.get("name")
+        ]
+        if browser_cookies:
+            # The shortener gates its form behind a cookie it sets on the
+            # intermediate host (e.g. kecapku ``tp``). A fresh FlareSolverr
+            # browser will otherwise load the unscoped homepage and never see
+            # the Turnstile widget.
+            body["cookies"] = browser_cookies
         payload = json.dumps(body).encode("utf-8")
         request = urllib.request.Request(
             self.base_url + "/v1",
@@ -185,6 +197,104 @@ def _challenge_visible(page) -> bool:
         return "challenges.cloudflare.com" in page.content()
     except Exception:
         return True
+
+
+def _dismiss_consent(page) -> bool:
+    """Click a Funding Choices-style consent button via JS.
+
+    The consent modal traps keyboard focus and sits above the Turnstile widget,
+    so both the checkbox click and FlareSolverr's Tab/Space solver fail until it
+    is dismissed. Accepting the consent yields cookies that are forwarded to
+    FlareSolverr so it sees the same gate page.
+    """
+    try:
+        return bool(page.evaluate(
+            """
+            () => {
+                const labels = ['Consent', 'Accept all', 'Accept', 'I agree'];
+                for (const button of document.querySelectorAll('button')) {
+                    if (labels.includes((button.innerText || '').trim())) {
+                        button.click();
+                        return true;
+                    }
+                }
+                return false;
+            }
+            """
+        ))
+    except Exception:
+        return False
+
+
+def _has_turnstile_form(page) -> bool:
+    """Detect a Turnstile-gated form (e.g. the kecapku/shortener hop)."""
+    try:
+        return bool(page.query_selector(TURNSTILE_RESPONSE_SELECTOR)) or bool(
+            page.query_selector("form .cf-turnstile")
+        )
+    except Exception:
+        return False
+
+
+def _turnstile_token(page) -> str:
+    try:
+        if not page.query_selector(TURNSTILE_RESPONSE_SELECTOR):
+            return ""
+        return str(page.eval_on_selector(TURNSTILE_RESPONSE_SELECTOR, "el => el.value") or "")
+    except Exception:
+        return ""
+
+
+def _wait_for_turnstile_token(page, timeout: float = 30.0) -> str:
+    """Wait for the widget to issue a token; never treat a click as clearance."""
+    deadline = time.monotonic() + max(1.0, float(timeout))
+    clicked = False
+    while time.monotonic() < deadline:
+        token = _turnstile_token(page)
+        if token:
+            return token
+        if not clicked:
+            clicked = True
+            try:
+                for frame in page.frames:
+                    if "challenges.cloudflare.com" in (frame.url or ""):
+                        checkbox = frame.get_by_role("checkbox").first
+                        if checkbox.count() and checkbox.is_visible():
+                            checkbox.click(timeout=3000)
+                            break
+            except Exception:
+                pass
+        time.sleep(1.0)
+    return _turnstile_token(page)
+
+
+def _submit_turnstile_form(page, token: str = "") -> bool:
+    """Fill/submit the form only after a token exists.
+
+    Returns True when a form submission was initiated. The caller must wait for
+    navigation and inspect the page again; this helper never guesses a link.
+    """
+    try:
+        return bool(page.evaluate(
+            """
+            (args) => {
+                const input = document.querySelector(args.selector);
+                if (!input) return false;
+                if (args.token) input.value = args.token;
+                if (!input.value) return false;
+                const form = input.closest('form');
+                if (!form) return false;
+                const button = form.querySelector('button[type="submit"], input[type="submit"], button');
+                if (button) { button.click(); return true; }
+                if (form.requestSubmit) { form.requestSubmit(); return true; }
+                form.submit();
+                return true;
+            }
+            """,
+            {"selector": TURNSTILE_RESPONSE_SELECTOR, "token": token},
+        ))
+    except Exception:
+        return False
 
 
 def _visible_controls(page) -> List[str]:
@@ -293,6 +403,7 @@ def fetch(
 
     solver = FlareSolverrClient(flaresolverr_url)
     deadline = time.monotonic() + max(10.0, float(timeout))
+    turnstile_wait = float(_env_int("EPUB_FETCHER_TURNSTILE_WAIT", 30, minimum=1))
     steps: List[str] = []
     target_url = str(url or "").strip()
     if not target_url.lower().startswith(("http://", "https://")):
@@ -308,6 +419,8 @@ def fetch(
         clicked_keys = set()
         cleared_urls = set()
         manual_attempts = set()
+        turnstile_submissions = set()
+        consent_dismissed = False
         pages: List[Any] = []
 
         def attach(page) -> None:
@@ -375,8 +488,31 @@ def fetch(
                 except Exception:
                     current_url = ""
 
+                # Some link hiders gate a POST form behind a standalone
+                # Turnstile. The destination is only valid after the widget
+                # issues a token, so wait for it before submitting the form.
+                if _has_turnstile_form(page) and current_url not in turnstile_submissions:
+                    if not consent_dismissed:
+                        consent_dismissed = _dismiss_consent(page)
+                        if consent_dismissed:
+                            time.sleep(1.0)
+                    wait_budget = min(turnstile_wait, max(1.0, deadline - time.monotonic()))
+                    steps.append("turnstile-form-wait")
+                    token = _wait_for_turnstile_token(page, wait_budget)
+                    if token and _submit_turnstile_form(page, token):
+                        turnstile_submissions.add(current_url)
+                        cleared_urls.add(current_url)
+                        steps.append("turnstile-form-submit")
+                        time.sleep(2.0)
+                        continue
+                    steps.append("turnstile-token-missing")
+
                 challenge_markers = is_challenge_text(body_text) or "challenges.cloudflare.com" in page.content()
                 if challenge_markers and current_url not in cleared_urls:
+                    if not consent_dismissed:
+                        consent_dismissed = _dismiss_consent(page)
+                        if consent_dismissed:
+                            time.sleep(1.0)
                     # A plain Turnstile widget often clears with a real checkbox
                     # click, but a click alone is not proof of clearance. Try it
                     # once per URL; if the challenge remains, fall through to
@@ -415,10 +551,38 @@ def fetch(
                             "Cloudflare/Turnstile challenge detected; configure a FlareSolverr URL"
                         )
                     steps.append(f"flare-solve:{current_url}")
-                    solution = solver.request_get(current_url)
+                    browser_cookies: List[Dict[str, Any]] = []
+                    try:
+                        browser_cookies = context.cookies([current_url])
+                    except Exception:
+                        browser_cookies = []
+                    solution = solver.request_get(current_url, cookies=browser_cookies)
                     cookies = FlareSolverrClient.cookies_for_context(solution)
                     solution_url = str(solution.get("url") or current_url)
                     solution_ua = str(solution.get("userAgent") or context_ua)
+                    solution_token = str(solution.get("turnstile_token") or "")
+
+                    # A Turnstile form needs the token from the solver; submit it
+                    # explicitly because the site's auto-submit hook may target a
+                    # missing element id.
+                    if solution_token and _has_turnstile_form(page):
+                        if cookies:
+                            try:
+                                context.add_cookies(cookies)
+                            except Exception:
+                                pass
+                        if _submit_turnstile_form(page, solution_token):
+                            cleared_urls.add(current_url)
+                            turnstile_submissions.add(current_url)
+                            steps.append("flare-turnstile-form-submit")
+                            time.sleep(2.0)
+                            continue
+                        steps.append("turnstile-token-injection-failed")
+                    if _has_turnstile_form(page) and not solution_token and solution_url == current_url:
+                        raise FetchError(
+                            "Turnstile form did not issue a token; the source may be an ad or expired shortener"
+                        )
+
                     # The challenge frame/text can outlive a successful solve.
                     # Mark both URLs so the cleared page reaches its controls.
                     cleared_urls.add(current_url)

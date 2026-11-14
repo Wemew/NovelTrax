@@ -974,13 +974,14 @@
             const icon = btn ? btn.querySelector('i') : null;
             if (btn) btn.disabled = true;
             if (icon) icon.classList.add('animate-spin');
-            showToast('Fetching EPUB via the source chain… this can take up to a minute', 'info');
+            showToast('Fetching EPUB via the source chain… this can take a few minutes', 'info');
             try {
                 const res = await fetch(`/api/releases/${releaseId}/fetch-epub`, { method: 'POST' });
                 let data = {};
                 try { data = await res.json(); } catch (parseErr) { data = {}; }
                 if (!res.ok) {
                     showToast(data.detail || data.message || `EPUB fetch failed (HTTP ${res.status})`, 'error');
+                    setTimeout(() => location.reload(), 2500);
                     return;
                 }
                 showToast(`EPUB saved: ${data.path || 'downloads folder'}`, 'success');

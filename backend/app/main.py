@@ -2317,6 +2317,21 @@ async def api_fetch_release_epub(release_id: int):
     if not release:
         raise HTTPException(status_code=404, detail="Release not found")
 
+    def _mark_failed(message: str) -> None:
+        """Persist a visible failure on the release instead of only toasting."""
+        detail = str(message or "EPUB fetch failed").strip()[:1000]
+        try:
+            db.update_downloader_state(release_id, "FAILED", "http")
+            db.set_download_error(release_id, detail)
+            db.increment_download_attempt(release_id)
+            db.log_activity(
+                "EPUB_FETCH_FAILED",
+                f"EPUB fetch failed for {release.get('title')}",
+                detail,
+            )
+        except Exception:
+            logger.exception("Could not persist EPUB fetch failure for release #%s", release_id)
+
     source = str(release.get("source_link") or "").strip()
     if not source:
         article = str(release.get("link") or "").strip()
@@ -2329,11 +2344,15 @@ async def api_fetch_release_epub(release_id: int):
             if source and db.set_release_source_link(release_id, source):
                 db.log_activity("SOURCE_LINK_FILLED", f"Source link found for {release.get('title')}", article)
     if not source:
-        raise HTTPException(status_code=400, detail="No source link available; backfill source links first")
+        message = "No source link available; backfill source links first"
+        _mark_failed(message)
+        raise HTTPException(status_code=400, detail=message)
 
     base = str(db.get_setting("epub_fetcher_url", "") or "").strip().rstrip("/")
     if not base.startswith(("http://", "https://")):
-        raise HTTPException(status_code=400, detail="Set Settings -> Downloader -> EPUB Fetcher URL first")
+        message = "Set Settings -> Downloader -> EPUB Fetcher URL first"
+        _mark_failed(message)
+        raise HTTPException(status_code=400, detail=message)
 
     def _worker() -> str:
         body = json.dumps({"url": source, "timeout": 240}).encode("utf-8")
@@ -2378,6 +2397,7 @@ async def api_fetch_release_epub(release_id: int):
             counter += 1
         with open(target, "wb") as handle:
             handle.write(content)
+        db.clear_download_error(release_id)
         db.update_downloader_state(release_id, "COMPLETED", "http")
         db.set_download_files(release_id, [target])
         db.log_activity("EPUB_FETCHED", f"Fetched EPUB for {release.get('title')}", target)
@@ -2386,7 +2406,13 @@ async def api_fetch_release_epub(release_id: int):
     try:
         path = await asyncio.to_thread(_worker)
     except ValueError as exc:
+        _mark_failed(str(exc))
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Unexpected EPUB fetch failure for release #%s", release_id)
+        message = f"Unexpected EPUB fetch error: {exc}"
+        _mark_failed(message)
+        raise HTTPException(status_code=500, detail=message) from exc
     return JSONResponse({"status": "success", "path": path, "source_link": source})
 
 

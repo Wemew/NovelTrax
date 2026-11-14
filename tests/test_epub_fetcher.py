@@ -104,16 +104,50 @@ def test_flaresolverr_request_shape():
 
     epub_fetcher.urllib.request.urlopen = fake_urlopen
     try:
-        solution = epub_fetcher.FlareSolverrClient("http://solver:8191", timeout=9).request_get("https://gate.example/x")
+        solution = epub_fetcher.FlareSolverrClient("http://solver:8191", timeout=9).request_get(
+            "https://gate.example/x",
+            cookies=[{"name": "tp", "value": "zSvE6kPM"}, {"name": "", "value": "ignored"}],
+        )
         check(solution["url"] == "https://cleared.example/page", solution)
         check(captured["url"] == "http://solver:8191/v1", captured)
         check(captured["body"]["cmd"] == "request.get", captured)
         check(captured["body"]["url"] == "https://gate.example/x", captured)
         check(captured["body"]["waitInSeconds"] == 2, captured)
+        check(captured["body"]["cookies"] == [{"name": "tp", "value": "zSvE6kPM"}], captured)
         check("tabs_till_verify" not in captured["body"], captured)
         check(captured["timeout"] == 9, captured)
     finally:
         epub_fetcher.urllib.request.urlopen = original
+
+
+def test_tabs_env_is_forwarded():
+    previous = os.environ.get("EPUB_FETCHER_FLARESOLVERR_TABS")
+    original = epub_fetcher.urllib.request.urlopen
+    captured = {}
+
+    class FakeResponse:
+        def read(self):
+            return json.dumps({"status": "ok", "solution": {"url": "https://cleared.example/page"}}).encode()
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            return False
+
+    def fake_urlopen(request, timeout=0):
+        captured["body"] = json.loads(request.data.decode())
+        return FakeResponse()
+
+    os.environ["EPUB_FETCHER_FLARESOLVERR_TABS"] = "1"
+    epub_fetcher.urllib.request.urlopen = fake_urlopen
+    try:
+        epub_fetcher.FlareSolverrClient("http://solver:8191").request_get("https://gate.example/x")
+        check(captured["body"]["tabs_till_verify"] == 1, captured)
+    finally:
+        epub_fetcher.urllib.request.urlopen = original
+        if previous is None:
+            os.environ.pop("EPUB_FETCHER_FLARESOLVERR_TABS", None)
+        else:
+            os.environ["EPUB_FETCHER_FLARESOLVERR_TABS"] = previous
 
 
 def main():
@@ -123,6 +157,7 @@ def main():
     test_flaresolverr_cookies()
     test_file_url_suffixes()
     test_flaresolverr_request_shape()
+    test_tabs_env_is_forwarded()
     print("epub fetcher helper suite PASSED")
 
 
