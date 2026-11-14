@@ -28,6 +28,9 @@ app = FastAPI(title="NovelTrax EPUB fetcher", version="1.0.0")
 OUTPUT_DIR = os.getenv("EPUB_FETCHER_OUTPUT_DIR", os.path.join(tempfile.gettempdir(), "epub_fetcher"))
 DEFAULT_TIMEOUT = float(os.getenv("EPUB_FETCHER_TIMEOUT", "150"))
 FLARESOLVERR_URL = os.getenv("EPUB_FETCHER_FLARESOLVERR_URL", "")
+HEADLESS = os.getenv("EPUB_FETCHER_HEADLESS", "false").strip().lower() in (
+    "1", "true", "yes", "on"
+)
 
 
 class FetchRequest(BaseModel):
@@ -46,6 +49,7 @@ def health():
         "status": "ok" if playwright_ready else "degraded",
         "playwright": playwright_ready,
         "flaresolverr": bool(FLARESOLVERR_URL),
+        "headless": HEADLESS,
         "output_dir": OUTPUT_DIR,
     }
 
@@ -58,6 +62,7 @@ def fetch_endpoint(payload: FetchRequest):
             OUTPUT_DIR,
             flaresolverr_url=FLARESOLVERR_URL,
             timeout=payload.timeout or DEFAULT_TIMEOUT,
+            headless=HEADLESS,
         )
     except FetchError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc

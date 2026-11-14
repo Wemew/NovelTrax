@@ -48,6 +48,8 @@ epub-fetcher:
     EPUB_FETCHER_FLARESOLVERR_WAIT: "2"
     # Wait for the page's Turnstile form to issue a token before FlareSolverr.
     EPUB_FETCHER_TURNSTILE_WAIT: "30"
+    # Docker runs Chromium headful under Xvfb; leave false.
+    EPUB_FETCHER_HEADLESS: "false"
   expose: ["8010"]
 ```
 

@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import logging
 import os
 import re
 import sys
@@ -25,10 +26,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-DEFAULT_USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-)
+logger = logging.getLogger("epub_fetcher")
 
 #: Buttons/links that advance the interstitial chain, highest priority first.
 CLICK_LABELS: Tuple[str, ...] = (
@@ -38,6 +36,7 @@ CLICK_LABELS: Tuple[str, ...] = (
 #: Anchors/URL suffixes that mean "this is already the file".
 FILE_SUFFIXES: Tuple[str, ...] = (".epub", ".pdf", ".cbz", ".zip", ".mobi", ".azw3")
 TURNSTILE_RESPONSE_SELECTOR = "input[name='cf-turnstile-response']"
+EXECUTABLE_SUFFIXES = (".exe", ".msi", ".dmg", ".pkg", ".apk", ".bat", ".cmd", ".sh")
 #: Text that indicates a Cloudflare/Turnstile gate rather than the file page.
 CHALLENGE_MARKERS: Tuple[str, ...] = (
     "just a moment", "verify you are human", "checking your browser",
@@ -233,11 +232,13 @@ def _dismiss_consent(page) -> bool:
     FlareSolverr so it sees the same gate page.
     """
     try:
-        return bool(page.evaluate(
+        clicked = bool(page.evaluate(
             """
             () => {
                 const labels = ['Consent', 'Accept all', 'Accept', 'I agree'];
                 for (const button of document.querySelectorAll('button')) {
+                    const rect = button.getBoundingClientRect();
+                    if (rect.width === 0 || rect.height === 0) continue;
                     if (labels.includes((button.innerText || '').trim())) {
                         button.click();
                         return true;
@@ -247,8 +248,21 @@ def _dismiss_consent(page) -> bool:
             }
             """
         ))
+        if clicked:
+            logger.info("Consent overlay dismissed")
+        return clicked
     except Exception:
         return False
+
+
+def _dismiss_consent_soon(page, timeout: float = 6.0) -> bool:
+    """Poll briefly for the consent overlay; it often renders after the form."""
+    deadline = time.monotonic() + max(0.5, float(timeout))
+    while time.monotonic() < deadline:
+        if _dismiss_consent(page):
+            return True
+        time.sleep(0.5)
+    return False
 
 
 def _has_turnstile_form(page) -> bool:
@@ -273,13 +287,33 @@ def _turnstile_token(page) -> str:
 def _wait_for_turnstile_token(page, timeout: float = 30.0) -> str:
     """Wait for the widget to issue a token; never treat a click as clearance."""
     deadline = time.monotonic() + max(1.0, float(timeout))
-    clicked = False
+    next_widget_click = 0.0
+    next_checkbox_click = 0.0
     while time.monotonic() < deadline:
         token = _turnstile_token(page)
+        logger.debug("Turnstile wait url=%s token_len=%d", page.url, len(token or ""))
         if token:
             return token
-        if not clicked:
-            clicked = True
+        # Funding Choices can render well after the form; keep trying while
+        # waiting instead of blocking the widget behind its modal.
+        _dismiss_consent(page)
+        now = time.monotonic()
+        if now >= next_widget_click:
+            next_widget_click = now + 3.0
+            try:
+                widget = page.locator(".cf-turnstile").first
+                if widget.count() and widget.is_visible():
+                    box = widget.bounding_box()
+                    if box and box.get("width") and box.get("height"):
+                        widget.click(
+                            position={"x": box["width"] / 2, "y": box["height"] / 2},
+                            timeout=3000,
+                        )
+                        logger.debug("Turnstile widget clicked url=%s", page.url)
+            except Exception as exc:
+                logger.debug("Turnstile widget click failed: %s", exc)
+        if now >= next_checkbox_click:
+            next_checkbox_click = now + 3.0
             try:
                 for frame in page.frames:
                     if "challenges.cloudflare.com" in (frame.url or ""):
@@ -298,28 +332,54 @@ def _submit_turnstile_form(page, token: str = "") -> bool:
 
     Returns True when a form submission was initiated. The caller must wait for
     navigation and inspect the page again; this helper never guesses a link.
+    The submit click is done with a Playwright locator, not inside evaluate(),
+    because navigation would destroy the JS context and mask a successful POST.
     """
     try:
-        return bool(page.evaluate(
+        page.eval_on_selector(
+            TURNSTILE_RESPONSE_SELECTOR,
+            "(el, token) => { if (token) el.value = token; }",
+            token,
+        )
+        if not _turnstile_token(page):
+            return False
+        # Submit from a zero-delay task with the native prototype method.
+        # Clicking the visible button is intercepted by the ad overlay and can
+        # open a downloadgood.com popup; requestSubmit() ran no navigation here.
+        page.eval_on_selector(
+            TURNSTILE_RESPONSE_SELECTOR,
             """
-            (args) => {
-                const input = document.querySelector(args.selector);
-                if (!input) return false;
-                if (args.token) input.value = args.token;
-                if (!input.value) return false;
-                const form = input.closest('form');
-                if (!form) return false;
-                const button = form.querySelector('button[type="submit"], input[type="submit"], button');
-                if (button) { button.click(); return true; }
-                if (form.requestSubmit) { form.requestSubmit(); return true; }
-                form.submit();
-                return true;
-            }
+            (el) => setTimeout(() => {
+                const form = el.closest('form');
+                if (!form) return;
+                const button = form.querySelector('button[type="submit"], input[type="submit"]');
+                if (button && form.requestSubmit) {
+                    form.requestSubmit(button);
+                    return;
+                }
+                if (button && button.name) {
+                    const hidden = document.createElement('input');
+                    hidden.type = 'hidden';
+                    hidden.name = button.name;
+                    hidden.value = button.value || '';
+                    form.appendChild(hidden);
+                }
+                HTMLFormElement.prototype.submit.call(form);
+            }, 0);
             """,
-            {"selector": TURNSTILE_RESPONSE_SELECTOR, "token": token},
-        ))
+        )
+        return True
     except Exception:
         return False
+
+
+def _countdown_percent(text: str):
+    """Return the shortener's scan percentage, or None on a normal page."""
+    lowered = str(text or "").lower()
+    if "link scan" not in lowered and "scaning" not in lowered:
+        return None
+    values = [int(v) for v in re.findall(r"(\d{1,3})\s*%", text or "")]
+    return max(values) if values else 0
 
 
 def _visible_controls(page) -> List[str]:
@@ -349,6 +409,15 @@ def _click_label(page, label: str) -> bool:
                 return True
         except Exception:
             continue
+    # Shortener countdown controls are sometimes plain spans/divs with an
+    # onclick handler rather than semantic buttons or links.
+    try:
+        locator = page.get_by_text(label, exact=True).first
+        if locator.count() and locator.is_visible() and locator.is_enabled():
+            locator.click(timeout=2000)
+            return True
+    except Exception:
+        pass
     return False
 
 
@@ -366,8 +435,16 @@ def _find_file_href(page) -> str:
     return ""
 
 
+def _is_book_bytes(data: bytes) -> bool:
+    """Accept only ZIP-backed books (EPUB/CBZ) or PDFs, never installers."""
+    return data.startswith((b"PK", b"%PDF"))
+
+
 def _save_download(download, out_dir: str) -> FetchResult:
-    filename = safe_filename(download.suggested_filename or "novel.epub")
+    suggested = str(download.suggested_filename or "")
+    if os.path.splitext(suggested)[1].lower() in EXECUTABLE_SUFFIXES:
+        raise FetchError(f"Downloaded file {suggested!r} is an executable, not an EPUB")
+    filename = safe_filename(suggested or "novel.epub")
     os.makedirs(out_dir, exist_ok=True)
     path = os.path.join(out_dir, filename)
     stem, suffix = os.path.splitext(path)
@@ -376,6 +453,19 @@ def _save_download(download, out_dir: str) -> FetchResult:
         path = f"{stem} ({counter}){suffix}"
         counter += 1
     download.save_as(path)
+    try:
+        with open(path, "rb") as handle:
+            magic = handle.read(8)
+        if not _is_book_bytes(magic):
+            raise FetchError(
+                f"Downloaded file {os.path.basename(path)!r} is not an EPUB/PDF archive"
+            )
+    except FetchError:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        raise
     return FetchResult(path=path, filename=os.path.basename(path))
 
 
@@ -386,9 +476,13 @@ def _download_via_request(context, url: str, out_dir: str) -> FetchResult:
     body = response.body()
     if not body:
         raise FetchError("File response was empty")
+    if not _is_book_bytes(body):
+        raise FetchError("File response is not an EPUB/PDF archive")
     header = response.headers.get("content-disposition", "")
     match = re.search(r"filename\*?=(?:UTF-8'')?\"?([^\";]+)", header, re.IGNORECASE)
     suggested = match.group(1) if match else os.path.basename(urllib.parse.urlsplit(url).path)
+    if os.path.splitext(suggested)[1].lower() in EXECUTABLE_SUFFIXES:
+        raise FetchError(f"File response {suggested!r} is an executable, not an EPUB")
     filename = safe_filename(suggested or "novel.epub")
     os.makedirs(out_dir, exist_ok=True)
     path = os.path.join(out_dir, filename)
@@ -409,7 +503,7 @@ def fetch(
     flaresolverr_url: str = "",
     timeout: float = 150.0,
     headless: bool = True,
-    user_agent: str = DEFAULT_USER_AGENT,
+    user_agent: str = "",
     channel: str = "",
 ) -> FetchResult:
     """Resolve *url* through its shortener chain and save the final file.
@@ -438,7 +532,13 @@ def fetch(
         browser = playwright.chromium.launch(
             headless=headless,
             channel=channel or None,
-            args=["--no-sandbox", "--disable-dev-shm-usage"],
+            ignore_default_args=["--enable-automation"],
+            args=[
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+                "--disable-blink-features=AutomationControlled",
+            ],
         )
         downloads: List[Any] = []
         clicked_keys = set()
@@ -459,11 +559,13 @@ def fetch(
             page.on("download", on_download)
 
         def make_context(ua: str):
-            ctx = browser.new_context(
-                accept_downloads=True,
-                user_agent=ua,
-                viewport={"width": 1366, "height": 900},
-            )
+            options = {
+                "accept_downloads": True,
+                "viewport": {"width": 1366, "height": 900},
+            }
+            if ua:
+                options["user_agent"] = ua
+            ctx = browser.new_context(**options)
             ctx.on("page", attach)
             return ctx
 
@@ -476,11 +578,19 @@ def fetch(
         try:
             page.goto(target_url, wait_until="domcontentloaded", timeout=45000)
             while time.monotonic() < deadline:
+                live_pages = [p for p in pages if not p.is_closed()]
+                if page.is_closed():
+                    if not live_pages:
+                        raise FetchError("Browser page closed before a download appeared")
+                    page = live_pages[-1]
+                    steps.append(f"page-switch:{page.url}")
                 if downloads:
                     try:
                         result = _save_download(downloads[0], out_dir)
                         result.steps = steps
                         return result
+                    except FetchError:
+                        raise
                     except Exception:
                         downloads.pop(0)
                 for candidate in list(pages):
@@ -501,6 +611,9 @@ def fetch(
                     page.wait_for_load_state("domcontentloaded", timeout=5000)
                 except PlaywrightTimeoutError:
                     pass
+                except Exception:
+                    time.sleep(0.5)
+                    continue
 
                 body_text = ""
                 try:
@@ -518,7 +631,7 @@ def fetch(
                 # issues a token, so wait for it before submitting the form.
                 if _has_turnstile_form(page) and current_url not in turnstile_submissions:
                     if not consent_dismissed:
-                        consent_dismissed = _dismiss_consent(page)
+                        consent_dismissed = _dismiss_consent_soon(page)
                         if consent_dismissed:
                             time.sleep(1.0)
                     wait_budget = min(turnstile_wait, max(1.0, deadline - time.monotonic()))
@@ -532,10 +645,14 @@ def fetch(
                         continue
                     steps.append("turnstile-token-missing")
 
-                challenge_markers = is_challenge_text(body_text) or "challenges.cloudflare.com" in page.content()
+                try:
+                    page_html = page.content()
+                except Exception:
+                    page_html = ""
+                challenge_markers = is_challenge_text(body_text) or "challenges.cloudflare.com" in page_html
                 if challenge_markers and current_url not in cleared_urls:
                     if not consent_dismissed:
-                        consent_dismissed = _dismiss_consent(page)
+                        consent_dismissed = _dismiss_consent_soon(page)
                         if consent_dismissed:
                             time.sleep(1.0)
                     # A plain Turnstile widget often clears with a real checkbox
@@ -574,6 +691,7 @@ def fetch(
                     if not solver.enabled:
                         raise FetchError(
                             "Cloudflare/Turnstile challenge detected; configure a FlareSolverr URL"
+                            f" (flow: {' > '.join(steps[-8:])})"
                         )
                     steps.append(f"flare-solve:{current_url}")
                     browser_cookies: List[Dict[str, Any]] = []
@@ -620,6 +738,7 @@ def fetch(
                     solution_url = str(solution.get("url") or current_url)
                     solution_ua = str(solution.get("userAgent") or context_ua)
                     solution_token = str(solution.get("turnstile_token") or "")
+                    steps.append(f"flare-token:{len(solution_token)}")
 
                     # A Turnstile form needs the token from the solver; submit it
                     # explicitly because the site's auto-submit hook may target a
@@ -640,6 +759,7 @@ def fetch(
                     if _has_turnstile_form(page) and not solution_token and solution_url == current_url:
                         raise FetchError(
                             "Turnstile form did not issue a token; the source may be an ad or expired shortener"
+                            f" (flow: {' > '.join(steps[-8:])})"
                         )
 
                     # The challenge frame/text can outlive a successful solve.
@@ -704,8 +824,20 @@ def fetch(
                             pass
 
                 labels = candidate_click_labels(_visible_controls(page))
+                countdown_pct = _countdown_percent(body_text)
+                logger.debug(
+                    "loop url=%s closed=%s labels=%s pct=%s pages=%s body=%r",
+                    current_url, page.is_closed(), labels, countdown_pct,
+                    [(p.url, p.is_closed()) for p in pages],
+                    body_text[:250],
+                )
                 clicked = False
                 for label in labels:
+                    if label == "continue" and countdown_pct is not None and countdown_pct < 100:
+                        wait_step = f"countdown-wait:{countdown_pct}%"
+                        if not steps or steps[-1] != wait_step:
+                            steps.append(wait_step)
+                        break
                     key = (page.url, label)
                     if key in clicked_keys:
                         continue
@@ -730,13 +862,23 @@ def fetch(
                         continue
                 if not clicked:
                     time.sleep(1.0)
+        except FetchError:
+            raise
+        except Exception as exc:
+            raise FetchError(
+                f"Browser flow failed: {type(exc).__name__}: {exc}"
+                f" (flow: {' > '.join(steps[-8:])})"
+            ) from exc
         finally:
             try:
                 context.close()
             finally:
                 browser.close()
 
-    raise FetchError(f"No file download appeared within {int(timeout)}s")
+    raise FetchError(
+        f"No file download appeared within {int(timeout)}s"
+        f" (flow: {' > '.join(steps[-8:])})"
+    )
 
 
 def fetch_to_json(url: str, out_dir: str, flaresolverr_url: str = "", timeout: float = 150.0) -> Dict[str, Any]:

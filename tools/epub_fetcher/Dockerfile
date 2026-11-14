@@ -1,12 +1,19 @@
 # Playwright's image ships Chromium and its OS dependencies.
 FROM mcr.microsoft.com/playwright/python:v1.49.1-jammy
 
+# Headful Chromium under Xvfb: Cloudflare's managed Turnstile refuses to issue
+# a token to headless Chromium, but passes in a real display context.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends xvfb xauth \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY epub_fetcher.py server.py ./
 ENV EPUB_FETCHER_OUTPUT_DIR=/tmp/epub_fetcher \
-    EPUB_FETCHER_TIMEOUT=150
+    EPUB_FETCHER_TIMEOUT=150 \
+    EPUB_FETCHER_HEADLESS=false
 EXPOSE 8010
-CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8010"]
+CMD ["xvfb-run", "-a", "-s", "-screen 0 1366x900x24", "uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8010"]

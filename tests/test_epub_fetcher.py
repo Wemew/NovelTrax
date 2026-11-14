@@ -18,6 +18,27 @@ def check(condition, message):
         raise AssertionError(message)
 
 
+def test_book_archive_signatures():
+    check(epub_fetcher._is_book_bytes(b"PK\x03\x04rest"), "epub/zip")
+    check(epub_fetcher._is_book_bytes(b"%PDF-1.7"), "pdf")
+    check(not epub_fetcher._is_book_bytes(b"MZ\x90\x00"), "windows exe rejected")
+    check(not epub_fetcher._is_book_bytes(b"<html>"), "html rejected")
+
+
+def test_executable_download_rejected_before_save():
+    class FakeDownload:
+        suggested_filename = "OperaSetup.exe"
+        def save_as(self, path):
+            raise AssertionError("executable must not be written")
+
+    try:
+        epub_fetcher._save_download(FakeDownload(), ".")
+    except epub_fetcher.FetchError as exc:
+        check("OperaSetup.exe" in str(exc), str(exc))
+    else:
+        raise AssertionError("executable download was accepted")
+
+
 def test_safe_filename():
     check(epub_fetcher.safe_filename("../../etc/passwd") == "passwd.epub", "traversal stripped")
     check(epub_fetcher.safe_filename('Vol: 1?*.epub') == "Vol_ 1_.epub", "invalid characters")
@@ -203,6 +224,8 @@ def test_flaresolverr_session_warmup_payloads():
 
 def main():
     test_safe_filename()
+    test_book_archive_signatures()
+    test_executable_download_rejected_before_save()
     test_flow_heuristics()
     test_challenge_visibility_after_manual_click()
     test_flaresolverr_cookies()
