@@ -119,29 +119,9 @@ class FlareSolverrClient:
     def enabled(self) -> bool:
         return bool(self.base_url)
 
-    def request_get(self, url: str, cookies: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+    def _post(self, body: Dict[str, Any]) -> Dict[str, Any]:
         if not self.enabled:
             raise FetchError("FlareSolverr is not configured")
-        body: Dict[str, Any] = {
-            "cmd": "request.get",
-            "url": str(url),
-            "maxTimeout": self.max_timeout_ms,
-        }
-        if self.wait_in_seconds > 0:
-            body["waitInSeconds"] = self.wait_in_seconds
-        if self.tabs_till_verify > 0:
-            body["tabs_till_verify"] = self.tabs_till_verify
-        browser_cookies = [
-            {"name": str(cookie["name"]), "value": str(cookie.get("value") or "")}
-            for cookie in (cookies or [])
-            if isinstance(cookie, dict) and cookie.get("name")
-        ]
-        if browser_cookies:
-            # The shortener gates its form behind a cookie it sets on the
-            # intermediate host (e.g. kecapku ``tp``). A fresh FlareSolverr
-            # browser will otherwise load the unscoped homepage and never see
-            # the Turnstile widget.
-            body["cookies"] = browser_cookies
         payload = json.dumps(body).encode("utf-8")
         request = urllib.request.Request(
             self.base_url + "/v1",
@@ -155,6 +135,51 @@ class FlareSolverrClient:
             raise FetchError(f"FlareSolverr request failed: {exc}") from exc
         if str(data.get("status") or "").lower() != "ok":
             raise FetchError(f"FlareSolverr rejected the request: {data.get('message') or data.get('status')}")
+        return data
+
+    def create_session(self) -> str:
+        data = self._post({"cmd": "sessions.create", "maxTimeout": self.max_timeout_ms})
+        return str(data.get("session") or "")
+
+    def destroy_session(self, session: str) -> None:
+        if not session:
+            return
+        try:
+            self._post({"cmd": "sessions.destroy", "session": session})
+        except Exception:
+            pass
+
+    def request_get(
+        self,
+        url: str,
+        cookies: Optional[List[Dict[str, Any]]] = None,
+        *,
+        session: str = "",
+        include_tabs: bool = True,
+    ) -> Dict[str, Any]:
+        body: Dict[str, Any] = {
+            "cmd": "request.get",
+            "url": str(url),
+            "maxTimeout": self.max_timeout_ms,
+        }
+        if self.wait_in_seconds > 0:
+            body["waitInSeconds"] = self.wait_in_seconds
+        if include_tabs and self.tabs_till_verify > 0:
+            body["tabs_till_verify"] = self.tabs_till_verify
+        if session:
+            body["session"] = session
+        browser_cookies = [
+            {"name": str(cookie["name"]), "value": str(cookie.get("value") or "")}
+            for cookie in (cookies or [])
+            if isinstance(cookie, dict) and cookie.get("name")
+        ]
+        if browser_cookies:
+            # The shortener gates its form behind a cookie it sets on the
+            # intermediate host (e.g. kecapku ``tp``). A fresh FlareSolverr
+            # browser will otherwise load the unscoped homepage and never see
+            # the Turnstile widget.
+            body["cookies"] = browser_cookies
+        data = self._post(body)
         solution = data.get("solution") or {}
         if not isinstance(solution, dict) or not solution.get("url"):
             raise FetchError("FlareSolverr returned no solution URL")
@@ -556,7 +581,33 @@ def fetch(
                         browser_cookies = context.cookies([current_url])
                     except Exception:
                         browser_cookies = []
-                    solution = solver.request_get(current_url, cookies=browser_cookies)
+                    form_present = _has_turnstile_form(page)
+                    session_id = ""
+                    try:
+                        if form_present and solver.tabs_till_verify > 0:
+                            try:
+                                session_id = solver.create_session()
+                            except FetchError:
+                                session_id = ""
+                            if session_id:
+                                # FlareSolverr applies request cookies *after*
+                                # resolving Turnstile. Warm the session first so
+                                # the tab solve sees the cookie-gated form, then
+                                # solve in that same browser session.
+                                steps.append("flare-session-warm")
+                                solver.request_get(
+                                    current_url,
+                                    cookies=browser_cookies,
+                                    session=session_id,
+                                    include_tabs=False,
+                                )
+                                solution = solver.request_get(current_url, session=session_id)
+                            else:
+                                solution = solver.request_get(current_url, cookies=browser_cookies)
+                        else:
+                            solution = solver.request_get(current_url, cookies=browser_cookies)
+                    finally:
+                        solver.destroy_session(session_id)
                     cookies = FlareSolverrClient.cookies_for_context(solution)
                     solution_url = str(solution.get("url") or current_url)
                     solution_ua = str(solution.get("userAgent") or context_ua)

@@ -10,9 +10,12 @@ the final EPUB. NovelTrax calls it over HTTP; it can also be used standalone.
 2. If the page is a Cloudflare/Turnstile challenge, FlareSolverr
    (`request.get`) returns the cleared URL and cookies; Playwright adopts them.
 3. Standalone Turnstile forms are handled explicitly: dismiss the consent
-   overlay, forward page cookies (including the shortener's link cookie) to
-   FlareSolverr, wait for a real `cf-turnstile-response` token, then submit the
-   form. A browser click is never treated as proof that the widget passed.
+   overlay, then warm a FlareSolverr **session** with the page cookies before
+   asking it to solve the widget. This is required because FlareSolverr applies
+   request cookies only *after* its Turnstile routine; without the warm-up it
+   would solve the cookie-less homepage and never see the form. Once a real
+   `cf-turnstile-response` token exists, the form is submitted explicitly. A
+   browser click is never treated as proof that the widget passed.
 4. Playwright follows countdown pages, clicks visible `Get Link`/`Download`/
    `Continue` controls, and captures the browser download (also handles a
    direct `*.epub` anchor).

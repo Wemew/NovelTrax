@@ -150,6 +150,51 @@ def test_tabs_env_is_forwarded():
             os.environ["EPUB_FETCHER_FLARESOLVERR_TABS"] = previous
 
 
+def test_flaresolverr_session_warmup_payloads():
+    original = epub_fetcher.urllib.request.urlopen
+    captured = []
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self.payload = payload
+        def read(self):
+            return self.payload
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            return False
+
+    def fake_urlopen(request, timeout=0):
+        body = json.loads(request.data.decode("utf-8"))
+        captured.append(body)
+        if body["cmd"] == "sessions.create":
+            return FakeResponse(b'{"status":"ok","session":"sess-1"}')
+        if body["cmd"] == "sessions.destroy":
+            return FakeResponse(b'{"status":"ok"}')
+        return FakeResponse(b'{"status":"ok","solution":{"url":"https://gate.example/x"}}')
+
+    epub_fetcher.urllib.request.urlopen = fake_urlopen
+    try:
+        client = epub_fetcher.FlareSolverrClient("http://solver:8191")
+        session = client.create_session()
+        check(session == "sess-1", session)
+        client.request_get(
+            "https://gate.example/x",
+            cookies=[{"name": "tp", "value": "abc"}],
+            session=session,
+            include_tabs=False,
+        )
+        client.request_get("https://gate.example/x", session=session)
+        client.destroy_session(session)
+    finally:
+        epub_fetcher.urllib.request.urlopen = original
+    check(captured[0]["cmd"] == "sessions.create", captured)
+    check(captured[1]["session"] == "sess-1" and "tabs_till_verify" not in captured[1], captured[1])
+    check(captured[1]["cookies"] == [{"name": "tp", "value": "abc"}], captured[1])
+    check(captured[2]["session"] == "sess-1", captured[2])
+    check(captured[3]["cmd"] == "sessions.destroy", captured)
+
+
 def main():
     test_safe_filename()
     test_flow_heuristics()
@@ -158,6 +203,7 @@ def main():
     test_file_url_suffixes()
     test_flaresolverr_request_shape()
     test_tabs_env_is_forwarded()
+    test_flaresolverr_session_warmup_payloads()
     print("epub fetcher helper suite PASSED")
 
 
