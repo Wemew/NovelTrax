@@ -711,7 +711,14 @@ def fetch(
                 # Some link hiders gate a POST form behind a standalone
                 # Turnstile. The destination is only valid after the widget
                 # issues a token, so wait for it before submitting the form.
-                if _has_turnstile_form(page) and current_url not in turnstile_submissions:
+                # A countdown page may still carry the safelink form in the DOM.
+                # Do not spend another Turnstile cycle there; advance the countdown.
+                countdown_present = _countdown_percent(body_text) is not None
+                if (
+                    _has_turnstile_form(page)
+                    and not countdown_present
+                    and current_url not in turnstile_submissions
+                ):
                     if not consent_dismissed:
                         consent_dismissed = _dismiss_consent_soon(page)
                         if consent_dismissed:
@@ -734,7 +741,7 @@ def fetch(
                 except Exception:
                     page_html = ""
                 challenge_markers = is_challenge_text(body_text) or "challenges.cloudflare.com" in page_html
-                if challenge_markers and current_url not in cleared_urls:
+                if challenge_markers and not countdown_present and current_url not in cleared_urls:
                     if not consent_dismissed:
                         consent_dismissed = _dismiss_consent_soon(page)
                         if consent_dismissed:
