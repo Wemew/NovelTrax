@@ -583,6 +583,7 @@
     function _manageStatusChip(status) {
         const value = String(status || '').toUpperCase();
         if (value === 'REQUESTED') return _manageChip('REQUESTED', 'bg-amber-500/15 text-amber-300 border-amber-500/30');
+        if (value === 'DOWNLOADED') return _manageChip('DOWNLOADED', 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30');
         if (value === 'IN_CALIBRE') return _manageChip('IN CALIBRE', 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30');
         if (value === 'IGNORED') return _manageChip('IGNORED', 'bg-slate-800 text-slate-400 border-slate-700');
         if (value === 'NEW') return _manageChip('NEW', 'bg-sky-500/15 text-sky-300 border-sky-500/30');

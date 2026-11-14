@@ -16,7 +16,8 @@ def format_bytes(value: int) -> str:
     return f"{size:.1f} TB"
 
 
-def scan_download_tree(root: str, max_entries: int = 2000, max_depth: int = 8) -> Dict[str, Any]:
+def scan_download_tree(root: str, max_entries: int = 2000, max_depth: int = 8,
+                       max_per_dir: int = 500) -> Dict[str, Any]:
     """Build a bounded display tree; never follows directory symlinks."""
     root = os.path.abspath(str(root or "/downloads"))
     tree: Dict[str, Any] = {
@@ -34,7 +35,8 @@ def scan_download_tree(root: str, max_entries: int = 2000, max_depth: int = 8) -
         nonlocal entries_seen
         nodes: List[Dict[str, Any]] = []
         try:
-            raw = list(os.scandir(path))
+            with os.scandir(path) as iterator:
+                raw = list(iterator)
         except OSError as exc:
             return [{
                 "name": f"(unreadable: {exc})", "is_dir": False, "error": True,
@@ -42,7 +44,7 @@ def scan_download_tree(root: str, max_entries: int = 2000, max_depth: int = 8) -
             }]
         raw.sort(key=lambda entry: (not entry.is_dir(follow_symlinks=False), entry.name.lower()))
         for entry in raw:
-            if entries_seen >= max_entries:
+            if entries_seen >= max_entries or len(nodes) >= max_per_dir:
                 tree["truncated"] = True
                 break
             entries_seen += 1

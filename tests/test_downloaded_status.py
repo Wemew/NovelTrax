@@ -11,6 +11,7 @@ for _p in (_BASE, os.path.join(_BASE, "backend"), _HERE):
         sys.path.insert(0, _p)
 
 from app.database import Database  # noqa: E402
+from app.download_status_sync import sync_qbit_completed  # noqa: E402
 from app.status_precedence import resolve_status  # noqa: E402
 
 
@@ -65,6 +66,39 @@ def test_backfill_completed_and_precedence():
     check(resolve_status("IN_CALIBRE", "DOWNLOADED") == "IN_CALIBRE", "download cannot downgrade Calibre")
 
 
+def test_feed_reingest_cannot_downgrade():
+    db = make_db()
+    release_id = add_release(db, "stable-download")
+    db.mark_release_downloaded(release_id)
+    db.upsert_release({
+        "guid": "stable-download", "title": "stable-download Volume 1 Epub",
+        "link": "https://jnovels.com/stable-download/", "series_name": "stable-download",
+        "volume": 1.0, "status": "REQUESTED",
+    })
+    check(db.get_release_by_id(release_id)["status"] == "DOWNLOADED", db.get_release_by_id(release_id))
+
+
+def test_qbit_completion_sync():
+    db = make_db()
+    release_id = add_release(db, "qbit-done")
+    db.update_download_handle(release_id, "qbit", torrent_hash="a" * 40)
+    db.update_downloader_state(release_id, "DOWNLOADING", "qbit")
+    changed = sync_qbit_completed(db, [
+        {"hash": "a" * 40, "progress": 1.0, "state": "uploading"},
+        {"hash": "b" * 40, "progress": 0.5, "state": "downloading"},
+    ])
+    check(changed == 1, changed)
+    row = db.get_release_by_id(release_id)
+    check(row["download_status"] == "COMPLETED", row)
+    check(row["status"] == "DOWNLOADED", row)
+
+    in_calibre = add_release(db, "qbit-calibre", "IN_CALIBRE")
+    db.update_download_handle(in_calibre, "qbit", torrent_hash="c" * 40)
+    db.update_downloader_state(in_calibre, "DOWNLOADING", "qbit")
+    sync_qbit_completed(db, [{"hash": "c" * 40, "progress": 1.0, "state": "pausedUP"}])
+    check(db.get_release_by_id(in_calibre)["status"] == "IN_CALIBRE", db.get_release_by_id(in_calibre))
+
+
 def test_backfill_is_idempotent():
     db = make_db()
     release_id = add_release(db, "done")
@@ -76,6 +110,8 @@ def test_backfill_is_idempotent():
 def main():
     test_mark_downloaded_respects_terminals()
     test_backfill_completed_and_precedence()
+    test_feed_reingest_cannot_downgrade()
+    test_qbit_completion_sync()
     test_backfill_is_idempotent()
     print("downloaded status suite PASSED")
 

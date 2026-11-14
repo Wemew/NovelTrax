@@ -4243,6 +4243,18 @@ class Database:
             """, (clean_status, ignored_val, matched_book_id, release_id))
             conn.commit()
 
+    def get_release_by_torrent_hash(self, torrent_hash: str) -> Optional[Dict[str, Any]]:
+        clean = str(torrent_hash or "").strip().lower()
+        if not clean:
+            return None
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM releases WHERE lower(torrent_hash) = ? "
+                "ORDER BY id DESC LIMIT 1;",
+                (clean,),
+            ).fetchone()
+        return dict(row) if row else None
+
     def mark_release_downloaded(self, release_id: int) -> None:
         """A fetched release is no longer Wanted until Calibre confirms it."""
         with self.get_connection() as conn:

@@ -26,6 +26,7 @@ from app.database import Database
 from app import diagnostics
 from app import background_tasks, task_projection
 from app.download_inventory import scan_download_tree
+from app.download_status_sync import sync_qbit_completed
 from app.calibre.scanner import CalibreScanner
 from app.providers.registry import create_provider
 from app.scheduler import TaskManager
@@ -1200,6 +1201,7 @@ async def downloads_view(request: Request):
     qbit = get_qbit_client()
     status = await asyncio.to_thread(qbit.test_connection, timeout=2.0)
     torrents = await asyncio.to_thread(qbit.get_torrents, category=qbit.category) if status.get("success") else []
+    await asyncio.to_thread(sync_qbit_completed, db, torrents)
 
     return templates.TemplateResponse(
         request=request,
@@ -2653,6 +2655,7 @@ async def api_downloader_queue():
 
     qbit = get_qbit_client()
     torrents = await asyncio.to_thread(qbit.get_torrents, category=qbit.category)
+    await asyncio.to_thread(sync_qbit_completed, db, torrents)
     return JSONResponse({"status": "success", "torrents": torrents})
 
 @app.get("/api/downloads/status")
