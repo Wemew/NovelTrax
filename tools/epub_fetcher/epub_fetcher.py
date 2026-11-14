@@ -309,6 +309,7 @@ def _wait_for_turnstile_token(page, timeout: float = 30.0) -> str:
     """Wait for the widget to issue a token; never treat a click as clearance."""
     deadline = time.monotonic() + max(1.0, float(timeout))
     interacted = False
+    next_interaction = 0.0
     while time.monotonic() < deadline:
         token = _turnstile_token(page)
         logger.debug("Turnstile wait url=%s token_len=%d", page.url, len(token or ""))
@@ -317,12 +318,13 @@ def _wait_for_turnstile_token(page, timeout: float = 30.0) -> str:
         # Funding Choices can render well after the form; keep trying while
         # waiting instead of blocking the widget behind its modal.
         _dismiss_consent(page)
-        if not interacted:
-            interacted = True
+        now = time.monotonic()
+        if not interacted and now >= next_interaction:
+            next_interaction = now + 1.0
             # Click the real checkbox first; clicking the wrapper afterwards
             # would immediately reset the in-flight challenge.
+            clicked = False
             try:
-                clicked = False
                 for frame in page.frames:
                     if "challenges.cloudflare.com" in (frame.url or ""):
                         checkbox = frame.get_by_role("checkbox").first
@@ -340,9 +342,13 @@ def _wait_for_turnstile_token(page, timeout: float = 30.0) -> str:
                                 position={"x": box["width"] / 2, "y": box["height"] / 2},
                                 timeout=3000,
                             )
+                            clicked = True
                             logger.debug("Turnstile widget clicked url=%s", page.url)
             except Exception as exc:
                 logger.debug("Turnstile interaction failed: %s", exc)
+            # Only a successful click consumes the one-shot interaction. A
+            # widget that has not rendered yet must not burn the attempt.
+            interacted = clicked
         # Repeated clicks reset an in-flight Turnstile challenge; after the
         # one-time interaction this is a passive wait for the token.
         time.sleep(0.5)
