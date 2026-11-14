@@ -595,13 +595,21 @@ def fetch(
                                 # the tab solve sees the cookie-gated form, then
                                 # solve in that same browser session.
                                 steps.append("flare-session-warm")
-                                solver.request_get(
-                                    current_url,
-                                    cookies=browser_cookies,
-                                    session=session_id,
-                                    include_tabs=False,
-                                )
-                                solution = solver.request_get(current_url, session=session_id)
+                                try:
+                                    solver.request_get(
+                                        current_url,
+                                        cookies=browser_cookies,
+                                        session=session_id,
+                                        include_tabs=False,
+                                    )
+                                    solution = solver.request_get(current_url, session=session_id)
+                                except FetchError:
+                                    # A stale/unsupported session must not leave
+                                    # the fetch without the single-request path.
+                                    steps.append("flare-session-fallback")
+                                    solution = solver.request_get(
+                                        current_url, cookies=browser_cookies
+                                    )
                             else:
                                 solution = solver.request_get(current_url, cookies=browser_cookies)
                         else:

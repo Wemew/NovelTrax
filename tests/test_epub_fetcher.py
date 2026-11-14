@@ -173,6 +173,8 @@ def test_flaresolverr_session_warmup_payloads():
             return FakeResponse(b'{"status":"ok"}')
         return FakeResponse(b'{"status":"ok","solution":{"url":"https://gate.example/x"}}')
 
+    previous_tabs = os.environ.get("EPUB_FETCHER_FLARESOLVERR_TABS")
+    os.environ["EPUB_FETCHER_FLARESOLVERR_TABS"] = "1"
     epub_fetcher.urllib.request.urlopen = fake_urlopen
     try:
         client = epub_fetcher.FlareSolverrClient("http://solver:8191")
@@ -188,10 +190,14 @@ def test_flaresolverr_session_warmup_payloads():
         client.destroy_session(session)
     finally:
         epub_fetcher.urllib.request.urlopen = original
+        if previous_tabs is None:
+            os.environ.pop("EPUB_FETCHER_FLARESOLVERR_TABS", None)
+        else:
+            os.environ["EPUB_FETCHER_FLARESOLVERR_TABS"] = previous_tabs
     check(captured[0]["cmd"] == "sessions.create", captured)
     check(captured[1]["session"] == "sess-1" and "tabs_till_verify" not in captured[1], captured[1])
     check(captured[1]["cookies"] == [{"name": "tp", "value": "abc"}], captured[1])
-    check(captured[2]["session"] == "sess-1", captured[2])
+    check(captured[2]["session"] == "sess-1" and captured[2]["tabs_till_verify"] == 1, captured[2])
     check(captured[3]["cmd"] == "sessions.destroy", captured)
 
 
