@@ -24,6 +24,7 @@ except ImportError:
             self.running = True
         def shutdown(self, wait=False):
             self.running = False
+from app import background_tasks
 from app.database import Database
 from app.calibre.scanner import CalibreScanner
 from app.calibre.matcher import CalibreMatcher
@@ -125,6 +126,14 @@ class TaskManager:
         # seconds to resolve, so the 30 s pass retries until it can decide, then
         # stops re-calling the filePrio endpoint for the same wanted set.
         self._selective_filter_done: set = set()
+
+    def _task_report(self, **kwargs) -> None:
+        reporter = getattr(self, "_task_reporter", None)
+        if reporter is not None:
+            try:
+                reporter.report(**kwargs)
+            except Exception:
+                pass
 
     def _build_media_resolver(self):
         from app.media_type import MediaTypeResolver
@@ -2644,6 +2653,13 @@ class TaskManager:
         return filtered
 
     def start(self):
+        try:
+            background_tasks.prune(self.db, days=7)
+            stale = self.db.mark_stale_background_tasks()
+            if stale:
+                logger.info("Marked %s interrupted background task(s) failed", stale)
+        except Exception as exc:
+            logger.debug("Background-task startup cleanup skipped: %s", exc)
         calibre_min = int(self.db.get_setting("calibre_sync_interval_minutes", "15"))
         feed_min = int(self.db.get_setting("feed_check_interval_minutes", "60"))
 
@@ -2794,6 +2810,7 @@ class TaskManager:
         self.scheduler.shutdown(wait=False)
         self._cover_executor.shutdown(wait=False)
 
+    @background_tasks.tracked_task("calibre_sync", "Calibre library sync")
     def sync_calibre(self) -> Dict[str, Any]:
         """
         Synchronizes series and books from Calibre's metadata.db.
@@ -2805,6 +2822,7 @@ class TaskManager:
             return {"status": "in_progress", "message": "Calibre sync already running"}
 
         self.is_syncing_calibre = True
+        self._task_report(message="Reading Calibre library…", progress_pct=5)
         try:
             # A sync must read the fresh Calibre library (contract v5 §6).
             self._invalidate_calibre_snapshot_cache()
@@ -2840,11 +2858,19 @@ class TaskManager:
             else:
                 updated_series_count = self.db.sync_calibre_series(series_list)
 
+            self._task_report(
+                message=f"Synced {updated_series_count} series; resolving requests…",
+                progress_pct=55,
+            )
             # 2. Check and resolve active requests
             pending_requests = self.db.get_pending_requests()
             matcher = CalibreMatcher(series_list, books_list)
             newly_acquired = matcher.resolve_pending_requests(pending_requests)
 
+            self._task_report(
+                message=f"Resolved {len(newly_acquired)} acquired book(s); finishing…",
+                progress_pct=85,
+            )
             notifier = self.get_notifier()
             notify_acquired_enabled = self._webhook_setting_enabled(
                 self.db, WEBHOOK_ACQUIRED_KEY
@@ -3006,6 +3032,7 @@ class TaskManager:
             interval,
         )
 
+    @background_tasks.tracked_task("feed_scan", "Feed scan")
     def check_feeds(self) -> Dict[str, Any]:
         """
         Polls all enabled feeds, checks releases against Calibre,
@@ -3095,10 +3122,9 @@ class TaskManager:
                 self.db, WEBHOOK_NEW_REQUEST_KEY
             )
 
-            feeds = self.db.get_all_feeds()
-            for feed in feeds:
-                if not feed["enabled"]:
-                    continue
+            feeds = [f for f in self.db.get_all_feeds() if f.get("enabled")]
+            self._task_report(total=len(feeds), message=f"Scanning {len(feeds)} enabled feed(s)…")
+            for feed_index, feed in enumerate(feeds, 1):
 
                 feed_id = feed["id"]
                 feed_name = feed["name"]
@@ -3126,6 +3152,10 @@ class TaskManager:
                     )
                     catchup_active = bool(
                         catchup_enabled and (previous_cutoff or previous_anchor)
+                    )
+                    self._task_report(
+                        done=feed_index - 1, total=len(feeds),
+                        message=f"Scanning {feed_name}…",
                     )
                     catchup_meta: Dict[str, Any] = {}
                     if catchup_active:
@@ -3681,6 +3711,7 @@ class TaskManager:
                     counts["rejected"] += 1
         return counts
 
+    @background_tasks.tracked_task("backfill", "Polite backfill")
     async def run_polite_backfill(self, max_pages: Optional[int] = None, enrich_synopses: bool = True,
                                   delay_seconds: Optional[float] = None,
                                   include_nyaa: Optional[bool] = None):
@@ -3729,6 +3760,7 @@ class TaskManager:
 
         try:
             # 1. Master Index
+            self._task_report(message="Ingesting J-Novels Complete Series Index…", progress_pct=5)
             self.db.set_setting("backfill_progress", "Ingesting J-Novels Complete Series Index...")
             index_res = await asyncio.to_thread(self.ingest_master_index)
             if self.stop_backfill_requested:
@@ -3744,9 +3776,17 @@ class TaskManager:
                 needs_enrichment = [d for d in discovery_items if not d.get("description") or len(d.get("description", "")) < 30]
                 total_to_enrich = len(needs_enrichment)
 
+                self._task_report(
+                    total=total_to_enrich, message=f"Enriching {total_to_enrich} discovery synopsis(es)…",
+                    progress_pct=15,
+                )
                 for idx, d in enumerate(needs_enrichment, 1):
                     if self.stop_backfill_requested:
                         break
+                    self._task_report(
+                        done=idx - 1, total=total_to_enrich,
+                        message=f"Enriching synopsis {idx}/{total_to_enrich}: {d.get('series_name') or d.get('title') or ''}",
+                    )
 
                     target_url = d.get("series_link") or d.get("link") or ""
                     self.db.set_setting("backfill_progress", f"Enriching synopsis {idx}/{total_to_enrich}: {d.get('series_name')}")
@@ -4094,6 +4134,10 @@ class TaskManager:
         t.start()
         return {"status": "started", "message": f"Historical backfill for '{series_name}' started in background."}
 
+    @background_tasks.tracked_task(
+        "series_backfill", lambda self, series_name, max_pages=3: f"Backfill: {series_name}",
+        scope=lambda self, series_name, max_pages=3: str(series_name),
+    )
     def backfill_series(self, series_name: str, max_pages: int = 3) -> Dict[str, Any]:
         """
         Synchronous worker executing targeted series search across providers.

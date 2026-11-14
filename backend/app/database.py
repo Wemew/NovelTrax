@@ -416,6 +416,38 @@ class Database:
                 );
             """)
 
+            # Persisted background tasks (live status board)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS background_tasks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    kind TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    scope TEXT,
+                    status TEXT NOT NULL DEFAULT 'running',
+                    progress_pct REAL DEFAULT 0,
+                    message TEXT DEFAULT '',
+                    items_done INTEGER DEFAULT 0,
+                    items_total INTEGER DEFAULT 0,
+                    started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    finished_at TIMESTAMP,
+                    actor TEXT DEFAULT 'system',
+                    attempts INTEGER DEFAULT 1,
+                    error TEXT DEFAULT '',
+                    result_json TEXT DEFAULT '',
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            try:
+                task_cols = {row["name"] for row in cur.execute("PRAGMA table_info(background_tasks);").fetchall()}
+                if "attempts" not in task_cols:
+                    cur.execute("ALTER TABLE background_tasks ADD COLUMN attempts INTEGER DEFAULT 1;")
+            except Exception:
+                pass
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_background_tasks_status_started "
+                "ON background_tasks(status, started_at);"
+            )
+
             # Seed default settings if empty
             cur.execute("SELECT count(*) FROM app_settings;")
             if cur.fetchone()[0] == 0:
@@ -3691,6 +3723,121 @@ class Database:
                 logger.info(f"Purged {deleted_count} PDF release(s) from database.")
             return deleted_count
 
+    # --- Background tasks (live status board) ---
+    def create_background_task(self, kind: str, title: str, scope: Optional[str] = None,
+                               actor: str = "system", status: str = "queued") -> int:
+        if status not in ("queued", "running"):
+            status = "queued"
+        with self.get_connection() as conn:
+            cur = conn.execute(
+                "INSERT INTO background_tasks (kind, title, scope, status, actor, started_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);",
+                (str(kind), str(title), str(scope or ""), status, str(actor or "system")),
+            )
+            conn.commit()
+            return int(cur.lastrowid)
+
+    def mark_stale_background_tasks(self) -> int:
+        """Fail queued/running rows left behind by a crash or restart."""
+        with self.get_connection() as conn:
+            cur = conn.execute(
+                "UPDATE background_tasks SET status = 'failed', "
+                "error = 'Interrupted by restart', finished_at = CURRENT_TIMESTAMP, "
+                "updated_at = CURRENT_TIMESTAMP WHERE status IN ('queued', 'running');"
+            )
+            conn.commit()
+            return max(0, int(cur.rowcount or 0))
+
+    def start_background_task(self, task_id: int) -> None:
+        with self.get_connection() as conn:
+            conn.execute(
+                "UPDATE background_tasks SET status = 'running', started_at = COALESCE(started_at, CURRENT_TIMESTAMP), "
+                "updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'queued';",
+                (int(task_id),),
+            )
+            conn.commit()
+
+    def update_background_task(self, task_id: int, done: Optional[int] = None,
+                               total: Optional[int] = None, message: Optional[str] = None,
+                               progress_pct: Optional[float] = None) -> None:
+        fields = ["updated_at = CURRENT_TIMESTAMP"]
+        params: List[Any] = []
+        if done is not None:
+            fields.append("items_done = ?")
+            params.append(max(0, int(done)))
+        if total is not None:
+            fields.append("items_total = ?")
+            params.append(max(0, int(total)))
+        if message is not None:
+            fields.append("message = ?")
+            params.append(str(message)[:500])
+        if progress_pct is None and done is not None and total:
+            progress_pct = (max(0, int(done)) / max(1, int(total))) * 100.0
+        if progress_pct is not None:
+            fields.append("progress_pct = ?")
+            params.append(max(0.0, min(100.0, float(progress_pct))))
+        params.append(int(task_id))
+        with self.get_connection() as conn:
+            conn.execute(
+                "UPDATE background_tasks SET " + ", ".join(fields) + " WHERE id = ?;", params,
+            )
+            conn.commit()
+
+    def finish_background_task(self, task_id: int, status: str = "success",
+                               error: str = "", result: Any = None) -> None:
+        if status not in ("success", "failed", "cancelled"):
+            status = "success"
+        result_json = ""
+        if result is not None:
+            try:
+                result_json = json.dumps(result, default=str)[:20000]
+            except Exception:
+                result_json = ""
+        with self.get_connection() as conn:
+            conn.execute(
+                "UPDATE background_tasks SET status = ?, error = ?, result_json = ?, "
+                "progress_pct = CASE WHEN ? = 'success' THEN 100 ELSE progress_pct END, "
+                "finished_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?;",
+                (status, str(error or "")[:2000], result_json, status, int(task_id)),
+            )
+            conn.commit()
+
+    def get_background_task(self, task_id: int) -> Optional[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            row = conn.execute("SELECT * FROM background_tasks WHERE id = ?;", (int(task_id),)).fetchone()
+        return dict(row) if row else None
+
+    def list_background_tasks(self, active_only: bool = False, kind: Optional[str] = None,
+                              limit: int = 50) -> List[Dict[str, Any]]:
+        clauses = []
+        params: List[Any] = []
+        if active_only:
+            clauses.append("status IN ('queued', 'running')")
+        if kind:
+            clauses.append("kind = ?")
+            params.append(str(kind))
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        params.append(max(1, min(int(limit), 200)))
+        with self.get_connection() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM background_tasks{where} ORDER BY id DESC LIMIT ?;", params,
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def prune_background_tasks(self, days: int = 7) -> int:
+        try:
+            days = max(1, int(days))
+        except (TypeError, ValueError):
+            days = 7
+        with self.get_connection() as conn:
+            cur = conn.execute(
+                "DELETE FROM background_tasks WHERE status != 'running' "
+                "AND finished_at IS NOT NULL AND finished_at < datetime('now', ?);",
+                (f"-{days} days",),
+            )
+            conn.commit()
+            return max(0, int(cur.rowcount or 0))
+
     def list_releases_missing_source_link(self, limit: int = 25) -> List[Dict[str, Any]]:
         """Cached release articles that may still expose a direct file link."""
         with self.get_connection() as conn:
@@ -4536,6 +4683,16 @@ class Database:
                 ((str(engine).strip().lower(), release_id) if engine else (release_id,)),
             )
             conn.commit()
+
+    def list_active_downloads(self, limit: int = 50) -> List[Dict[str, Any]]:
+        """Releases currently marked DOWNLOADING by either engine."""
+        with self.get_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM releases WHERE download_status = 'DOWNLOADING' "
+                "ORDER BY downloader_started_at ASC, id ASC LIMIT ?;",
+                (max(1, min(int(limit), 200)),),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def get_active_torbox_downloads(self) -> List[Dict[str, Any]]:
         """Releases submitted through TorBox that are still DOWNLOADING."""

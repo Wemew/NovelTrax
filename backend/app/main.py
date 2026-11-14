@@ -24,6 +24,7 @@ from starlette.background import BackgroundTask
 
 from app.database import Database
 from app import diagnostics
+from app import background_tasks
 from app.calibre.scanner import CalibreScanner
 from app.providers.registry import create_provider
 from app.scheduler import TaskManager
@@ -1224,6 +1225,65 @@ async def audiobooks_view(request: Request):
 
 # --- API Endpoints ---
 
+@app.get("/api/tasks")
+async def api_tasks(active: int = Query(0, ge=0, le=1), kind: Optional[str] = None,
+                    limit: int = Query(50, ge=1, le=200)):
+    rows = await asyncio.to_thread(db.list_background_tasks, bool(active), kind, limit)
+    tasks = [background_tasks.serialize_task(task) for task in rows]
+    for task in tasks:
+        try:
+            task["cancellable"] = background_tasks.cancel_supported(int(task.get("id")))
+        except (TypeError, ValueError):
+            task["cancellable"] = False
+    if not kind or kind == "download":
+        for release in await asyncio.to_thread(db.list_active_downloads, min(limit, 50)):
+            state = release_download_state(release)
+            tasks.append({
+                "id": f"download-{release.get('id')}",
+                "kind": "download",
+                "title": f"Transfer: {release.get('title') or release.get('id')}",
+                "scope": str(release.get("id") or ""),
+                "status": "running",
+                "active": True,
+                "cancellable": False,
+                "progress_pct": state.get("progress_pct") or 0.0,
+                "items_total": 1 if (state.get("progress_pct") or 0) > 0 else 0,
+                "message": f"{state.get('label')} · {state.get('engine') or 'downloader'}",
+                "attempts": 1,
+                "error": state.get("error") or "",
+                "started_at": release.get("downloader_started_at") or release.get("updated_at") or "",
+                "elapsed_seconds": 0.0,
+                "eta_seconds": None,
+                "result": {},
+                "synthetic": True,
+            })
+    tasks.sort(key=lambda item: str(item.get("started_at") or ""), reverse=True)
+    return JSONResponse({
+        "status": "success",
+        "active_count": len([task for task in tasks if task.get("active")]),
+        "tasks": tasks[:limit],
+    })
+
+
+@app.get("/api/tasks/{task_id}")
+async def api_task_detail(task_id: int):
+    task = await asyncio.to_thread(db.get_background_task, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return JSONResponse({"status": "success", "task": background_tasks.serialize_task(task)})
+
+
+@app.post("/api/tasks/{task_id}/cancel")
+async def api_task_cancel(task_id: int):
+    task = await asyncio.to_thread(db.get_background_task, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if not background_tasks.cancel_supported(task_id):
+        raise HTTPException(status_code=409, detail="This task does not support cancellation")
+    background_tasks.request_cancel(db, task_id)
+    return JSONResponse({"status": "success", "task_id": task_id, "cancelling": True})
+
+
 @app.post("/api/calibre/sync")
 async def api_calibre_sync():
     """Trigger manual Calibre library rescan and request resolution."""
@@ -2280,11 +2340,22 @@ async def api_backfill_source_links(payload: Optional[Dict[str, Any]] = None):
     except (TypeError, ValueError):
         raise HTTPException(status_code=400, detail="limit must be an integer")
 
+    backfill_task_id = db.create_background_task(
+        "source_backfill", "Source-link backfill", scope=f"limit:{limit}",
+    )
+    db.start_background_task(backfill_task_id)
+    backfill_reporter = background_tasks.TaskReporter(db, backfill_task_id)
+
     def _worker():
         rows = db.list_releases_missing_source_link(limit)
+        backfill_reporter.report(total=len(rows), message=f"Checking {len(rows)} article(s)…", force=True)
         updated = 0
         failed = 0
-        for row in rows:
+        for index, row in enumerate(rows, 1):
+            backfill_reporter.report(
+                done=index - 1, total=len(rows),
+                message=f"Checking article {index}/{len(rows)}: {row.get('title') or row.get('id')}",
+            )
             try:
                 html = safe_fetch_text(str(row.get("link") or ""), timeout=10.0)
                 link = extract_source_link(html, str(row.get("link") or ""))
@@ -2296,13 +2367,18 @@ async def api_backfill_source_links(payload: Optional[Dict[str, Any]] = None):
             time.sleep(0.2)
         return {"checked": len(rows), "updated": updated, "failed": failed}
 
-    result = await asyncio.to_thread(_worker)
+    try:
+        result = await asyncio.to_thread(_worker)
+    except Exception as exc:
+        db.finish_background_task(backfill_task_id, "failed", f"{type(exc).__name__}: {exc}")
+        raise
     db.log_activity(
         "SOURCE_LINKS_BACKFILLED",
         f"Source-link backfill: {result['updated']} filled of {result['checked']} checked",
         json.dumps(result),
     )
-    return JSONResponse({"status": "success", **result})
+    db.finish_background_task(backfill_task_id, "success", result=result)
+    return JSONResponse({"status": "success", **result, "task_id": backfill_task_id})
 
 
 @app.post("/api/releases/{release_id}/fetch-epub")
@@ -2332,6 +2408,13 @@ async def api_fetch_release_epub(release_id: int):
         except Exception:
             logger.exception("Could not persist EPUB fetch failure for release #%s", release_id)
 
+    fetch_task_id = db.create_background_task(
+        "epub_fetch", f"EPUB: {release.get('title') or release_id}", scope=str(release_id),
+    )
+    db.start_background_task(fetch_task_id)
+    fetch_reporter = background_tasks.TaskReporter(db, fetch_task_id)
+    fetch_reporter.report(total=100, done=5, message="Resolving source link…", force=True)
+
     source = str(release.get("source_link") or "").strip()
     if not source:
         article = str(release.get("link") or "").strip()
@@ -2343,18 +2426,28 @@ async def api_fetch_release_epub(release_id: int):
                 logger.debug("Source-link extraction failed for #%s: %s", release_id, exc)
             if source and db.set_release_source_link(release_id, source):
                 db.log_activity("SOURCE_LINK_FILLED", f"Source link found for {release.get('title')}", article)
+    if source:
+        fetch_reporter.report(total=100, done=20, message="Source link resolved; preparing fetcher…", force=True)
     if not source:
         message = "No source link available; backfill source links first"
         _mark_failed(message)
+        fetch_reporter.report(message=message, force=True)
+        db.finish_background_task(fetch_task_id, "failed", message)
         raise HTTPException(status_code=400, detail=message)
 
     base = str(db.get_setting("epub_fetcher_url", "") or "").strip().rstrip("/")
     if not base.startswith(("http://", "https://")):
         message = "Set Settings -> Downloader -> EPUB Fetcher URL first"
         _mark_failed(message)
+        fetch_reporter.report(message=message, force=True)
+        db.finish_background_task(fetch_task_id, "failed", message)
         raise HTTPException(status_code=400, detail=message)
 
     def _worker() -> str:
+        fetch_reporter.report(
+            total=100, done=35,
+            message="Waiting for the fetcher sidecar (Turnstile/countdown)…", force=True,
+        )
         body = json.dumps({"url": source, "timeout": 240}).encode("utf-8")
         request = urllib.request.Request(
             base + "/fetch",
@@ -2376,6 +2469,7 @@ async def api_fetch_release_epub(release_id: int):
         except Exception as exc:
             raise ValueError(f"Fetcher unreachable: {exc}") from exc
 
+        fetch_reporter.report(total=100, done=85, message="Validating downloaded archive…", force=True)
         if len(content) < 1024:
             raise ValueError("Fetcher returned an empty document")
         if not content.startswith(b"PK") and not content.startswith(b"%PDF"):
@@ -2401,19 +2495,27 @@ async def api_fetch_release_epub(release_id: int):
         db.update_downloader_state(release_id, "COMPLETED", "http")
         db.set_download_files(release_id, [target])
         db.log_activity("EPUB_FETCHED", f"Fetched EPUB for {release.get('title')}", target)
+        fetch_reporter.report(message=f"Saved {os.path.basename(target)}", progress_pct=100, force=True)
+        db.finish_background_task(fetch_task_id, "success", result={"path": target})
         return target
 
     try:
         path = await asyncio.to_thread(_worker)
     except ValueError as exc:
         _mark_failed(str(exc))
+        fetch_reporter.report(message=str(exc), force=True)
+        db.finish_background_task(fetch_task_id, "failed", str(exc))
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     except Exception as exc:
         logger.exception("Unexpected EPUB fetch failure for release #%s", release_id)
         message = f"Unexpected EPUB fetch error: {exc}"
         _mark_failed(message)
+        fetch_reporter.report(message=message, force=True)
+        db.finish_background_task(fetch_task_id, "failed", message)
         raise HTTPException(status_code=500, detail=message) from exc
-    return JSONResponse({"status": "success", "path": path, "source_link": source})
+    return JSONResponse({
+        "status": "success", "path": path, "source_link": source, "task_id": fetch_task_id,
+    })
 
 
 @app.get("/api/maintenance/backup")

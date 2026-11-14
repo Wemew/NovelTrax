@@ -592,9 +592,133 @@
         </div>
     </footer>
 
+    <!-- Global live task-status board -->
+    <div id="global-tasks" class="fixed bottom-4 right-4 z-50 text-xs">
+        <button type="button" id="tasks-toggle" onclick="NovelTasks.togglePanel()" aria-expanded="false" aria-controls="tasks-panel" class="flex items-center gap-2 px-3 py-2 rounded-xl bg-darkcard border border-slate-700 shadow-xl text-slate-200 hover:border-brand-500">
+            <i data-lucide="activity" class="w-4 h-4 text-brand-400"></i>
+            <span>Tasks</span>
+            <span id="tasks-active-count" class="px-1.5 py-0.5 rounded-full bg-brand-500/20 text-brand-300 font-bold">0</span>
+        </button>
+        <div id="tasks-panel" class="custom-scrollbar hidden mt-2 w-80 max-w-[calc(100vw-2rem)] max-h-96 overflow-y-auto bg-darkcard border border-slate-700 rounded-xl shadow-2xl p-3 space-y-2" aria-live="polite"></div>
+        <div id="tasks-toast" class="hidden mt-2 w-80 max-w-[calc(100vw-2rem)] bg-darkcard border border-slate-700 rounded-xl shadow-xl p-3 text-slate-200" role="status" aria-live="polite"></div>
+    </div>
+
     <!-- Global App Scripts -->
     <script>
         lucide.createIcons();
+
+        // Persisted task board: poll once per second and reattach after reload.
+        const NovelTasks = (function () {
+            let tasks = [];
+            let seen = {};
+            let timer = null;
+            let busyCallbacks = {};
+            const STATUS_CLASS = {
+                failed: 'text-rose-300 border-rose-500/40',
+                cancelled: 'text-amber-300 border-amber-500/40',
+                queued: 'text-slate-300 border-slate-600',
+                running: 'text-brand-300 border-brand-500/40',
+                success: 'text-emerald-300 border-emerald-500/30',
+            };
+            function esc(value) {
+                const div = document.createElement('div');
+                div.textContent = String(value == null ? '' : value);
+                return div.innerHTML;
+            }
+            function render() {
+                const active = tasks.filter(function (task) { return task.active; });
+                const count = document.getElementById('tasks-active-count');
+                if (count) count.textContent = String(active.length);
+                const panel = document.getElementById('tasks-panel');
+                if (!panel) return;
+                if (!tasks.length) {
+                    panel.innerHTML = '<p class="text-slate-400 py-2 text-center">No recent tasks.</p>';
+                    return;
+                }
+                panel.innerHTML = tasks.slice(0, 12).map(function (task) {
+                    const pct = Math.max(0, Math.min(100, Number(task.progress_pct || 0)));
+                    const bar = task.items_total
+                        ? `<div class="h-1.5 bg-slate-800 rounded-full overflow-hidden mt-1"><div class="h-full bg-brand-500" style="width:${pct}%"></div></div>`
+                        : (task.active ? '<div class="h-1.5 bg-slate-800 rounded-full overflow-hidden mt-1"><div class="h-full bg-brand-500 animate-pulse w-1/2"></div></div>' : '');
+                    const cls = STATUS_CLASS[task.status] || 'text-slate-300 border-slate-700';
+                    const statusText = task.active ? (task.items_total ? pct.toFixed(0) + '%' : 'running') : (task.status === 'success' ? 'completed' : String(task.status || ''));
+                    return `<div class="rounded-lg border ${cls} p-2">
+                        <div class="flex items-center justify-between gap-2"><span class="font-semibold truncate">${esc(task.title)}</span><span class="font-mono text-[10px]">${esc(statusText)}</span></div>
+                        ${bar}
+                        <div class="text-[10px] text-slate-400 mt-1 truncate">${esc(task.message || '')} · ${Number(task.elapsed_seconds || 0).toFixed(0)}s${task.attempts > 1 ? ' · try ' + task.attempts : ''}${task.eta_seconds ? ' · ETA ' + Math.ceil(task.eta_seconds) + 's' : ''}</div>
+                        ${task.error ? `<div class="text-[10px] text-rose-300 mt-1">${esc(task.error)}</div>` : ''}
+                        ${task.active && task.cancellable ? `<button type="button" onclick="NovelTasks.cancel(${JSON.stringify(task.id)})" class="mt-1 px-2 py-0.5 rounded bg-slate-800 border border-slate-700 text-[10px]">Cancel</button>` : ''}
+                    </div>`;
+                }).join('');
+            }
+            function toastFinished() {
+                tasks.forEach(function (task) {
+                    const prior = seen[task.id];
+                    if (prior === 'running' && task.status !== 'running') {
+                        const box = document.getElementById('tasks-toast');
+                        if (box) {
+                            box.classList.remove('hidden');
+                            box.innerHTML = task.status === 'success'
+                                ? `<span class="text-emerald-300 font-semibold">${esc(task.title)} finished.</span>`
+                                : `<span class="text-rose-300 font-semibold">${esc(task.title)} ${esc(task.status)}:</span> ${esc(task.error || '')}`;
+                            setTimeout(function () { box.classList.add('hidden'); }, 5000);
+                        }
+                    }
+                    seen[task.id] = task.status;
+                });
+            }
+            async function poll() {
+                if (document.hidden) return;
+                try {
+                    const res = await fetch('/api/tasks?active=0&limit=20', { headers: { 'Accept': 'application/json' } });
+                    if (!res.ok) return;
+                    const data = await res.json();
+                    tasks = data.tasks || [];
+                    toastFinished();
+                    render();
+                } catch (err) { /* best-effort */ }
+            }
+            function watch(taskId, onDone) {
+                busyCallbacks[taskId] = onDone;
+                const pollTask = async function () {
+                    try {
+                        const res = await fetch('/api/tasks/' + encodeURIComponent(taskId));
+                        if (!res.ok) return;
+                        const data = await res.json();
+                        if (data.task && data.task.active) {
+                            setTimeout(pollTask, 1000);
+                        } else if (busyCallbacks[taskId]) {
+                            const callback = busyCallbacks[taskId];
+                            delete busyCallbacks[taskId];
+                            callback(data.task);
+                        }
+                    } catch (err) { /* best-effort */ }
+                };
+                setTimeout(pollTask, 1000);
+            }
+            async function cancel(taskId) {
+                try {
+                    const res = await fetch('/api/tasks/' + encodeURIComponent(taskId) + '/cancel', { method: 'POST' });
+                    if (!res.ok) {
+                        const data = await res.json().catch(function () { return {}; });
+                        if (window.showToast) showToast(data.detail || 'Task cannot be cancelled', 'error');
+                    }
+                    poll();
+                } catch (err) { /* best-effort */ }
+            }
+            function togglePanel() {
+                const panel = document.getElementById('tasks-panel');
+                const button = document.getElementById('tasks-toggle');
+                if (!panel) return;
+                panel.classList.toggle('hidden');
+                if (button) button.setAttribute('aria-expanded', panel.classList.contains('hidden') ? 'false' : 'true');
+                if (window.lucide) lucide.createIcons();
+            }
+            document.addEventListener('DOMContentLoaded', function () { poll(); timer = setInterval(poll, 1000); });
+            window.addEventListener('pageshow', function () { poll(); });
+            return { togglePanel: togglePanel, cancel: cancel, watch: watch, poll: poll, get tasks() { return tasks; } };
+        })();
+        window.NovelTasks = NovelTasks;
 
         function showToast(message, type = 'success') {
             showToastWithOptions(message, type, arguments[2] || {});
