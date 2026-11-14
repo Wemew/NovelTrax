@@ -3185,7 +3185,12 @@ class TaskManager:
                     total_found += len(releases)
 
                     new_requests_for_feed = 0
-                    for r in releases:
+                    for release_index, r in enumerate(releases, 1):
+                        if release_index % 25 == 0:
+                            self._task_report(
+                                done=feed_index - 1, total=len(feeds),
+                                message=f"Scanning {feed_name}: {release_index}/{len(releases)} releases",
+                            )
                         series_name = r.series_name or ""
                         canonical_series_name = series_name
                         identity: Optional[Dict[str, Any]] = None
@@ -3919,6 +3924,7 @@ class TaskManager:
 
                     target_text = f"page {page_num}/{max_pages}" if max_pages > 0 else f"page {page_num} (scanning until end)"
                     self.db.set_setting("backfill_progress", f"Checking historical feed {target_text}...")
+                    self._task_report(message=f"Historical feed: {target_text}…", progress_pct=35)
                     paged_url = provider._build_paged_url("https://jnovels.com/?s=epub", page_num)
                     page_provider = JNovelsProvider(url=paged_url, config={"max_pages": 1})
                     releases = await asyncio.to_thread(page_provider.fetch_releases)
@@ -3982,6 +3988,7 @@ class TaskManager:
                             break
 
                         self.db.set_setting("backfill_progress", f"Checking Nyaa historical page {page_num}...")
+                        self._task_report(message=f"Nyaa historical page {page_num}…", progress_pct=70)
                         try:
                             raw_releases = await asyncio.to_thread(
                                 provider.crawl_pages,

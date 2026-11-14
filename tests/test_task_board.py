@@ -14,6 +14,7 @@ for _p in (_BASE, os.path.join(_BASE, "backend"), _HERE):
 from app import background_tasks  # noqa: E402
 from app.database import Database  # noqa: E402
 from app.scheduler import TaskManager  # noqa: E402
+from app.task_projection import sync_download_tasks  # noqa: E402
 
 
 def check(condition, message):
@@ -78,11 +79,11 @@ def test_stalled_task_signal():
     db.init_db()
     task_id = db.create_background_task("backfill", "Slow backfill", status="running")
     with db.get_connection() as conn:
-        conn.execute("UPDATE background_tasks SET updated_at = datetime('now', '-10 minutes') WHERE id = ?;", (task_id,))
+        conn.execute("UPDATE background_tasks SET updated_at = datetime('now', '-20 minutes') WHERE id = ?;", (task_id,))
         conn.commit()
     payload = background_tasks.serialize_task(db.get_background_task(task_id))
     check(payload["stalled"] is True, payload)
-    check(payload["seconds_since_update"] >= 590, payload)
+    check(payload["seconds_since_update"] >= 1190, payload)
     db.update_background_task(task_id, message="heartbeat")
     payload = background_tasks.serialize_task(db.get_background_task(task_id))
     check(payload["stalled"] is False, payload)
@@ -138,6 +139,36 @@ def test_decorator_lifecycle():
     check(failed["status"] == "failed" and "nope" in failed["error"], failed)
 
 
+def test_download_tasks_are_persisted_once():
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    db = Database(path)
+    db.init_db()
+    _, release_id = db.upsert_release({
+        "guid": "transfer-task-1",
+        "title": "Transfer Task Volume 1 Epub",
+        "link": "https://nyaa.si/view/1",
+        "series_name": "Transfer Task",
+        "volume": 1.0,
+    })
+    db.update_downloader_state(release_id, "DOWNLOADING", "torbox")
+    sync_download_tasks(db)
+    tasks = [t for t in db.list_background_tasks(limit=20) if t["kind"] == "download"]
+    check(len(tasks) == 1, tasks)
+    first_id = tasks[0]["id"]
+    check(db.get_background_task(first_id)["status"] == "running", tasks[0])
+
+    sync_download_tasks(db)
+    tasks = [t for t in db.list_background_tasks(limit=20) if t["kind"] == "download"]
+    check(len(tasks) == 1 and tasks[0]["id"] == first_id, tasks)
+
+    db.update_downloader_state(release_id, "COMPLETED", "torbox")
+    sync_download_tasks(db)
+    finished = db.get_background_task(first_id)
+    check(finished["status"] == "success", finished)
+    check(finished["progress_pct"] == 100.0, finished)
+
+
 def test_taskmanager_decorators_are_wired():
     fd, path = tempfile.mkstemp(suffix=".db")
     os.close(fd)
@@ -178,6 +209,7 @@ def main():
     test_stalled_task_signal()
     test_success_marks_complete()
     test_decorator_lifecycle()
+    test_download_tasks_are_persisted_once()
     test_taskmanager_decorators_are_wired()
     test_global_board_markup()
     print("task board suite PASSED")

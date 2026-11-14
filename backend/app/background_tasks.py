@@ -73,9 +73,9 @@ def serialize_task(task: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     payload["cancellable"] = False
     update_age = _age_seconds(task.get("updated_at"))
     payload["seconds_since_update"] = round(update_age, 1) if update_age is not None else None
-    # Five minutes without a heartbeat is a useful stuck signal; it is exposed
+    # Ten minutes without a heartbeat is a useful stuck signal; it is exposed
     # for debugging but does not silently rewrite the task status.
-    payload["stalled"] = bool(payload["active"] and update_age is not None and update_age >= 300)
+    payload["stalled"] = bool(payload["active"] and update_age is not None and update_age >= 600)
     payload["result"] = {}
     if task.get("result_json"):
         try:
