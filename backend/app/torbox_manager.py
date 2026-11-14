@@ -1482,10 +1482,23 @@ class TorBoxManager:
                 self.db.mark_release_downloaded(release_id)
                 try:
                     from app.epub_prefill import prepare_downloaded_epub
-                    release = self.db.get_release_by_id(release_id)
-                    for path in paths:
-                        if path.lower().endswith(".epub"):
-                            prepare_downloaded_epub(self.db, release or {}, path)
+                    release = self.db.get_release_by_id(release_id) or {}
+                    epub_paths = [path for path in paths if path.lower().endswith(".epub")]
+                    for path in epub_paths:
+                        if len(epub_paths) == 1:
+                            prepare_downloaded_epub(self.db, release, path)
+                            continue
+                        # Multi-volume bundle: parse the volume from each filename;
+                        # never stamp the bundle's release-level volume on all files.
+                        from app.parser import extract_series_and_volume
+                        parsed = extract_series_and_volume(os.path.basename(path))
+                        volume = parsed.get("volume")
+                        if volume is None:
+                            continue
+                        per_file = dict(release)
+                        per_file["volume"] = volume
+                        per_file["title"] = os.path.basename(path)
+                        prepare_downloaded_epub(self.db, per_file, path)
                 except Exception as meta_exc:
                     logger.debug("EPUB metadata prefill failed for release %s: %s", release_id, meta_exc)
                 self.db.update_torbox_progress(release_id, phase="done")
