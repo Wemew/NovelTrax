@@ -402,6 +402,12 @@ def _submit_turnstile_form(page, token: str = "") -> bool:
         return False
 
 
+def _wait_countdown_signature(text: str):
+    """Return a changing seconds countdown value (go.kecapku --ready page)."""
+    match = re.search(r"\b(\d{1,3})\s*(?:seconds?|secs?)\b", str(text or ""), re.IGNORECASE)
+    return int(match.group(1)) if match else None
+
+
 def _countdown_percent(text: str):
     """Return the shortener's scan percentage, or None on a normal page."""
     raw = str(text or "")
@@ -621,6 +627,7 @@ def fetch(
     solver = FlareSolverrClient(flaresolverr_url)
     deadline = time.monotonic() + max(10.0, float(timeout))
     turnstile_wait = float(_env_int("EPUB_FETCHER_TURNSTILE_WAIT", 30, minimum=1))
+    idle_timeout = float(_env_int("EPUB_FETCHER_IDLE_TIMEOUT", 20, minimum=5))
     steps: List[str] = []
     target_url = str(url or "").strip()
     if not target_url.lower().startswith(("http://", "https://")):
@@ -641,6 +648,8 @@ def fetch(
         )
         downloads: List[Any] = []
         clicked_counts: Dict[Tuple[str, str], int] = {}
+        last_progress_key = None
+        last_progress_at = time.monotonic()
         cleared_urls = set()
         manual_attempts = set()
         turnstile_submissions = set()
@@ -1025,6 +1034,31 @@ def fetch(
                     [(p.url, p.is_closed()) for p in pages],
                     body_text[:250],
                 )
+                # A malformed/listing source can leave a page with no controls,
+                # no countdown and no challenge. Do not hold the FIFO queue for
+                # the full fetch timeout; fail fast when nothing can progress.
+                try:
+                    delay_present = bool(page.query_selector("input[name='delay_token']"))
+                except Exception:
+                    delay_present = False
+                progress_key = (
+                    current_url,
+                    tuple(labels),
+                    countdown_pct,
+                    _wait_countdown_signature(body_text),
+                    bool(href),
+                    bool(challenge_markers),
+                    delay_present,
+                )
+                now = time.monotonic()
+                if progress_key != last_progress_key:
+                    last_progress_key = progress_key
+                    last_progress_at = now
+                elif now - last_progress_at > idle_timeout:
+                    raise FetchError(
+                        "No actionable download controls found on page "
+                        f"{current_url} for {idle_timeout:.0f}s (flow: {' > '.join(steps[-8:])})"
+                    )
                 clicked = False
                 for label in labels:
                     if label == "continue" and countdown_pct is not None and countdown_pct < 100:

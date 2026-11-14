@@ -75,6 +75,12 @@ def test_countdown_percent_ignores_article_claims():
     check(epub_fetcher._countdown_percent("Your Link Scaning...\nwaiting") == 0, "pre-percent")
 
 
+def test_seconds_countdown_signature():
+    check(epub_fetcher._wait_countdown_signature("YOUR LINK IS ALMOST READY.\n10\nSeconds") == 10, "ready seconds")
+    check(epub_fetcher._wait_countdown_signature("Please wait... 3 seconds") == 3, "seconds word")
+    check(epub_fetcher._wait_countdown_signature("A static listing page") is None, "no countdown")
+
+
 def test_flow_heuristics():
     check(epub_fetcher.is_challenge_text("Just a moment..."), "cloudflare marker")
     check(epub_fetcher.is_challenge_text("Verify you are human"), "turnstile marker")
