@@ -165,6 +165,7 @@ class FlareSolverrClient:
         *,
         session: str = "",
         include_tabs: bool = True,
+        tabs_till_verify: Optional[int] = None,
     ) -> Dict[str, Any]:
         body: Dict[str, Any] = {
             "cmd": "request.get",
@@ -173,8 +174,9 @@ class FlareSolverrClient:
         }
         if self.wait_in_seconds > 0:
             body["waitInSeconds"] = self.wait_in_seconds
-        if include_tabs and self.tabs_till_verify > 0:
-            body["tabs_till_verify"] = self.tabs_till_verify
+        tab_count = self.tabs_till_verify if tabs_till_verify is None else int(tabs_till_verify)
+        if include_tabs and tab_count > 0:
+            body["tabs_till_verify"] = tab_count
         if session:
             body["session"] = session
         browser_cookies = [
@@ -771,7 +773,7 @@ def fetch(
                     form_present = _has_turnstile_form(page)
                     session_id = ""
                     try:
-                        if form_present and solver.tabs_till_verify > 0:
+                        if form_present:
                             try:
                                 session_id = solver.create_session()
                             except FetchError:
@@ -789,18 +791,30 @@ def fetch(
                                         session=session_id,
                                         include_tabs=False,
                                     )
-                                    solution = solver.request_get(current_url, session=session_id)
+                                    solution = solver.request_get(
+                                        current_url,
+                                        session=session_id,
+                                        tabs_till_verify=1,
+                                    )
                                 except FetchError:
                                     # A stale/unsupported session must not leave
                                     # the fetch without the single-request path.
                                     steps.append("flare-session-fallback")
                                     solution = solver.request_get(
-                                        current_url, cookies=browser_cookies
+                                        current_url,
+                                        cookies=browser_cookies,
+                                        tabs_till_verify=1,
                                     )
                             else:
-                                solution = solver.request_get(current_url, cookies=browser_cookies)
+                                solution = solver.request_get(
+                                    current_url,
+                                    cookies=browser_cookies,
+                                    tabs_till_verify=1,
+                                )
                         else:
-                            solution = solver.request_get(current_url, cookies=browser_cookies)
+                            solution = solver.request_get(
+                                current_url, cookies=browser_cookies, include_tabs=False,
+                            )
                     finally:
                         solver.destroy_session(session_id)
                     cookies = FlareSolverrClient.cookies_for_context(solution)

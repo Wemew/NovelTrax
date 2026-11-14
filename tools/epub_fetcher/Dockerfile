@@ -15,6 +15,7 @@ COPY epub_fetcher.py server.py entrypoint.sh ./
 RUN chmod +x /app/entrypoint.sh
 ENV EPUB_FETCHER_OUTPUT_DIR=/tmp/epub_fetcher \
     EPUB_FETCHER_TIMEOUT=150 \
-    EPUB_FETCHER_HEADLESS=false
+    EPUB_FETCHER_HEADLESS=false \
+    EPUB_FETCHER_FLARESOLVERR_TABS=1
 EXPOSE 8010
 CMD ["/app/entrypoint.sh"]

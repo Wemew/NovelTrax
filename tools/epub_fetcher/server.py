@@ -50,6 +50,7 @@ def health():
         "playwright": playwright_ready,
         "flaresolverr": bool(FLARESOLVERR_URL),
         "headless": HEADLESS,
+        "display": os.getenv("DISPLAY", ""),
         "output_dir": OUTPUT_DIR,
     }
 
