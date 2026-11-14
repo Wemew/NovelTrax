@@ -11,12 +11,12 @@ import logging
 import os
 import tempfile
 import threading
+import time
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
-from starlette.background import BackgroundTask
 
 from epub_fetcher import FetchError, fetch
 
@@ -31,6 +31,17 @@ def _remove_after_response(path: str) -> None:
         os.unlink(path)
     except OSError:
         pass
+
+
+class DeletingFileResponse(FileResponse):
+    """FileResponse that deletes the temp file even if the client disconnects."""
+
+    async def __call__(self, scope, receive, send):
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            _remove_after_response(self.path)
+
 
 app = FastAPI(title="NovelTrax EPUB fetcher", version="1.0.0")
 OUTPUT_DIR = os.getenv("EPUB_FETCHER_OUTPUT_DIR", os.path.join(tempfile.gettempdir(), "epub_fetcher"))
@@ -99,26 +110,40 @@ def health():
 
 @app.post("/fetch")
 def fetch_endpoint(payload: FetchRequest):
-    logger.info("Fetch request accepted: %s (queue: %s active, %s waiting)",
-                payload.url, _queue_active, _queue_waiters)
-    try:
-        result = _run_queued(lambda: fetch(
+    arrived = time.monotonic()
+    budget = float(payload.timeout or DEFAULT_TIMEOUT)
+    logger.info("Fetch request accepted: %s (queue: %s active, %s waiting, budget %.0fs)",
+                payload.url, _queue_active, _queue_waiters, budget)
+
+    def run():
+        waited = time.monotonic() - arrived
+        remaining = budget - waited
+        if remaining < 10.0:
+            raise FetchError(
+                f"Timed out after {waited:.0f}s waiting for the EPUB fetcher queue "
+                f"(request budget {budget:.0f}s)"
+            )
+        logger.info("Fetch starting after %.1fs queue wait: %s (remaining %.0fs)",
+                    waited, payload.url, remaining)
+        return fetch(
             payload.url,
             OUTPUT_DIR,
             flaresolverr_url=FLARESOLVERR_URL,
-            timeout=payload.timeout or DEFAULT_TIMEOUT,
+            timeout=remaining,
             headless=HEADLESS,
-        ))
+        )
+
+    try:
+        result = _run_queued(run)
     except FetchError as exc:
         logger.warning("Fetch failed: %s", exc)
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     logger.info("Fetch succeeded: %s (%s bytes)", result.filename, os.path.getsize(result.path))
-    return FileResponse(
+    return DeletingFileResponse(
         result.path,
         filename=result.filename,
         media_type="application/epub+zip",
         headers={"X-Fetch-Steps": " | ".join(result.steps)[:2000]},
-        background=BackgroundTask(_remove_after_response, result.path),
     )
 
 
