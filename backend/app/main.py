@@ -65,7 +65,10 @@ torbox_manager = TorBoxManager(db)
 
 # The EPUB sidecar is a serial FIFO worker. Serialize NovelTrax's calls too so
 # later requests start their own timeout budget instead of aging in the queue.
-_EPUB_FETCH_LOCK = threading.Lock()
+# These must be asyncio locks: waiting on a threading.Lock inside to_thread
+# would consume every default-executor thread and stall /api/tasks.
+_EPUB_FETCH_LOCK = asyncio.Lock()
+_EPUB_SOURCE_LOCK = asyncio.Lock()
 
 def get_qbit_client() -> QBitClient:
     """Instantiates QBitClient configured from current app_settings in database."""
@@ -2551,21 +2554,22 @@ async def api_fetch_release_epub(release_id: int):
         source = ""
     if not source and (article or release.get("source_link")):
         candidate_page = article or str(release.get("source_link") or "").strip()
-        try:
-            html = safe_fetch_text(candidate_page, timeout=10.0)
-            if is_jnovels_listing(candidate_page):
-                resolved_article = find_jnovels_article(html, candidate_page, title)
-                if resolved_article:
-                    candidate_page = resolved_article
-                    html = safe_fetch_text(candidate_page, timeout=10.0)
-                else:
-                    html = ""
-            if html:
-                source = extract_source_link(html, candidate_page)
-            if source and is_jnovels_page(source):
-                source = ""
-        except Exception as exc:
-            logger.debug("Source-link extraction failed for #%s: %s", release_id, exc)
+        async with _EPUB_SOURCE_LOCK:
+            try:
+                html = await asyncio.to_thread(safe_fetch_text, candidate_page, 10.0)
+                if is_jnovels_listing(candidate_page):
+                    resolved_article = find_jnovels_article(html, candidate_page, title)
+                    if resolved_article:
+                        candidate_page = resolved_article
+                        html = await asyncio.to_thread(safe_fetch_text, candidate_page, 10.0)
+                    else:
+                        html = ""
+                if html:
+                    source = extract_source_link(html, candidate_page)
+                if source and is_jnovels_page(source):
+                    source = ""
+            except Exception as exc:
+                logger.debug("Source-link extraction failed for #%s: %s", release_id, exc)
         if source and db.set_release_source_link(release_id, source):
             db.log_activity("SOURCE_LINK_FILLED", f"Source link found for {release.get('title')}", candidate_page)
     if source and is_jnovels_page(source):
@@ -2594,33 +2598,28 @@ async def api_fetch_release_epub(release_id: int):
     def _worker():
         fetch_reporter.report(
             total=100, done=35,
-            message="Waiting for the previous EPUB fetch to finish…", force=True,
+            message="Calling the fetcher sidecar (Turnstile/countdown)…", force=True,
         )
-        with _EPUB_FETCH_LOCK:
-            fetch_reporter.report(
-                total=100, done=35,
-                message="Calling the fetcher sidecar (Turnstile/countdown)…", force=True,
-            )
-            body = json.dumps({"url": source, "timeout": 240}).encode("utf-8")
-            request = urllib.request.Request(
-                base + "/fetch",
-                data=body,
-                headers={"Content-Type": "application/json", "Accept": "*/*"},
-                method="POST",
-            )
+        body = json.dumps({"url": source, "timeout": 240}).encode("utf-8")
+        request = urllib.request.Request(
+            base + "/fetch",
+            data=body,
+            headers={"Content-Type": "application/json", "Accept": "*/*"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=280) as response:
+                content = response.read()
+                disposition = response.headers.get("Content-Disposition", "")
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", "replace")[:500]
             try:
-                with urllib.request.urlopen(request, timeout=280) as response:
-                    content = response.read()
-                    disposition = response.headers.get("Content-Disposition", "")
-            except urllib.error.HTTPError as exc:
-                detail = exc.read().decode("utf-8", "replace")[:500]
-                try:
-                    detail = json.loads(detail).get("detail") or detail
-                except Exception:
-                    pass
-                raise ValueError(f"Fetcher rejected the request: {detail}")
-            except Exception as exc:
-                raise ValueError(f"Fetcher unreachable: {exc}") from exc
+                detail = json.loads(detail).get("detail") or detail
+            except Exception:
+                pass
+            raise ValueError(f"Fetcher rejected the request: {detail}")
+        except Exception as exc:
+            raise ValueError(f"Fetcher unreachable: {exc}") from exc
 
         fetch_reporter.report(total=100, done=85, message="Validating downloaded archive…", force=True)
         if len(content) < 1024:
@@ -2661,7 +2660,13 @@ async def api_fetch_release_epub(release_id: int):
         return target, prefill
 
     try:
-        path, prefill = await asyncio.to_thread(_worker)
+        if _EPUB_FETCH_LOCK.locked():
+            fetch_reporter.report(
+                total=100, done=35,
+                message="Waiting for the previous EPUB fetch to finish…", force=True,
+            )
+        async with _EPUB_FETCH_LOCK:
+            path, prefill = await asyncio.to_thread(_worker)
     except ValueError as exc:
         _mark_failed(str(exc))
         fetch_reporter.report(message=str(exc), force=True)
