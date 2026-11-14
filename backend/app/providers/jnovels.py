@@ -20,6 +20,40 @@ from app.security import safe_client_get
 
 logger = logging.getLogger("noveltrax.providers.jnovels")
 
+#: Source pages hide the direct file behind an anchor like ``VOLUME 23`` whose host
+#: is arbitrary. Only the anchor text identifies it; relative hrefs resolve against
+#: the article URL.
+_SOURCE_VOLUME_ANCHOR_RE = re.compile(
+    r'<a\b[^>]*href=["\'](?P<href>[^"\']+)["\'][^>]*>'
+    r'\s*(?:<[^>]+>\s*)*(?:volume|vol\.?)\s*\d+',
+    re.IGNORECASE | re.DOTALL,
+)
+_SOURCE_DOWNLOAD_ANCHOR_RE = re.compile(
+    r'<a\b[^>]*href=["\'](?P<href>[^"\']+)["\'][^>]*>'
+    r'\s*(?:<[^>]+>\s*)*(?:download|get)\b',
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def extract_source_link(summary: str, base_url: str = "") -> str:
+    """Extract the direct file link behind a shortener/hider anchor."""
+    from urllib.parse import urljoin, urlsplit
+
+    html = str(summary or "")
+    if not html:
+        return ""
+    href = ""
+    for pattern in (_SOURCE_VOLUME_ANCHOR_RE, _SOURCE_DOWNLOAD_ANCHOR_RE):
+        match = pattern.search(html)
+        if match:
+            href = str(match.group("href") or "").strip()
+            break
+    if not href:
+        return ""
+    resolved = urljoin(str(base_url or ""), href)
+    return resolved if urlsplit(resolved).scheme.lower() in ("http", "https") else ""
+
+
 DEFAULT_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
@@ -668,6 +702,9 @@ class JNovelsProvider(BaseFeedProvider):
                     cover_url=cover_url,
                     description=desc,
                     series_link=series_link,
+                    # Search/article cards keep the VOLUME link in the card DOM;
+                    # the excerpt element alone often strips it.
+                    source_link=extract_source_link(str(art), link),
                     raw_data={"confidence": parsed["confidence"], "subtitle": parsed["subtitle"]}
                 )
 
@@ -775,6 +812,7 @@ class JNovelsProvider(BaseFeedProvider):
                 cover_url=cover_url,
                 description=re.sub(r'<[^>]+>', '', summary)[:300],
                 series_link=series_link,
+                source_link=extract_source_link(summary, link),
                 raw_data={"confidence": parsed["confidence"]}
             ))
 

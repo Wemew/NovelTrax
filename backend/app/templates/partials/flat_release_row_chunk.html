@@ -132,6 +132,15 @@
                 <i data-lucide="download" class="w-3.5 h-3.5"></i>
             </button>
             {% endif %}
+            {% if r.source_link %}
+            <a href="{{ r.source_link }}" target="_blank" rel="noopener noreferrer" title="Open the direct source download link" aria-label="Open the direct source download link" class="p-1.5 rounded-lg bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-300 border border-cyan-500/20 transition-colors">
+                <i data-lucide="download-cloud" class="w-3.5 h-3.5"></i>
+            </a>
+            <button type="button" data-release-id="{{ r.id }}" onclick="fetchEpub({{ r.id }}, this)" title="Fetch this EPUB through the configured fetcher" class="p-1.5 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-300 border border-emerald-500/20 transition-colors">
+                <i data-lucide="file-down" class="w-3.5 h-3.5"></i>
+            </button>
+            {% endif %}
+
             {% if r.status != 'IN_CALIBRE' %}
             <button onclick="updateReleaseStatus({{ r.id }}, 'IN_CALIBRE')" title="Mark as acquired into Calibre" class="p-1.5 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/20 transition-colors">
                 <i data-lucide="check" class="w-3.5 h-3.5"></i>

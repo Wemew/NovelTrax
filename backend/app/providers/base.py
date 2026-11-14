@@ -25,7 +25,8 @@ class ReleaseItem:
         is_bundle: bool = False,
         volumes: Optional[List[float]] = None,
         volume_start: Optional[float] = None,
-        volume_end: Optional[float] = None
+        volume_end: Optional[float] = None,
+        source_link: Optional[str] = None,
     ):
         self.title = title.strip()
         self.link = link.strip()
@@ -44,6 +45,8 @@ class ReleaseItem:
         self.volumes = volumes or ([volume] if volume is not None else [])
         self.volume_start = volume_start
         self.volume_end = volume_end
+        # Direct download link behind a hider/shortener (jnovels "VOLUME n" anchor).
+        self.source_link = str(source_link or "").strip()
         
         # Calculate consistent GUID if not provided
         if not guid:
@@ -66,6 +69,7 @@ class ReleaseItem:
             "series_link": self.series_link,
             "source_feed_name": self.source_feed_name,
             "download_url": self.download_url,
+            "source_link": self.source_link,
             "release_group": self.release_group,
             "is_bundle": self.is_bundle,
             "volumes": self.volumes,

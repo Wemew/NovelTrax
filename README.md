@@ -69,6 +69,8 @@ Runs seamlessly in **Docker**, mounts your Calibre library network share safely 
    - **Torrent releases only**: TorBox cannot fetch a direct web page. Nyaa magnets and `.torrent` URLs work; J-Novels / J-Novel Club / NovelUpdates web-page links are rejected with a clear "TorBox downloads torrent/magnet releases only" message (Cloudflare Turnstile makes cloud/HTTP fetching of those pages impossible). The engine selector and the Downloads panel explain this limitation in the UI.
    - **Manga safety net**: once TorBox returns the torrent's file list, a torrent whose content files are **all `.cbz`** is treated as a manga rip and rejected before any download link is requested — the remote torrent is deleted to free the slot, the release is re-classified as `manga` **and hidden for good** (status `IGNORED` + `ignored=1`, so it drops out of Releases/Discovery/wanted/queue views and later feed re-polls cannot resurrect it; only an explicit user un-ignore restores it), and the rejection is audited as `TORBOX_MANGA_REJECTED`. Covers/`.nfo` clutter is ignored, and a mixed torrent that still contains an `.epub` downloads normally.
    - **In-place release state**: every release row and series-card release shows a download-state chip (`Not downloaded`, `Downloading NN%`, `Downloaded`, `Failed`, `In Calibre`) that updates without a page reload. Failed entries show their error and can be retried or removed; the engine-aware Downloads queue offers **Check now** and a two-step **Clear failed**.
+   - **Direct source links (J-Novels)**: the article's `VOLUME n` anchor is captured as `source_link` at ingestion, shown as a per-release **Source** action, and backfillable for rows cached before the feature existed (Settings → Maintenance). Hiders/shorteners are not resolved by NovelTrax itself.
+   - **Optional EPUB fetcher sidecar**: a separate Playwright + FlareSolverr service (`tools/epub_fetcher`, no dependency added to the NovelTrax image) follows the shortener/countdown/Turnstile chain, downloads the EPUB, and hands it to `POST /api/releases/{id}/fetch-epub`; the file lands in `downloads_dir` and the release becomes `COMPLETED` (engine `http`). Configure `epub_fetcher_url` in Settings.
 
 8. **Targeted Series Backfill**
    - The per-series **Backfill** action runs an on-demand background search for one specific series across Nyaa instead of re-scanning every feed.
@@ -444,8 +446,40 @@ The second download engine is configured from the **Settings** tab (a "Test TorB
 | `torbox_max_concurrent` | `2` | Active TorBox submissions / fetch workers (clamped 1–20) |
 | `torbox_timeout_hours` | `6` | Give up after this many hours; `0` disables the timeout |
 | `downloads_dir` | `DOWNLOAD_DIR` or `/downloads` | Absolute local folder the engine writes fetched files into; must be writable |
+| `epub_fetcher_url` | empty | Base URL of the optional `tools/epub_fetcher` sidecar (e.g. `http://epub-fetcher:8010`). Empty disables the per-release **Fetch EPUB** action |
 
 **Torrent releases only.** TorBox accepts Nyaa magnets and `.torrent` URLs, which it fetches on its own servers. Releases whose link is a direct web page (J-Novels, J-Novel Club, NovelUpdates) are rejected by the server with an explanatory message and logged as `TORBOX_SKIPPED`, because Cloudflare Turnstile blocks cloud fetching of those pages. The UI repeats this limitation next to the engine selector.
+
+### EPUB fetcher sidecar (optional)
+
+`tools/epub_fetcher` is a standalone Playwright + FlareSolverr service; it is not
+part of the NovelTrax image. Build/run it next to NovelTrax and point
+`epub_fetcher_url` at it:
+
+```bash
+docker build -t noveltrax-epub-fetcher tools/epub_fetcher
+docker run --rm -p 8010:8010 \
+  -e EPUB_FETCHER_FLARESOLVERR_URL=http://flaresolverr:8191 \
+  -e EPUB_FETCHER_FLARESOLVERR_TABS=1 \
+  noveltrax-epub-fetcher
+```
+
+When adding it to an existing Compose stack, add an `epub-fetcher` service with
+`build: ./tools/epub_fetcher` and rebuild **both** images, because the endpoint,
+setting, backfill action and Fetch EPUB buttons live in the NovelTrax image:
+
+```bash
+docker compose up -d --build noveltrax epub-fetcher
+```
+
+Then set **Settings → Downloader → EPUB Fetcher URL** to
+`http://epub-fetcher:8010`. Do not publish the sidecar port publicly.
+
+The per-release **Fetch EPUB** button calls the sidecar with the release's
+`source_link` (filling it from the J-Novels article first when missing),
+validates that an EPUB/PDF archive came back, writes it into `downloads_dir`,
+and records `COMPLETED` + `downloader=http`. It does not bypass DRM or
+interactive captchas. See `tools/epub_fetcher/README.md`.
 
 ### Deferred settings features (not in this change)
 

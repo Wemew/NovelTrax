@@ -346,6 +346,17 @@
                 </div>
 
                 <div>
+                    <label for="setting-epub-fetcher-url" class="block text-xs font-semibold text-slate-300 mb-1">
+                        EPUB Fetcher URL
+                    </label>
+                    <input type="text" id="setting-epub-fetcher-url" name="epub_fetcher_url" value="{{ settings.epub_fetcher_url or '' }}" placeholder="http://epub-fetcher:8010" class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white font-mono focus:outline-none focus:border-brand-500">
+                    <p class="text-[11px] text-slate-500 mt-1">
+                        Optional sidecar from <code class="font-mono text-slate-400">tools/epub_fetcher</code> that follows shorteners/hiders and downloads the EPUB through a real browser.
+                        Leave empty to disable the per-release Fetch EPUB action.
+                    </p>
+                </div>
+
+                <div>
                     <label for="setting-downloads-dir" class="block text-xs font-semibold text-slate-300 mb-1">
                         Local Downloads Folder
                     </label>
@@ -653,6 +664,23 @@
                 </button>
             </div>
 
+            <!-- Backfill release source links -->
+            <div class="bg-slate-950/50 border border-slate-800/70 rounded-xl p-4 flex flex-col justify-between">
+                <div>
+                    <h4 class="text-xs font-bold text-white flex items-center gap-1.5">
+                        <i data-lucide="download-cloud" class="w-4 h-4 text-cyan-400"></i>
+                        Release Source Links
+                    </h4>
+                    <p class="text-[11px] text-slate-400 mt-1.5 leading-relaxed">
+                        Fetches cached J-Novels article pages and stores the direct "VOLUME n" link behind the per-release Source button. Feed polls already fill new items.
+                    </p>
+                </div>
+                <button type="button" onclick="backfillSourceLinks(this)" id="btn-backfill-source-links" class="mt-4 w-full px-3 py-2 rounded-xl bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors active:scale-95">
+                    <i data-lucide="link" class="w-3.5 h-3.5"></i>
+                    <span>Backfill Source Links</span>
+                </button>
+            </div>
+
             <!-- Clear Metadata Cache -->
             <div class="bg-slate-950/50 border border-slate-800/70 rounded-xl p-4 flex flex-col justify-between">
                 <div>
@@ -825,6 +853,7 @@
             torbox_poll_seconds: document.getElementById('setting-torbox-poll-seconds').value,
             torbox_max_concurrent: document.getElementById('setting-torbox-max-concurrent').value,
             torbox_timeout_hours: document.getElementById('setting-torbox-timeout-hours').value,
+            epub_fetcher_url: document.getElementById('setting-epub-fetcher-url').value.trim(),
             downloads_dir: document.getElementById('setting-downloads-dir').value.trim(),
             app_timezone: document.getElementById('setting-timezone').value.trim(),
             log_level: document.getElementById('setting-log-level').value,
@@ -866,6 +895,28 @@
         } finally {
             if (btn) btn.disabled = false;
             lucide.createIcons();
+        }
+    }
+
+    async function backfillSourceLinks(button) {
+        const label = button ? button.querySelector('span') : null;
+        const original = label ? label.textContent : '';
+        if (button) button.disabled = true;
+        if (label) label.textContent = 'Checking articles…';
+        try {
+            const res = await fetch('/api/maintenance/source-links/backfill', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ limit: 20 }),
+            });
+            const data = await res.json();
+            if (!res.ok) { showToast(data.detail || 'Source-link backfill failed', 'error'); return; }
+            showToast(`Source links: ${data.updated || 0} filled of ${data.checked || 0} checked`, data.updated ? 'success' : 'info');
+        } catch (err) {
+            showToast('Source-link backfill failed: ' + err, 'error');
+        } finally {
+            if (button) button.disabled = false;
+            if (label) label.textContent = original;
         }
     }
 

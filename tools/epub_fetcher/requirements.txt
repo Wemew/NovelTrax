@@ -1,0 +1,5 @@
+fastapi>=0.110
+uvicorn[standard]>=0.29
+pydantic>=2
+# Must match the Playwright browser build in the Docker base image.
+playwright==1.49.1

@@ -288,6 +288,8 @@ class Database:
             # Releases table downloader and prioritized group migrations
             for col_def in [
                 ("download_url", "TEXT"),
+                # Direct file link behind a hider/shortener (jnovels VOLUME anchor).
+                ("source_link", "TEXT DEFAULT ''"),
                 ("download_status", "TEXT DEFAULT 'IDLE'"),
                 ("torrent_hash", "TEXT"),
                 ("release_group", "TEXT DEFAULT ''"),
@@ -3689,6 +3691,34 @@ class Database:
                 logger.info(f"Purged {deleted_count} PDF release(s) from database.")
             return deleted_count
 
+    def list_releases_missing_source_link(self, limit: int = 25) -> List[Dict[str, Any]]:
+        """Cached release articles that may still expose a direct file link."""
+        with self.get_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, title, link FROM releases
+                WHERE (source_link IS NULL OR trim(source_link) = '')
+                  AND link IS NOT NULL AND link LIKE '%jnovels.com%'
+                ORDER BY id ASC
+                LIMIT ?;
+                """,
+                (max(1, int(limit)),),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def set_release_source_link(self, release_id: int, source_link: str) -> bool:
+        clean = str(source_link or "").strip()
+        if not clean:
+            return False
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE releases SET source_link = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?;",
+                (clean, int(release_id)),
+            )
+            conn.commit()
+            return cur.rowcount > 0
+
     def upsert_release(self, release_data: Dict[str, Any]) -> Tuple[bool, int]:
         """
         Inserts or updates a release.
@@ -3923,6 +3953,7 @@ class Database:
                         missing_vols_json = ?,
                         is_official = ?,
                         download_url = COALESCE(?, download_url),
+                        source_link = CASE WHEN ? != '' THEN ? ELSE source_link END,
                         release_group = COALESCE(NULLIF(?, ''), release_group),
                         release_groups_json = CASE WHEN ? != '[]' THEN ? ELSE release_groups_json END,
                         publisher = COALESCE(NULLIF(?, ''), publisher),
@@ -3949,6 +3980,8 @@ class Database:
                     missing_val,
                     is_official_val,
                     dl_url_val,
+                    release_data.get("source_link") or "",
+                    release_data.get("source_link") or "",
                     rel_group_val,
                     groups_val,
                     groups_val,
@@ -3972,9 +4005,9 @@ class Database:
                         cover_url, description, author, source_feed_id,
                         source_feed_name, series_link, status, calibre_matched_book_id,
                         is_bundle, volumes_json, missing_vols_json, is_official,
-                        download_url, release_group, ignored, media_type,
+                        download_url, source_link, release_group, ignored, media_type,
                         release_groups_json, publisher, revision, chapter_number, chapter_ranges_json
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                 """, (
                     guid,
                     release_data["title"],
@@ -3995,6 +4028,7 @@ class Database:
                     missing_val,
                     is_official_val,
                     dl_url_val,
+                    release_data.get("source_link") or "",
                     rel_group_val,
                     ignored_val,
                     release_data.get("media_type") or "unknown",

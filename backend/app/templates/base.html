@@ -968,6 +968,31 @@
             }
         }
 
+        // Manual EPUB fetch: sidecar resolves the shortener/hider chain.
+        async function fetchEpub(releaseId, btn = null) {
+            if (!releaseId) return;
+            const icon = btn ? btn.querySelector('i') : null;
+            if (btn) btn.disabled = true;
+            if (icon) icon.classList.add('animate-spin');
+            showToast('Fetching EPUB via the source chain… this can take up to a minute', 'info');
+            try {
+                const res = await fetch(`/api/releases/${releaseId}/fetch-epub`, { method: 'POST' });
+                let data = {};
+                try { data = await res.json(); } catch (parseErr) { data = {}; }
+                if (!res.ok) {
+                    showToast(data.detail || data.message || `EPUB fetch failed (HTTP ${res.status})`, 'error');
+                    return;
+                }
+                showToast(`EPUB saved: ${data.path || 'downloads folder'}`, 'success');
+                setTimeout(() => location.reload(), 1200);
+            } catch (err) {
+                showToast('EPUB fetch failed: ' + err, 'error');
+            } finally {
+                if (icon) icon.classList.remove('animate-spin');
+                if (btn) btn.disabled = false;
+            }
+        }
+
         function openImageModal(src, title = '') {
             if (!src) return;
             const modal = document.getElementById('image-modal');

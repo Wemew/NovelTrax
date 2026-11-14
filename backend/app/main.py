@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import math
 import time
 import threading
@@ -8,6 +9,9 @@ import logging
 import asyncio
 import sqlite3
 import tempfile
+import urllib.error
+import urllib.parse
+import urllib.request
 import zoneinfo
 from typing import Dict, Any, List, Optional
 from contextlib import asynccontextmanager
@@ -24,7 +28,8 @@ from app.calibre.scanner import CalibreScanner
 from app.providers.registry import create_provider
 from app.scheduler import TaskManager
 from app.covers import CoverCache
-from app.security import is_safe_public_url, sanitize_calibre_path
+from app.security import is_safe_public_url, sanitize_calibre_path, safe_fetch_text
+from app.providers.jnovels import extract_source_link
 from app.downloader.qbit import QBitClient, qbit_client_from_settings
 from app.download_state import release_download_state
 from app.torbox_manager import TorBoxManager
@@ -2260,6 +2265,130 @@ async def api_database_stats():
     payload.setdefault("status", "success")
     payload["integrity"] = integrity
     return JSONResponse(payload)
+
+@app.post("/api/maintenance/source-links/backfill")
+async def api_backfill_source_links(payload: Optional[Dict[str, Any]] = None):
+    """Fetch cached release articles and store their direct file link.
+
+    New feed items get ``source_link`` during ingestion; this endpoint backfills
+    rows cached before that feature existed. Only rows with an empty source link
+    and an HTTP article link are fetched (SSRF-guarded, bounded per request).
+    """
+    body = payload or {}
+    try:
+        limit = max(1, min(int(body.get("limit") or 20), 200))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="limit must be an integer")
+
+    def _worker():
+        rows = db.list_releases_missing_source_link(limit)
+        updated = 0
+        failed = 0
+        for row in rows:
+            try:
+                html = safe_fetch_text(str(row.get("link") or ""), timeout=10.0)
+                link = extract_source_link(html, str(row.get("link") or ""))
+                if link and db.set_release_source_link(int(row["id"]), link):
+                    updated += 1
+            except Exception as exc:
+                failed += 1
+                logger.debug("Source-link backfill failed for #%s: %s", row.get("id"), exc)
+            time.sleep(0.2)
+        return {"checked": len(rows), "updated": updated, "failed": failed}
+
+    result = await asyncio.to_thread(_worker)
+    db.log_activity(
+        "SOURCE_LINKS_BACKFILLED",
+        f"Source-link backfill: {result['updated']} filled of {result['checked']} checked",
+        json.dumps(result),
+    )
+    return JSONResponse({"status": "success", **result})
+
+
+@app.post("/api/releases/{release_id}/fetch-epub")
+async def api_fetch_release_epub(release_id: int):
+    """Run the EPUB fetcher sidecar for one release and store the file locally.
+
+    The sidecar (``tools/epub_fetcher``) owns browser automation and optional
+    FlareSolverr. This endpoint only resolves the source URL, calls the sidecar,
+    validates that a real book archive came back, and records the download.
+    """
+    release = db.get_release_by_id(release_id)
+    if not release:
+        raise HTTPException(status_code=404, detail="Release not found")
+
+    source = str(release.get("source_link") or "").strip()
+    if not source:
+        article = str(release.get("link") or "").strip()
+        if article:
+            try:
+                html = safe_fetch_text(article, timeout=10.0)
+                source = extract_source_link(html, article)
+            except Exception as exc:
+                logger.debug("Source-link extraction failed for #%s: %s", release_id, exc)
+            if source and db.set_release_source_link(release_id, source):
+                db.log_activity("SOURCE_LINK_FILLED", f"Source link found for {release.get('title')}", article)
+    if not source:
+        raise HTTPException(status_code=400, detail="No source link available; backfill source links first")
+
+    base = str(db.get_setting("epub_fetcher_url", "") or "").strip().rstrip("/")
+    if not base.startswith(("http://", "https://")):
+        raise HTTPException(status_code=400, detail="Set Settings -> Downloader -> EPUB Fetcher URL first")
+
+    def _worker() -> str:
+        body = json.dumps({"url": source, "timeout": 240}).encode("utf-8")
+        request = urllib.request.Request(
+            base + "/fetch",
+            data=body,
+            headers={"Content-Type": "application/json", "Accept": "*/*"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=280) as response:
+                content = response.read()
+                disposition = response.headers.get("Content-Disposition", "")
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", "replace")[:500]
+            try:
+                detail = json.loads(detail).get("detail") or detail
+            except Exception:
+                pass
+            raise ValueError(f"Fetcher rejected the request: {detail}")
+        except Exception as exc:
+            raise ValueError(f"Fetcher unreachable: {exc}") from exc
+
+        if len(content) < 1024:
+            raise ValueError("Fetcher returned an empty document")
+        if not content.startswith(b"PK") and not content.startswith(b"%PDF"):
+            raise ValueError("Fetcher did not return an EPUB/PDF archive")
+
+        match = re.search(r"filename\*?=(?:UTF-8'')?\"?([^\";]+)", disposition, re.IGNORECASE)
+        suggested = urllib.parse.unquote(match.group(1)) if match else ""
+        filename = os.path.basename((suggested or str(release.get("title") or "novel")).replace("\\", "/"))
+        filename = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", filename).strip(" ._") or "novel.epub"
+        if not filename.lower().endswith((".epub", ".pdf")):
+            filename += ".epub"
+        downloads_dir = str(db.get_setting("downloads_dir", os.getenv("DOWNLOAD_DIR", "/downloads")) or "/downloads")
+        os.makedirs(downloads_dir, exist_ok=True)
+        target = os.path.join(downloads_dir, filename[:180])
+        stem, suffix = os.path.splitext(target)
+        counter = 2
+        while os.path.exists(target):
+            target = f"{stem} ({counter}){suffix}"
+            counter += 1
+        with open(target, "wb") as handle:
+            handle.write(content)
+        db.update_downloader_state(release_id, "COMPLETED", "http")
+        db.set_download_files(release_id, [target])
+        db.log_activity("EPUB_FETCHED", f"Fetched EPUB for {release.get('title')}", target)
+        return target
+
+    try:
+        path = await asyncio.to_thread(_worker)
+    except ValueError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return JSONResponse({"status": "success", "path": path, "source_link": source})
+
 
 @app.get("/api/maintenance/backup")
 async def api_database_backup():
