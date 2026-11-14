@@ -396,10 +396,26 @@ def _submit_turnstile_form(page, token: str = "") -> bool:
 
 def _countdown_percent(text: str):
     """Return the shortener's scan percentage, or None on a normal page."""
-    lowered = str(text or "").lower()
-    if "link scan" not in lowered and "scaning" not in lowered:
+    raw = str(text or "")
+    lowered = raw.lower()
+    marker = lowered.find("link scan")
+    if marker < 0:
+        marker = lowered.find("scaning")
+    if marker < 0:
         return None
-    values = [int(v) for v in re.findall(r"(\d{1,3})\s*%", text or "")]
+    # Only the shortener widget's own text is relevant. Article bodies often
+    # contain things like "99.999% uptime" or "500% faster"; scanning the whole
+    # page turns those into a bogus >100 countdown that never advances.
+    end = len(raw)
+    for control in ("continue", "get link"):
+        found = lowered.find(control, marker)
+        if 0 <= found < end:
+            end = found
+    window = raw[marker:min(end, marker + 400)]
+    values = [
+        int(v) for v in re.findall(r"(?<![\d.])(\d{1,3})\s*%", window)
+        if 0 <= int(v) <= 100
+    ]
     return max(values) if values else 0
 
 

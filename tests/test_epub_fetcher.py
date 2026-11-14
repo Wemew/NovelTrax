@@ -64,6 +64,17 @@ def test_safe_filename():
     check(epub_fetcher.safe_filename("book") == "book.epub", "suffix added")
 
 
+def test_countdown_percent_ignores_article_claims():
+    body = (
+        "99.999% uptime guarantee and 500% faster loading.\n"
+        "Your Link Scaning...\n\n100%\n\nContinue"
+    )
+    check(epub_fetcher._countdown_percent(body) == 100, epub_fetcher._countdown_percent(body))
+    check(epub_fetcher._countdown_percent("Your Link Scaning...\n\n20%") == 20, "live percentage")
+    check(epub_fetcher._countdown_percent("99.999% uptime only") is None, "normal page")
+    check(epub_fetcher._countdown_percent("Your Link Scaning...\nwaiting") == 0, "pre-percent")
+
+
 def test_flow_heuristics():
     check(epub_fetcher.is_challenge_text("Just a moment..."), "cloudflare marker")
     check(epub_fetcher.is_challenge_text("Verify you are human"), "turnstile marker")
