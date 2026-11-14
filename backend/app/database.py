@@ -416,6 +416,31 @@ class Database:
                 );
             """)
 
+            # EPUB metadata prefill / manual review queue
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS epub_metadata_reviews (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    release_id INTEGER,
+                    file_path TEXT NOT NULL UNIQUE,
+                    title TEXT DEFAULT '',
+                    author TEXT DEFAULT '',
+                    series TEXT DEFAULT '',
+                    series_index REAL,
+                    source TEXT DEFAULT '',
+                    is_new_volume INTEGER DEFAULT 0,
+                    review_status TEXT DEFAULT 'pending',
+                    note TEXT DEFAULT '',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            try:
+                review_cols = {row["name"] for row in cur.execute("PRAGMA table_info(epub_metadata_reviews);").fetchall()}
+                if "is_new_volume" not in review_cols:
+                    cur.execute("ALTER TABLE epub_metadata_reviews ADD COLUMN is_new_volume INTEGER DEFAULT 0;")
+            except Exception:
+                pass
+
             # Persisted background tasks (live status board)
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS background_tasks (
@@ -3847,6 +3872,76 @@ class Database:
             conn.commit()
             return max(0, int(cur.rowcount or 0))
 
+    # --- EPUB metadata review queue ---
+    def upsert_epub_metadata_review(self, release_id: Optional[int], file_path: str,
+                                    fields: Dict[str, Any], source: str = "",
+                                    note: str = "", review_status: str = "pending",
+                                    is_new_volume: Optional[bool] = None) -> int:
+        with self.get_connection() as conn:
+            if is_new_volume is None:
+                existing = conn.execute(
+                    "SELECT is_new_volume FROM epub_metadata_reviews WHERE file_path = ?;",
+                    (str(file_path),),
+                ).fetchone()
+                is_new_volume = bool(existing["is_new_volume"]) if existing else False
+            cur = conn.execute(
+                "INSERT INTO epub_metadata_reviews "
+                "(release_id, file_path, title, author, series, series_index, source, is_new_volume, review_status, note) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(file_path) DO UPDATE SET "
+                "release_id = excluded.release_id, title = excluded.title, author = excluded.author, "
+                "series = excluded.series, series_index = excluded.series_index, source = excluded.source, "
+                "is_new_volume = excluded.is_new_volume, review_status = excluded.review_status, note = excluded.note, "
+                "updated_at = CURRENT_TIMESTAMP;",
+                (
+                    int(release_id) if release_id else None, str(file_path),
+                    str(fields.get("title") or ""), str(fields.get("author") or ""),
+                    str(fields.get("series") or ""), fields.get("series_index"),
+                    str(source or ""), 1 if is_new_volume else 0,
+                    str(review_status or "pending"), str(note or "")[:1000],
+                ),
+            )
+            conn.commit()
+            if cur.lastrowid:
+                return int(cur.lastrowid)
+            row = conn.execute("SELECT id FROM epub_metadata_reviews WHERE file_path = ?;", (str(file_path),)).fetchone()
+            return int(row["id"]) if row else 0
+
+    def list_epub_metadata_reviews(self, status: Optional[str] = None, limit: int = 200) -> List[Dict[str, Any]]:
+        clauses, params = [], []
+        if status:
+            clauses.append("review_status = ?")
+            params.append(str(status))
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        params.append(max(1, min(int(limit), 500)))
+        with self.get_connection() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM epub_metadata_reviews{where} ORDER BY id DESC LIMIT ?;", params,
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_epub_metadata_review(self, review_id: int) -> Optional[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            row = conn.execute("SELECT * FROM epub_metadata_reviews WHERE id = ?;", (int(review_id),)).fetchone()
+        return dict(row) if row else None
+
+    def update_epub_metadata_review(self, review_id: int, fields: Dict[str, Any],
+                                    review_status: str = "approved", note: str = "",
+                                    is_new_volume: Optional[bool] = None) -> None:
+        with self.get_connection() as conn:
+            conn.execute(
+                "UPDATE epub_metadata_reviews SET title = ?, author = ?, series = ?, series_index = ?, "
+                "is_new_volume = COALESCE(?, is_new_volume), review_status = ?, note = ?, "
+                "updated_at = CURRENT_TIMESTAMP WHERE id = ?;",
+                (
+                    str(fields.get("title") or ""), str(fields.get("author") or ""),
+                    str(fields.get("series") or ""), fields.get("series_index"),
+                    (1 if is_new_volume else 0) if is_new_volume is not None else None,
+                    str(review_status or "approved"), str(note or "")[:1000], int(review_id),
+                ),
+            )
+            conn.commit()
+
     def list_releases_missing_source_link(self, limit: int = 25) -> List[Dict[str, Any]]:
         """Cached release articles that may still expose a direct file link."""
         with self.get_connection() as conn:
@@ -5195,8 +5290,9 @@ class Database:
                 else:
                     for v in rel_vols:
                         group["all_volumes_set"].add(v)
-                for mv in rel.get("missing_volumes", []):
-                    group["missing_volumes_set"].add(mv)
+                if str(rel.get("status") or "").upper() not in ("DOWNLOADED", "IN_CALIBRE"):
+                    for mv in rel.get("missing_volumes", []):
+                        group["missing_volumes_set"].add(mv)
 
                 st = rel.get("status")
                 if st == "REQUESTED":

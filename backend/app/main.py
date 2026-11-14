@@ -27,6 +27,8 @@ from app import diagnostics
 from app import background_tasks, task_projection
 from app.download_inventory import scan_download_tree
 from app.download_status_sync import sync_qbit_completed
+from app.epub_prefill import prepare_downloaded_epub
+from app.epub_metadata import EpubMetadataError, write_epub_metadata
 from app.calibre.scanner import CalibreScanner
 from app.providers.registry import create_provider
 from app.scheduler import TaskManager
@@ -1168,6 +1170,59 @@ async def settings_view(request: Request):
         }
     )
 
+@app.get("/metadata-review", response_class=HTMLResponse)
+async def metadata_review_view(request: Request):
+    reviews = db.list_epub_metadata_reviews(limit=300)
+    pending = sum(1 for row in reviews if (row.get("review_status") or "") == "pending")
+    return templates.TemplateResponse(
+        request=request,
+        name="metadata_review.html",
+        context={"active_page": "metadata-review", "reviews": reviews, "pending_count": pending},
+    )
+
+
+@app.post("/api/metadata-review/{review_id}")
+async def api_metadata_review_update(review_id: int, payload: Dict[str, Any]):
+    row = db.get_epub_metadata_review(review_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Metadata review not found")
+    path = str(row.get("file_path") or "")
+    if not path.lower().endswith(".epub") or not os.path.isfile(path):
+        raise HTTPException(status_code=400, detail="EPUB file is missing from the downloads folder")
+    real_path = os.path.realpath(path)
+    allowed_roots = {
+        os.path.realpath(str(db.get_setting("downloads_dir", os.getenv("DOWNLOAD_DIR", "/downloads")) or "/downloads")),
+        os.path.realpath(str(db.get_setting("qbit_savepath", "/downloads") or "/downloads")),
+    }
+    if not any(real_path == root or real_path.startswith(root + os.sep) for root in allowed_roots):
+        raise HTTPException(status_code=400, detail="EPUB path is outside the configured downloads folder")
+    title = str(payload.get("title") or "").strip()
+    series = str(payload.get("series") or "").strip()
+    if not title or not series:
+        raise HTTPException(status_code=400, detail="title and series are required")
+    raw_index = payload.get("series_index")
+    if raw_index in (None, ""):
+        series_index = None
+    else:
+        try:
+            series_index = float(raw_index)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="series_index must be a number")
+    fields = {
+        "title": title,
+        "author": str(payload.get("author") or "").strip(),
+        "series": series,
+        "series_index": series_index,
+    }
+    try:
+        written = await asyncio.to_thread(write_epub_metadata, path, fields)
+    except EpubMetadataError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    db.update_epub_metadata_review(review_id, written, review_status="approved", note="")
+    db.log_activity("EPUB_METADATA_APPROVED", f"Metadata approved for {os.path.basename(path)}", row.get("series") or "")
+    return JSONResponse({"status": "success", "metadata": written, "review_id": review_id})
+
+
 @app.get("/downloads", response_class=HTMLResponse)
 async def downloads_view(request: Request):
     """Renders Downloader & Queue Management page with live status and active torrents."""
@@ -1201,7 +1256,7 @@ async def downloads_view(request: Request):
     qbit = get_qbit_client()
     status = await asyncio.to_thread(qbit.test_connection, timeout=2.0)
     torrents = await asyncio.to_thread(qbit.get_torrents, category=qbit.category) if status.get("success") else []
-    await asyncio.to_thread(sync_qbit_completed, db, torrents)
+    await asyncio.to_thread(sync_qbit_completed, db, torrents, _tag_qbit_completed)
 
     return templates.TemplateResponse(
         request=request,
@@ -1237,6 +1292,44 @@ async def audiobooks_view(request: Request):
     )
 
 # --- API Endpoints ---
+
+def _qbit_epub_paths(torrent: Dict[str, Any]) -> List[str]:
+    """Resolve EPUB files from a qBittorrent torrent record."""
+    candidates = []
+    content_path = str(torrent.get("content_path") or "").strip()
+    if content_path:
+        candidates.append(content_path)
+    save_path = str(torrent.get("save_path") or "").strip()
+    name = str(torrent.get("name") or "").strip()
+    if save_path and name:
+        candidates.append(os.path.join(save_path, name))
+    found = []
+    for candidate in candidates:
+        if os.path.isfile(candidate) and candidate.lower().endswith(".epub"):
+            found.append(candidate)
+            continue
+        if os.path.isdir(candidate):
+            for root, dirs, files in os.walk(candidate, followlinks=False):
+                dirs[:] = [d for d in dirs if not os.path.islink(os.path.join(root, d))]
+                for filename in files:
+                    if filename.lower().endswith(".epub"):
+                        found.append(os.path.join(root, filename))
+                        if len(found) >= 100:
+                            break
+                if len(found) >= 100:
+                    break
+        if found:
+            break
+    return list(dict.fromkeys(found))
+
+
+def _tag_qbit_completed(release: Dict[str, Any], torrent: Dict[str, Any]) -> None:
+    for path in _qbit_epub_paths(torrent):
+        try:
+            prepare_downloaded_epub(db, release, path)
+        except Exception as exc:
+            logger.debug("qBittorrent EPUB metadata prefill failed for %s: %s", path, exc)
+
 
 @app.get("/api/tasks")
 async def api_tasks(active: int = Query(0, ge=0, le=1), kind: Optional[str] = None,
@@ -2442,7 +2535,7 @@ async def api_fetch_release_epub(release_id: int):
         db.finish_background_task(fetch_task_id, "failed", message)
         raise HTTPException(status_code=400, detail=message)
 
-    def _worker() -> str:
+    def _worker():
         fetch_reporter.report(
             total=100, done=35,
             message="Waiting for the fetcher sidecar (Turnstile/countdown)…", force=True,
@@ -2495,12 +2588,19 @@ async def api_fetch_release_epub(release_id: int):
         db.mark_release_downloaded(release_id)
         db.set_download_files(release_id, [target])
         db.log_activity("EPUB_FETCHED", f"Fetched EPUB for {release.get('title')}", target)
+        fetch_reporter.report(total=100, done=95, message="Prefilling EPUB metadata for Calibre…", force=True)
+        try:
+            prefill = prepare_downloaded_epub(db, release, target)
+        except Exception as exc:
+            prefill = None
+            logger.warning("EPUB metadata prefill failed for release #%s: %s", release_id, exc)
+            db.log_activity("EPUB_METADATA_REVIEW", f"Metadata prefill failed for {release.get('title')}", str(exc)[:500])
         fetch_reporter.report(message=f"Saved {os.path.basename(target)}", progress_pct=100, force=True)
-        db.finish_background_task(fetch_task_id, "success", result={"path": target})
-        return target
+        db.finish_background_task(fetch_task_id, "success", result={"path": target, "metadata_review": prefill})
+        return target, prefill
 
     try:
-        path = await asyncio.to_thread(_worker)
+        path, prefill = await asyncio.to_thread(_worker)
     except ValueError as exc:
         _mark_failed(str(exc))
         fetch_reporter.report(message=str(exc), force=True)
@@ -2515,6 +2615,7 @@ async def api_fetch_release_epub(release_id: int):
         raise HTTPException(status_code=500, detail=message) from exc
     return JSONResponse({
         "status": "success", "path": path, "source_link": source, "task_id": fetch_task_id,
+        "metadata_review": prefill,
     })
 
 
@@ -2655,7 +2756,7 @@ async def api_downloader_queue():
 
     qbit = get_qbit_client()
     torrents = await asyncio.to_thread(qbit.get_torrents, category=qbit.category)
-    await asyncio.to_thread(sync_qbit_completed, db, torrents)
+    await asyncio.to_thread(sync_qbit_completed, db, torrents, _tag_qbit_completed)
     return JSONResponse({"status": "success", "torrents": torrents})
 
 @app.get("/api/downloads/status")

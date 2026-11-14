@@ -99,6 +99,34 @@ def test_qbit_completion_sync():
     check(db.get_release_by_id(in_calibre)["status"] == "IN_CALIBRE", db.get_release_by_id(in_calibre))
 
 
+def test_qbit_completion_callback_runs_once():
+    db = make_db()
+    release_id = add_release(db, "qbit-callback")
+    db.update_download_handle(release_id, "qbit", torrent_hash="d" * 40)
+    db.update_downloader_state(release_id, "DOWNLOADING", "qbit")
+    calls = []
+    torrent = {"hash": "d" * 40, "progress": 1.0, "state": "uploading"}
+    sync_qbit_completed(db, [torrent], lambda rel, tor: calls.append(rel["id"]))
+    check(calls == [release_id], calls)
+    sync_qbit_completed(db, [torrent], lambda rel, tor: calls.append(rel["id"]))
+    check(calls == [release_id], calls)
+
+
+def test_downloaded_volume_not_missing_or_wanted():
+    db = make_db()
+    _, release_id = db.upsert_release({
+        "guid": "group-downloaded", "title": "Series Vol. 23 Epub",
+        "link": "https://jnovels.com/group-downloaded/", "series_name": "Grouped Series",
+        "volume": 23.0, "missing_volumes": [23.0],
+    })
+    db.update_release_status(release_id, "DOWNLOADED")
+    groups = db.get_releases_grouped_by_series(limit=10)
+    group = next(g for g in groups if "grouped" in str(g.get("series_name", "")).lower())
+    check(group["has_wanted"] is False, group)
+    check(23.0 not in group["missing_volumes"], group)
+    check(group["has_downloaded"] is True, group)
+
+
 def test_backfill_is_idempotent():
     db = make_db()
     release_id = add_release(db, "done")
@@ -112,6 +140,8 @@ def main():
     test_backfill_completed_and_precedence()
     test_feed_reingest_cannot_downgrade()
     test_qbit_completion_sync()
+    test_qbit_completion_callback_runs_once()
+    test_downloaded_volume_not_missing_or_wanted()
     test_backfill_is_idempotent()
     print("downloaded status suite PASSED")
 

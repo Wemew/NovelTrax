@@ -1480,6 +1480,14 @@ class TorBoxManager:
                 self.db.clear_download_error(release_id)
                 self.db.update_downloader_state(release_id, "COMPLETED", "torbox")
                 self.db.mark_release_downloaded(release_id)
+                try:
+                    from app.epub_prefill import prepare_downloaded_epub
+                    release = self.db.get_release_by_id(release_id)
+                    for path in paths:
+                        if path.lower().endswith(".epub"):
+                            prepare_downloaded_epub(self.db, release or {}, path)
+                except Exception as meta_exc:
+                    logger.debug("EPUB metadata prefill failed for release %s: %s", release_id, meta_exc)
                 self.db.update_torbox_progress(release_id, phase="done")
             except Exception as exc:
                 logger.warning("Could not persist TorBox completion for release %s: %s", release_id, exc)

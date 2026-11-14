@@ -1,0 +1,106 @@
+{% extends "base.html" %}
+
+{% block title %}EPUB Metadata Review - NovelTrax{% endblock %}
+
+{% block content %}
+<div class="space-y-6">
+    <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+        <div>
+            <h1 class="text-2xl font-display font-bold tracking-tight text-white flex items-center gap-2.5">
+                <i data-lucide="badge-check" class="w-6 h-6 text-cyan-400"></i>
+                EPUB Metadata Review
+            </h1>
+            <p class="text-xs text-slate-400 mt-1">
+                Downloaded EPUBs are prefilled from the matching Calibre series and AniList. Review the fields, then approve to rewrite the file metadata for drag-and-drop or Calibre-Web Automated import.
+            </p>
+        </div>
+        <div class="flex items-center gap-2 text-xs">
+            <span class="px-2.5 py-1 rounded-full bg-amber-500/10 text-amber-300 border border-amber-500/20 font-semibold">{{ pending_count }} pending</span>
+            <a href="/downloads" class="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 font-semibold">Downloads</a>
+        </div>
+    </div>
+
+    {% if not reviews %}
+    <div class="bg-darkcard border border-slate-800/80 rounded-2xl p-10 text-center text-sm text-slate-400">
+        <i data-lucide="inbox" class="w-8 h-8 mx-auto mb-2 text-slate-600"></i>
+        No EPUB metadata reviews yet. Fetch an EPUB and it will appear here.
+    </div>
+    {% else %}
+    <div class="space-y-4">
+        {% for review in reviews %}
+        <div class="bg-darkcard border border-slate-800/80 rounded-2xl p-5 shadow-lg space-y-4" data-review-id="{{ review.id }}">
+            <div class="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
+                <div class="min-w-0">
+                    <div class="flex items-center gap-2 flex-wrap">
+                        <span class="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full {% if review.review_status == 'approved' %}bg-emerald-500/15 text-emerald-300 border-emerald-500/30{% else %}bg-amber-500/15 text-amber-300 border-amber-500/30{% endif %}">
+                            {{ review.review_status }}
+                        </span>
+                        {% if review.is_new_volume %}
+                        <span class="text-[10px] font-extrabold uppercase tracking-wider px-2 py-0.5 rounded-full bg-cyan-500/15 text-cyan-300 border border-cyan-500/30">
+                            New volume
+                        </span>
+                        {% endif %}
+                        <span class="text-[10px] text-slate-500 font-mono">{{ review.source or 'release' }}</span>
+                    </div>
+                    <p class="text-xs text-slate-400 font-mono mt-1 truncate" title="{{ review.file_path }}">{{ review.file_path }}</p>
+                    {% if review.note %}<p class="text-[11px] text-amber-300 mt-1">{{ review.note }}</p>{% endif %}
+                </div>
+                <a href="/releases?status=DOWNLOADED" class="text-[11px] text-brand-400 hover:text-brand-300 font-semibold whitespace-nowrap">View downloaded releases</a>
+            </div>
+
+            <div class="grid grid-cols-1 md:grid-cols-12 gap-3">
+                <div class="md:col-span-6">
+                    <label class="block text-[10px] uppercase tracking-wider text-slate-500 font-semibold mb-1">Title</label>
+                    <input id="review-title-{{ review.id }}" value="{{ review.title or '' }}" class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-brand-500">
+                </div>
+                <div class="md:col-span-3">
+                    <label class="block text-[10px] uppercase tracking-wider text-slate-500 font-semibold mb-1">Series</label>
+                    <input id="review-series-{{ review.id }}" value="{{ review.series or '' }}" class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-brand-500">
+                </div>
+                <div class="md:col-span-1">
+                    <label class="block text-[10px] uppercase tracking-wider text-slate-500 font-semibold mb-1">Vol</label>
+                    <input id="review-index-{{ review.id }}" value="{{ review.series_index if review.series_index is not none else '' }}" inputmode="decimal" class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-brand-500">
+                </div>
+                <div class="md:col-span-2">
+                    <label class="block text-[10px] uppercase tracking-wider text-slate-500 font-semibold mb-1">Author</label>
+                    <input id="review-author-{{ review.id }}" value="{{ review.author or '' }}" class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-brand-500">
+                </div>
+            </div>
+
+            <div class="flex items-center justify-end gap-2">
+                <button type="button" onclick="approveMetadata({{ review.id }}, this)" class="px-3.5 py-1.5 rounded-xl bg-brand-600 hover:bg-brand-500 text-white text-xs font-semibold flex items-center gap-1.5 transition-colors">
+                    <i data-lucide="check" class="w-3.5 h-3.5"></i>
+                    Save &amp; approve
+                </button>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    {% endif %}
+</div>
+
+<script>
+async function approveMetadata(reviewId, button) {
+    const title = document.getElementById('review-title-' + reviewId).value;
+    const author = document.getElementById('review-author-' + reviewId).value;
+    const series = document.getElementById('review-series-' + reviewId).value;
+    const seriesIndex = document.getElementById('review-index-' + reviewId).value;
+    if (button) button.disabled = true;
+    try {
+        const res = await fetch('/api/metadata-review/' + reviewId, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ title, author, series, series_index: seriesIndex }),
+        });
+        const data = await res.json();
+        if (!res.ok) { showToast(data.detail || 'Metadata update failed', 'error'); return; }
+        showToast('EPUB metadata updated and approved', 'success');
+        setTimeout(() => location.reload(), 900);
+    } catch (err) {
+        showToast('Metadata update failed: ' + err, 'error');
+    } finally {
+        if (button) button.disabled = false;
+    }
+}
+</script>
+{% endblock %}

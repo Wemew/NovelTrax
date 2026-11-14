@@ -9,7 +9,7 @@ COMPLETE_STATES = frozenset({
 })
 
 
-def sync_qbit_completed(db: Any, torrents: Iterable[Dict[str, Any]]) -> int:
+def sync_qbit_completed(db: Any, torrents: Iterable[Dict[str, Any]], on_completed=None) -> int:
     """Mark matching releases COMPLETED/DOWNLOADED for finished torrents."""
     updated = 0
     for torrent in torrents or []:
@@ -31,8 +31,14 @@ def sync_qbit_completed(db: Any, torrents: Iterable[Dict[str, Any]]) -> int:
         release_id = int(release.get("id") or 0)
         if not release_id:
             continue
-        if release.get("download_status") != "COMPLETED":
+        newly_completed = release.get("download_status") != "COMPLETED"
+        if newly_completed:
             db.update_downloader_state(release_id, "COMPLETED", "qbit")
         db.mark_release_downloaded(release_id)
+        if newly_completed and on_completed is not None:
+            try:
+                on_completed(release, torrent)
+            except Exception:
+                pass
         updated += 1
     return updated

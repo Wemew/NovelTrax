@@ -494,6 +494,20 @@ class NovelMetadataProvider:
             if cleaned_value and cleaned_value not in synonyms:
                 synonyms.append(cleaned_value)
 
+        authors = []
+        for edge in ((media.get("staff") or {}).get("edges") or []):
+            try:
+                role = str((edge or {}).get("role") or "").lower()
+                name = str((((edge or {}).get("node") or {}).get("name") or {}).get("full") or "").strip()
+            except Exception:
+                continue
+            if not name:
+                continue
+            if "art" in role:
+                continue
+            if "story" in role or "original" in role or "author" in role:
+                if name not in authors:
+                    authors.append(name)
         result = {
             "title": preferred_title,
             "english_title": clean_en or None,
@@ -502,6 +516,7 @@ class NovelMetadataProvider:
             "native_title": clean_native or None,
             "synonyms": synonyms,
             "anilist_id": media.get("id"),
+            "author": ", ".join(authors[:2]),
             "synopsis": desc or "",
             "cover_url": cover,
             "source": "AniList",
@@ -548,6 +563,12 @@ class NovelMetadataProvider:
             coverImage {
               large
               extraLarge
+            }
+            staff(perPage: 5) {
+              edges {
+                role
+                node { name { full } }
+              }
             }
           }
         }
@@ -610,6 +631,12 @@ class NovelMetadataProvider:
             coverImage {
               large
               extraLarge
+            }
+            staff(perPage: 5) {
+              edges {
+                role
+                node { name { full } }
+              }
             }
           }
         }

@@ -370,6 +370,9 @@
                             <i data-lucide="chevron-down" class="w-3.5 h-3.5 opacity-70"></i>
                         </button>
                         <div id="nav-menu-system" data-dropdown-menu role="menu" class="hidden absolute left-0 mt-2 w-52 bg-darkcard border border-slate-800 rounded-xl shadow-2xl p-1.5 z-50">
+                            <a href="/metadata-review" role="menuitem" class="nav-tab flex items-center gap-2 px-3 py-2 rounded-lg text-sm {% if active_page == 'metadata-review' %}bg-slate-800 text-brand-400{% else %}text-slate-300 hover:bg-slate-800/70 hover:text-white{% endif %}">
+                                <i data-lucide="badge-check" class="w-4 h-4"></i> Metadata Review
+                            </a>
                             <a href="/logs" role="menuitem" class="nav-tab flex items-center gap-2 px-3 py-2 rounded-lg text-sm {% if active_page == 'logs' %}bg-slate-800 text-brand-400{% else %}text-slate-300 hover:bg-slate-800/70 hover:text-white{% endif %}">
                                 <i data-lucide="scroll-text" class="w-4 h-4"></i> Logs
                             </a>
@@ -439,6 +442,9 @@
             <p class="px-3 pt-3 pb-1 text-[10px] uppercase tracking-wider text-slate-400 font-semibold">Downloads &amp; System</p>
             <a href="/downloads" class="nav-tab flex items-center gap-2.5 min-h-[44px] px-3 rounded-lg text-sm font-medium {% if active_page == 'downloads' %}bg-slate-800 text-brand-400{% else %}text-slate-300 hover:bg-slate-800/70 hover:text-white{% endif %}">
                 <i data-lucide="download-cloud" class="w-4 h-4 text-cyan-400"></i> Downloads
+            </a>
+            <a href="/metadata-review" class="nav-tab flex items-center gap-2.5 min-h-[44px] px-3 rounded-lg text-sm font-medium {% if active_page == 'metadata-review' %}bg-slate-800 text-brand-400{% else %}text-slate-300 hover:bg-slate-800/70 hover:text-white{% endif %}">
+                <i data-lucide="badge-check" class="w-4 h-4"></i> Metadata Review
             </a>
             <a href="/logs" class="nav-tab flex items-center gap-2.5 min-h-[44px] px-3 rounded-lg text-sm font-medium {% if active_page == 'logs' %}bg-slate-800 text-brand-400{% else %}text-slate-300 hover:bg-slate-800/70 hover:text-white{% endif %}">
                 <i data-lucide="scroll-text" class="w-4 h-4"></i> Logs
