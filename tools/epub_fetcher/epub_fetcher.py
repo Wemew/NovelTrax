@@ -373,7 +373,9 @@ def _submit_turnstile_form(page, token: str = "") -> bool:
             (el) => setTimeout(() => {
                 const form = el.closest('form');
                 if (!form) return;
-                const button = form.querySelector('button[type="submit"], input[type="submit"]');
+                const buttons = Array.from(form.querySelectorAll('button[type="submit"], input[type="submit"]'));
+                const button = buttons.find((b) => !b.disabled && b.getClientRects().length)
+                    || buttons.find((b) => !b.disabled);
                 if (button && form.requestSubmit) {
                     form.requestSubmit(button);
                     return;
@@ -438,26 +440,38 @@ def _visible_controls(page) -> List[str]:
 
 def _click_label(page, label: str, occurrence: int = 0) -> bool:
     pattern = re.compile(r"^\s*" + re.escape(label) + r"\s*$", re.IGNORECASE)
+
+    def click_nth(locator) -> bool:
+        seen = 0
+        try:
+            count = locator.count()
+        except Exception:
+            return False
+        for index in range(count):
+            try:
+                candidate = locator.nth(index)
+                if not candidate.is_visible() or not candidate.is_enabled():
+                    continue
+                if seen == occurrence and candidate.click(timeout=2000):
+                    return True
+                seen += 1
+            except Exception:
+                continue
+        return False
+
     for role in ("button", "link"):
         try:
-            locator = page.get_by_role(role, name=pattern)
-            if occurrence < locator.count():
-                candidate = locator.nth(occurrence)
-                if candidate.is_visible() and candidate.is_enabled():
-                    candidate.click(timeout=2000)
-                    return True
+            if click_nth(page.get_by_role(role, name=pattern)):
+                return True
         except Exception:
             continue
     # Shortener countdown controls are sometimes plain spans/divs with an
     # onclick handler rather than semantic buttons or links.
-    if occurrence == 0:
-        try:
-            locator = page.get_by_text(label, exact=True).first
-            if locator.count() and locator.is_visible() and locator.is_enabled():
-                locator.click(timeout=2000)
-                return True
-        except Exception:
-            pass
+    try:
+        if click_nth(page.get_by_text(label, exact=True)):
+            return True
+    except Exception:
+        pass
     return False
 
 
@@ -978,8 +992,18 @@ def fetch(
                             """
                             (el) => setTimeout(() => {
                                 const form = el.closest('form');
-                                const button = form && form.querySelector('button[type="submit"]');
-                                if (form) form.requestSubmit(button);
+                                if (!form) return;
+                                const buttons = Array.from(form.querySelectorAll('button[type="submit"]'));
+                                const button = buttons.find((b) => !b.disabled && b.getClientRects().length)
+                                    || buttons.find((b) => !b.disabled);
+                                if (button) {
+                                    form.requestSubmit(button);
+                                } else if (!buttons.length) {
+                                    // Hidden-token forms occasionally have no
+                                    // submit control; only submit those when no
+                                    // control exists at all.
+                                    form.requestSubmit();
+                                }
                             }, 0);
                             """,
                         )
