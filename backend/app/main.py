@@ -1225,9 +1225,51 @@ async def audiobooks_view(request: Request):
 
 # --- API Endpoints ---
 
+def _sync_download_tasks() -> None:
+    """Project active transfers into persisted task rows and close finished ones."""
+    active = db.list_active_downloads(50)
+    active_ids = set()
+    for release in active:
+        release_id = int(release.get("id") or 0)
+        if not release_id:
+            continue
+        active_ids.add(str(release_id))
+        state = release_download_state(release)
+        task = db.find_background_task_by_scope("download", str(release_id))
+        if not task or task.get("status") not in ("queued", "running"):
+            task_id = db.create_background_task(
+                "download", f"Transfer: {release.get('title') or release_id}",
+                scope=str(release_id), status="running",
+            )
+        else:
+            task_id = int(task["id"])
+        progress = state.get("progress_pct") or 0.0
+        db.update_background_task(
+            task_id,
+            total=1 if progress > 0 else 0,
+            done=1 if progress > 0 else 0,
+            progress_pct=progress,
+            message=f"{state.get('label')} · {state.get('engine') or 'downloader'}",
+        )
+    for task in db.list_background_tasks(active_only=True, kind="download", limit=200):
+        scope = str(task.get("scope") or "")
+        if scope in active_ids:
+            continue
+        try:
+            release = db.get_release_by_id(int(scope))
+        except (TypeError, ValueError):
+            release = None
+        if release and release.get("download_status") == "COMPLETED":
+            db.finish_background_task(int(task["id"]), "success")
+        else:
+            message = (release or {}).get("download_error") or "Transfer is no longer active"
+            db.finish_background_task(int(task["id"]), "failed", message)
+
+
 @app.get("/api/tasks")
 async def api_tasks(active: int = Query(0, ge=0, le=1), kind: Optional[str] = None,
                     limit: int = Query(50, ge=1, le=200)):
+    await asyncio.to_thread(_sync_download_tasks)
     rows = await asyncio.to_thread(db.list_background_tasks, bool(active), kind, limit)
     tasks = [background_tasks.serialize_task(task) for task in rows]
     for task in tasks:
@@ -1235,33 +1277,10 @@ async def api_tasks(active: int = Query(0, ge=0, le=1), kind: Optional[str] = No
             task["cancellable"] = background_tasks.cancel_supported(int(task.get("id")))
         except (TypeError, ValueError):
             task["cancellable"] = False
-    if not kind or kind == "download":
-        for release in await asyncio.to_thread(db.list_active_downloads, min(limit, 50)):
-            state = release_download_state(release)
-            tasks.append({
-                "id": f"download-{release.get('id')}",
-                "kind": "download",
-                "title": f"Transfer: {release.get('title') or release.get('id')}",
-                "scope": str(release.get("id") or ""),
-                "status": "running",
-                "active": True,
-                "cancellable": False,
-                "progress_pct": state.get("progress_pct") or 0.0,
-                "items_total": 1 if (state.get("progress_pct") or 0) > 0 else 0,
-                "message": f"{state.get('label')} · {state.get('engine') or 'downloader'}",
-                "attempts": 1,
-                "error": state.get("error") or "",
-                "started_at": release.get("downloader_started_at") or release.get("updated_at") or "",
-                "elapsed_seconds": 0.0,
-                "eta_seconds": None,
-                "result": {},
-                "synthetic": True,
-            })
-    tasks.sort(key=lambda item: str(item.get("started_at") or ""), reverse=True)
     return JSONResponse({
         "status": "success",
         "active_count": len([task for task in tasks if task.get("active")]),
-        "tasks": tasks[:limit],
+        "tasks": tasks,
     })
 
 

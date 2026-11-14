@@ -3824,6 +3824,15 @@ class Database:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def find_background_task_by_scope(self, kind: str, scope: str) -> Optional[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM background_tasks WHERE kind = ? AND scope = ? "
+                "ORDER BY id DESC LIMIT 1;",
+                (str(kind), str(scope)),
+            ).fetchone()
+        return dict(row) if row else None
+
     def prune_background_tasks(self, days: int = 7) -> int:
         try:
             days = max(1, int(days))
