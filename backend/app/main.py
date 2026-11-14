@@ -70,6 +70,10 @@ torbox_manager = TorBoxManager(db)
 # so /api/tasks and the rest of the app stay responsive.
 _EPUB_FETCH_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="epub-fetch")
 _EPUB_POST_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="epub-post")
+# Two pipeline slots = at most one downloaded body in post-processing and one
+# being fetched. Without this, the fetch stage could queue many 30-40 MB EPUBs
+# in memory while prepare_downloaded_epub waits on AniList/Kitsu.
+_EPUB_PIPELINE_SLOTS = asyncio.Semaphore(2)
 _EPUB_SOURCE_LOCK = asyncio.Lock()
 
 def get_qbit_client() -> QBitClient:
@@ -2667,14 +2671,15 @@ async def api_fetch_release_epub(release_id: int):
             message="Queued for the EPUB fetcher…", force=True,
         )
         loop = asyncio.get_running_loop()
-        content, disposition = await loop.run_in_executor(_EPUB_FETCH_EXECUTOR, _fetch_worker)
-        fetch_reporter.report(
-            total=100, done=75,
-            message="Download received; queued for validation…", force=True,
-        )
-        path, prefill = await loop.run_in_executor(
-            _EPUB_POST_EXECUTOR, _post_worker, content, disposition
-        )
+        async with _EPUB_PIPELINE_SLOTS:
+            content, disposition = await loop.run_in_executor(_EPUB_FETCH_EXECUTOR, _fetch_worker)
+            fetch_reporter.report(
+                total=100, done=75,
+                message="Download received; queued for validation…", force=True,
+            )
+            path, prefill = await loop.run_in_executor(
+                _EPUB_POST_EXECUTOR, _post_worker, content, disposition
+            )
     except ValueError as exc:
         _mark_failed(str(exc))
         fetch_reporter.report(message=str(exc), force=True)
