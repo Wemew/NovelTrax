@@ -285,7 +285,7 @@ bar on phones.
    - Every release row and every series-card release exposes a compact **Re-bind** action (`git-branch` icon, class `.release-rebind-btn`) that opens the shared **Re-bind series** modal (`#release-rebind-modal`). The modal offers three modes: **Bind to an existing series** (searchable picker across tracked series and Calibre series — `GET /api/series?search=` + `GET /api/calibre/series?search=`), **Re-index under a new title — not this series and not any previous series**, and **Detach as a new standalone series**. The picker search is debounced at **500 ms** and aborts stale in-flight requests, so fast typing never queues redundant Calibre/tracked-series scans (the Settings series-identity search and the Series-page match modal keep their 250 ms debounce).
    - Choose **Remember this mapping for future releases** (unchecked by default: only this release is re-bound) and the release is pinned per release: its stored series survives later feed re-ingestion, identity canonicalisation, AniList enrichment and series merges. Check the box to also save the mapping as a global alias override, so future releases of the old title follow it automatically. The apply call is `POST /api/releases/{release_id}/rebind` (`mode` = `bind`/`new_title`/`detach`, optional `target_name`, `calibre_series_id`, `remember`). A pinned release shows a cyan **Pinned** badge (`.release-pinned-badge`, "Series manually re-bound") next to its series name and can be un-pinned from the modal (`POST /api/releases/{release_id}/unpin`; automatic matching resumes).
    - **Different series** creates a brand-new tracked series row with `identity_locked=1`, `match_source='manual-new'` and no alias back to the old spelling — the new title must be genuinely new (the server rejects a title that normalises to the current series or to any existing tracked series/display title/alias).
-   - **Per-series reset (Settings → Series identity & overrides)**: search any tracked series and press **Reset identity** (two-step confirm, `POST /api/series/{series_id}/reset-identity`) to forget manual/learned aliases, AniList display data, the manual lock and per-release pins for that series, after which automatic matching takes over again. Reset is per series only — there is no global destructive reset. The same card lists the global alias overrides (`GET /api/series/aliases`, delete via `DELETE /api/series/aliases/{override_id}`) and offers an **Attribution audit** (`GET /api/maintenance/series-attribution`) that flags releases whose stored series no longer matches the automatic parse and lets you Re-bind them directly. **Series identity & overrides** and **Global alias overrides** are both collapsed by default and load their data lazily when expanded; each has a 250 ms-debounced search (the alias search filters the loaded mappings by old title, new title or origin). The attribution audit stops early on very large libraries and reports a partial/truncated scan instead of timing out, and the UI explains an HTML reverse-proxy error page instead of failing with a JSON parse error. Release titles are never changed by a reset.
+   - **Per-series reset (Settings → Series identity & overrides)**: search any tracked series and press **Reset identity** (two-step confirm, `POST /api/series/{series_id}/reset-identity`) to forget manual/learned aliases, AniList display data, the manual lock and per-release pins for that series, after which automatic matching takes over again. Reset is per series here; the full catalog reset is the CLI documented under **Factory reset / clean catalog**. The same card lists the global alias overrides (`GET /api/series/aliases`, delete via `DELETE /api/series/aliases/{override_id}`) and offers an **Attribution audit** (`GET /api/maintenance/series-attribution`) that flags releases whose stored series no longer matches the automatic parse and lets you Re-bind them directly. **Series identity & overrides** and **Global alias overrides** are both collapsed by default and load their data lazily when expanded; each has a 250 ms-debounced search (the alias search filters the loaded mappings by old title, new title or origin). The attribution audit stops early on very large libraries and reports a partial/truncated scan instead of timing out, and the UI explains an HTML reverse-proxy error page instead of failing with a JSON parse error. Release titles are never changed by a reset.
    - **Manual AniList identity (Series → Manage)**: paste an AniList manga URL (or just its numeric id) into **AniList URL or id** and press **Map AniList** (`POST /api/series/{series_id}/anilist`). The id is queried exactly (`Media(id:)`), never through fuzzy title search, so it cannot drift to a similarly named spin-off. The chosen entry replaces the display title, synonyms and publication index; `anilist_locked=1` then prevents automatic enrichment from re-applying a wrong title-search result. **Clear wrong AniList metadata** removes the id, stored titles, AniList-derived aliases and cached search result, and also sets the lock. Re-enable automatic discovery with **Allow automatic AniList discovery**.
 
 6c. **AniList Publication Metadata & Nyaa Bundle Volume Inference**:
@@ -306,6 +306,24 @@ A false **In Calibre** link happens when automatic matching (AniList synonyms, r
 Neither action destroys the tracker's identity: the stable tracking name, display title, AniList metadata, alias overrides, per-release pins and identity locks are preserved. After repairing, use the row's **Match Calibre** action to link the series to the correct Calibre entry (or leave it unlinked so it is treated as not-owned). Both actions are also available per linked row in **Settings → Series identity & overrides** ("Unlink Calibre"). Recommended workflow: run **Recheck Calibre** first when the link may be valid but the ownership data is stale; use **Unlink Calibre** when the link is plainly the wrong series.
 
 ---
+
+## Factory reset / clean catalog
+
+To clear every release, tracked series/Calibre link, alias/synonym mapping,
+metadata cache, blacklist, review/task row and audit entry while preserving
+deployment settings (paths, downloader/provider credentials), rebuild/pull the
+image first and run inside the container:
+
+```bash
+docker exec -it noveltrax python -m app.reset_data --yes
+```
+
+The reset writes a timestamped SQLite snapshot to
+`data/backups/noveltrax-pre-reset-<UTC>.db` before deleting anything; a backup
+failure aborts the reset. It reseeds the two stock feeds and five prioritized
+groups. It never deletes EPUB, download, or Calibre files. Existing running
+containers keep the old code until rebuilt, so the CLI is the reliable path for
+this workspace build.
 
 ## 🧪 Testing Locally
 

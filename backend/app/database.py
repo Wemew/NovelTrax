@@ -4,6 +4,7 @@ import math
 import sqlite3
 import json
 import logging
+import time
 from datetime import datetime
 from typing import List, Dict, Any, Optional, Tuple, Set, Union, Sequence
 
@@ -6442,3 +6443,118 @@ class Database:
             count = cur.rowcount
             conn.commit()
             return count
+
+    def reset_all_data(self, actor: str = "system") -> Dict[str, Any]:
+        """Factory-reset the catalog while preserving deployment configuration.
+
+        Clears releases, tracked series/Calibre links, aliases/synonyms, metadata
+        caches, blacklist, prioritized/feed state, review/task rows and audit logs.
+        ``app_settings`` (paths, downloader credentials, provider config) is kept.
+        Writes a timestamped SQLite snapshot under ``data/backups`` before deleting
+        anything; a backup failure aborts the reset.
+        """
+        backup_path = ""
+        db_file = str(getattr(self, "db_path", "") or "")
+        if db_file and db_file != ":memory:" and os.path.isfile(db_file):
+            backup_dir = os.path.join(os.path.dirname(os.path.abspath(db_file)), "backups")
+            os.makedirs(backup_dir, exist_ok=True)
+            stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
+            backup_path = os.path.join(backup_dir, f"noveltrax-pre-reset-{stamp}.db")
+            self.backup_database(backup_path)
+
+        # ``prioritized_groups`` is created lazily on first use; ensure it exists
+        # before the wipe so the fresh-install seed below cannot fail.
+        self.ensure_prioritized_groups_table()
+
+        cleared: Dict[str, int] = {}
+        catalog_tables = (
+            "epub_metadata_reviews",
+            "background_tasks",
+            "release_media_cache",
+            "novel_metadata_cache",
+            "series_alias_overrides",
+            "series_blacklist",
+            "series_tracking",
+            "releases",
+            "activity_logs",
+            "feeds",
+            "prioritized_groups",
+        )
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            for table in catalog_tables:
+                try:
+                    cur.execute(f"DELETE FROM {table};")
+                    cleared[table] = max(int(cur.rowcount), 0)
+                except sqlite3.OperationalError as exc:
+                    if "no such table" not in str(exc).lower():
+                        raise
+                    cleared[table] = 0
+            try:
+                placeholders = ",".join("?" for _ in catalog_tables)
+                cur.execute(
+                    f"DELETE FROM sqlite_sequence WHERE name IN ({placeholders});",
+                    catalog_tables,
+                )
+            except sqlite3.OperationalError as exc:
+                if "no such table" not in str(exc).lower():
+                    raise
+
+            for key in (
+                "backfill_status", "backfill_progress", "backfill_last_page",
+                "backfill_nyaa_next_page", "backfill_nyaa_done",
+                "groups_backfill_applied", "chapter_filter_applied",
+                "media_filter_applied", "stable_key_repair_applied",
+                "torbox_last_poll_at",
+            ):
+                try:
+                    cur.execute("DELETE FROM app_settings WHERE key = ?;", (key,))
+                except sqlite3.OperationalError as exc:
+                    if "no such table" not in str(exc).lower():
+                        raise
+
+            # Fresh-install seeds (same values as init_db).
+            cur.executemany(
+                "INSERT INTO prioritized_groups (name, notes, priority) VALUES (?, ?, ?);",
+                (
+                    ("Yen Press", "Official English light novel publisher (Yen On)", 1),
+                    ("J-Novel Club", "Digital-first light novel publisher & translations", 1),
+                    ("Seven Seas", "Official digital light novels (Airship)", 1),
+                    ("Stick", "High quality digital light novel releases", 1),
+                    ("One Peace Books", "Official light novel releases", 1),
+                ),
+            )
+            cur.execute("""
+                INSERT INTO feeds (name, feed_type, url, config_json, enabled, auto_request, check_interval_minutes)
+                VALUES (?, ?, ?, ?, 1, 1, 60);
+            """, (
+                "J-Novels EPUB Releases", "jnovels", "https://jnovels.com/?s=epub",
+                json.dumps({
+                    "description": "Monitors J-Novels for newly posted light novel and web novel EPUB releases.",
+                    "max_pages": 3,
+                }),
+            ))
+            cur.execute("""
+                INSERT INTO feeds (name, feed_type, url, config_json, enabled, auto_request, check_interval_minutes)
+                VALUES (?, ?, ?, ?, 1, 1, 60);
+            """, (
+                "Nyaa Light Novels (3_1)", "nyaa", "https://nyaa.si/?page=rss&c=3_1",
+                json.dumps({
+                    "category": "3_1",
+                    "max_pages": 2,
+                    "delay_seconds": 1.5,
+                    "description": "Monitors Nyaa (Category 3_1: Literature - English-translated) for light novel releases.",
+                }),
+            ))
+            cur.execute(
+                "INSERT INTO activity_logs (event_type, message, details) VALUES (?, ?, ?);",
+                ("SYSTEM_RESET", "Catalog, mappings, aliases, releases and caches reset.",
+                 f"actor={str(actor or 'system')}; backup={backup_path}"),
+            )
+            conn.commit()
+            return {
+                "status": "success",
+                "message": "All catalog data, mappings, aliases and caches have been reset successfully.",
+                "cleared": cleared,
+                "backup_path": backup_path,
+            }

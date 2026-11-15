@@ -458,7 +458,7 @@
             </div>
             <div>
                 <input type="text" id="series-identity-search" autocomplete="off" placeholder="Search by series name, display title or author..." oninput="debounceSeriesIdentitySearch()" class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-brand-500">
-                <p class="text-[11px] text-slate-500 mt-1">Resets are per series. A global destructive reset is intentionally not offered.</p>
+                <p class="text-[11px] text-slate-500 mt-1">These reset identity for one series. For a full catalog wipe use the documented CLI reset (<code>python -m app.reset_data --yes</code>).</p>
             </div>
 
             <div id="series-identity-results" class="space-y-2">
