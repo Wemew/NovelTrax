@@ -657,6 +657,7 @@ def fetch(
         tried_download_links = set()
         consent_dismissed = False
         pages: List[Any] = []
+        flare_retries = 0
 
         def attach(page) -> None:
             pages.append(page)
@@ -752,6 +753,16 @@ def fetch(
                     current_url = page.url
                 except Exception:
                     current_url = ""
+
+                # Chrome throttles timers in background tabs. go.kecapku's
+                # countdown can freeze when an ad popup steals focus, leaving
+                # the page stuck at "10 Seconds" until the idle guard fires.
+                wait_signature = _wait_countdown_signature(body_text)
+                if wait_signature is not None:
+                    try:
+                        page.bring_to_front()
+                    except Exception:
+                        pass
 
                 # Some link hiders gate a POST form behind a standalone
                 # Turnstile. The destination is only valid after the widget
@@ -911,6 +922,20 @@ def fetch(
                             continue
                         steps.append("turnstile-token-injection-failed")
                     if _has_turnstile_form(page) and not solution_token and solution_url == current_url:
+                        # FlareSolverr occasionally times out at 90s before the
+                        # widget issues a token. Reload and try one fresh solve
+                        # while there is budget for another browser pass.
+                        if flare_retries < 1 and (deadline - time.monotonic()) > 45:
+                            flare_retries += 1
+                            steps.append("flare-retry")
+                            logger.warning("Retrying FlareSolverr after an empty token for %s", current_url)
+                            try:
+                                page.reload(wait_until="domcontentloaded", timeout=45000)
+                            except Exception:
+                                pass
+                            time.sleep(2.0)
+                            cleared_urls.discard(current_url)
+                            continue
                         raise FetchError(
                             "Turnstile form did not issue a token; the source may be an ad or expired shortener"
                             f" (flow: {' > '.join(steps[-8:])})"
@@ -1045,7 +1070,7 @@ def fetch(
                     current_url,
                     tuple(labels),
                     countdown_pct,
-                    _wait_countdown_signature(body_text),
+                    wait_signature,
                     bool(href),
                     bool(challenge_markers),
                     delay_present,
