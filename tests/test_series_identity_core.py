@@ -31,6 +31,7 @@ which raises ``AssertionError`` (Calibre's interpreter runs with ``-O2``).
 
 import gc
 import json
+import inspect
 import os
 import shutil
 import sys
@@ -1261,8 +1262,15 @@ def test_metadata_provider_title_keys():
         check_equal(anilist["anilist_id"], 98765, "query_anilist anilist_id parsed")
         check_equal(anilist["source"], "AniList", "query_anilist source is AniList")
         check_equal(anilist["synopsis"], "", "missing description becomes an empty synopsis")
-        graphql = metadata_module.NovelMetadataProvider.query_anilist.__doc__ or ""
-        check(bool(graphql), "query_anilist is documented")
+        # Calibre's interpreter runs with -OO, which strips runtime docstrings from
+        # imported modules.  Verify the documentation from source instead.
+        try:
+            graphql = inspect.getsource(
+                metadata_module.NovelMetadataProvider.query_anilist.__func__
+            )
+        except (OSError, TypeError):
+            graphql = ""
+        check("Queries AniList GraphQL API" in graphql, "query_anilist is documented")
 
         kitsu_payload = {
             "data": [

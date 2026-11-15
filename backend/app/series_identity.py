@@ -81,7 +81,8 @@ _DISTINGUISHING_TOKENS = {"mobs", "mob"}
 # Alternate title separators: "A | B", "A / B", "A // B", "A; B", "A – B", "A — B".
 # Colon is deliberately NOT a default delimiter: the whole title is always kept
 # and colon parts/prefixes are only added as EXTRA (lower priority) candidates.
-_CANDIDATE_SPLIT_RE = re.compile(r"\s*[|/]\s*|\s*;\s*|\s+[–—]\s+")
+_CANDIDATE_SPLIT_RE = re.compile(r"\s*[|/]\s*|\s*;\s*|\s+[–—-]\s+")
+_DASH_SPLIT_RE = re.compile(r"\s+-\s+")
 _COLON_SPLIT_RE = re.compile(r"\s*[:：]\s*")
 _PAREN_CONTENT_RE = re.compile(r"\(([^()]+)\)")
 _BRACE_TAG_RE = re.compile(r"\{[^{}]*\}")
@@ -228,18 +229,39 @@ def _split_parts(title: str) -> List[str]:
 
 
 def _colon_variants(title: str) -> List[str]:
-    """Colon parts and progressive colon prefixes, longest/most specific first."""
+    """Colon suffixes first, then progressive prefixes, then the bare base.
+
+    A colon suffix is the spinoff's own title ("Parent: Spinoff"), so it must be
+    tried before the parent prefix.  A genuine subtitle ("Failure Frame: I Became
+    ...") still falls back to the parent prefix when no suffix entry exists.
+    """
     parts = [part.strip() for part in _COLON_SPLIT_RE.split(title or "") if part.strip()]
     if len(parts) < 2:
         return []
     variants: List[str] = []
-    # Full prefixes (A: B, A: B: C ...) longest first; the whole title is added
-    # by the caller, so start at len-1.
+    # Most specific suffix first, then earlier colon parts.
+    variants.extend(reversed(parts[1:]))
+    # Progressive prefixes (longest to shortest); the whole title is added by caller.
     for length in range(len(parts) - 1, 1, -1):
         variants.append(": ".join(parts[:length]))
-    # Individual parts last (least specific).
-    variants.extend(parts)
+    variants.append(parts[0])
     return variants
+
+
+def _colon_suffix_parts(title: str) -> List[str]:
+    """Colon suffixes only (never the parent prefix)."""
+    parts = [part.strip() for part in _COLON_SPLIT_RE.split(str(title or "")) if part.strip()]
+    if len(parts) < 2:
+        return []
+    return list(reversed(parts[1:]))
+
+
+def _dash_suffix_parts(title: str) -> List[str]:
+    """The asymmetric spaced-hyphen suffix ("Parent - Spinoff" -> Spinoff)."""
+    parts = [part.strip() for part in _DASH_SPLIT_RE.split(str(title or "")) if part.strip()]
+    if len(parts) < 2:
+        return []
+    return [parts[-1]]
 
 
 def _structural_variants(title: str) -> List[str]:
@@ -247,6 +269,7 @@ def _structural_variants(title: str) -> List[str]:
     if not title:
         return []
     variants: List[str] = []
+    variants.extend(_dash_suffix_parts(title))
     variants.extend(_split_parts(title))
     variants.extend(_colon_variants(title))
     variants.extend(_parenthetical_parts(title))
@@ -511,6 +534,7 @@ class CalibreSeriesIndex:
         if raw:
             cleaned = clean_series_for_matching(raw)
             values.append(cleaned)
+            values.extend(_dash_suffix_parts(raw))
             values.extend(_split_parts(raw))
             values.extend(_colon_variants(raw))
             values.extend(_parenthetical_parts(raw))
@@ -696,6 +720,53 @@ class CalibreSeriesIndex:
         return best_series
 
     # -- public API -----------------------------------------------------
+    @staticmethod
+    def _own_suffix_norms(
+        extracted_series: str,
+        alt_names: Optional[Sequence[str]] = None,
+    ) -> Set[str]:
+        """Colon/dash suffixes that are also own aliases (distinct-title signal)."""
+        alts = {
+            normalize_text(str(alt))
+            for alt in (alt_names or [])
+            if isinstance(alt, str) and normalize_text(str(alt))
+        }
+        if not alts:
+            return set()
+        suffix_norms: Set[str] = set()
+        for value in _colon_suffix_parts(str(extracted_series or "")) + _dash_suffix_parts(str(extracted_series or "")):
+            norm = normalize_text(value)
+            if norm and norm in alts:
+                suffix_norms.add(norm)
+        return suffix_norms
+
+    @staticmethod
+    def _strict_candidates(
+        extracted_series: str,
+        alt_names: Optional[Sequence[str]] = None,
+    ) -> List[str]:
+        """Whole title, suffixes and cleaned spelling; own aliases only if unambiguous."""
+        raw = str(extracted_series or "").strip()
+        own_suffixes = CalibreSeriesIndex._own_suffix_norms(raw, alt_names)
+        values: List[Any] = [raw]
+        if raw:
+            values.append(clean_series_for_matching(raw))
+            values.extend(_colon_suffix_parts(raw))
+            values.extend(_dash_suffix_parts(raw))
+        if not own_suffixes:
+            values.extend(str(alt) for alt in (alt_names or []) if isinstance(alt, str))
+        candidates: List[str] = []
+        seen: Set[str] = set()
+        for value in values:
+            if not _acceptable_candidate(value):
+                continue
+            norm = normalize_text(value)
+            if norm in seen:
+                continue
+            seen.add(norm)
+            candidates.append(value.strip())
+        return candidates
+
     def match(
         self,
         extracted_series: str,
@@ -713,8 +784,19 @@ class CalibreSeriesIndex:
             return None
         if not normalize_text(extracted_series):
             return None
-        candidates = self._query_candidates(extracted_series, alt_names)
+        own_suffixes = self._own_suffix_norms(extracted_series, alt_names)
 
+        # Strict own-identity pass: full title, own aliases and colon/dash suffixes.
+        # This runs before any parent-prefix/substring/fuzzy candidate so a spinoff
+        # cannot be captured by its parent merely because the parent exists.
+        strict = self._strict_candidates(extracted_series, alt_names)
+        match, ambiguous = self._exact_match(strict)
+        if match is not None:
+            return match
+        if ambiguous or own_suffixes:
+            return None
+
+        candidates = self._query_candidates(extracted_series, alt_names)
         match, ambiguous = self._exact_match(candidates)
         if match is not None:
             return match
