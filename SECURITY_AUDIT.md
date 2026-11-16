@@ -321,3 +321,70 @@ NovelTrax is a single-user, self-hosted home-lab application. The following risk
 - Added SEC-23 (flat release view `TemplateSyntaxError`): restored the missing `{% endif %}` and added the static Jinja integrity/wiring guard (`tests/test_ui_wiring.py`).
 - Updated residual risk: RR-05 now records the `urllib` fallback redirect behavior (dead path while `httpx` is installed) instead of the now-fixed HTML-scraper gap; added RR-09 for the Jinja-rendering coverage gap in the Calibre interpreter.
 - Expanded the verification section with the redirect-SSRF, adversarial input-matrix and UI-wiring suites; the tracked findings total is 23.
+
+---
+
+## 10. Revision 4 — Post-Audit Re-Validation (November 16, 2026)
+
+Scope: re-validate SEC-01…23 against the code as of commit `0d03ccf`, covering surfaces added
+after the November 2 revision (EPUB sidecar integration, TorBox engine, metadata review,
+catalog reset, diagnostics, maintenance). Method: direct exploitation probes against a local
+instance, targeted reader review, `pip-audit`, and the assert-aware test runner. No finding was
+opened from inspection alone; each item below was reproduced before being filed.
+
+### 10.1 What was re-verified (no change required)
+
+| Control | Evidence |
+| :--- | :--- |
+| SEC-11 guard classes | `is_safe_public_url()` returns `False` for `127.0.0.1`, `[::ffff:169.254.169.254]`, `[::ffff:127.0.0.1]`, `100.64.0.1`, `169.254.169.254`, `metadata.google.internal`, `localhost.`, `0x7f.0.0.1`, `2130706433` and `file:///` |
+| SEC-19/20/21 redirect and parser-confusion | `safe_client_get` refuses a `Location` hop to `169.254.169.254`, `127.0.0.1`, `192.168.1.1` at the 5-hop cap; percent-encoded C0/DEL and authority-external `@` fail closed |
+| SEC-06/17 Calibre path handling | `sanitize_calibre_path()` rejects NUL, normalises, and blocks sensitive extensions; `/api/calibre/test` returns 400 without filesystem detail |
+| SEC-14/03 webhook diagnostics | `test_webhook()` reports status only; response bodies are never embedded |
+| SEC-16 CSP / Permissions-Policy | Both headers present on every response; `'unsafe-inline'` remains (RR-06) |
+| SEC-04/15 escaping | Dashboard task panel and TorBox queue rows escape through helpers that cover attribute contexts (`esc`, `_esc`) |
+| XML entity handling | Expat 2.9.0 rejects DTD amplification (`limit on input amplification factor … breached`); ElementTree refuses external entities (“undefined entity”), so XXE/billion-laughs are not reachable through OPF parsing |
+| Container posture | Dockerfile creates and switches to UID/GID 1000 `appuser`; compose drops `ALL` capabilities and sets `no-new-privileges` |
+
+### 10.2 New findings and fixes
+
+| ID | Finding | Severity | CWE | Fix | Regression test |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **NT-01** | SSRF and internal response disclosure through the unvalidated `epub_fetcher_url` setting: `POST /api/settings` accepted `http://169.254.169.254`, and `POST /api/releases/{id}/fetch-epub` then POSTed to it and reflected up to 500 bytes of the internal HTTP error body in the 502 detail | **High** | CWE-918, CWE-209 | `_prepare_settings_payload()` validates the value with `validate_downloader_destination`; the fetch route re-validates before the POST; HTTP errors now report the status code only | `tests/test_security_hardening.py` (`test_epub_fetcher_url_rejects_metadata_destination`, `test_fetch_epub_never_posts_to_a_stored_metadata_url`, `test_fetch_epub_error_does_not_reflect_remote_body`) |
+| **NT-02** | Plaintext qBittorrent password rendered into the `/downloads` HTML (`value="{{ settings.qbit_password }}"`); the TorBox key was masked, the password was not | **Medium** | CWE-522, CWE-200 | `_masked_settings()` masks both secrets; the form submits an empty field and the save path keeps the stored password when the value is blank or masked; validating *both* `qbit_url` and `qbit_host` (previously only one was checked before persisting the other) | `test_downloads_page_never_echoes_the_qbit_password`, `test_downloader_configure_keeps_saved_password_and_validates_both_fields` |
+| **NT-03** | `covers.py` carried a forked copy of the SSRF guard that had missed the later hardening: `http://100.64.0.1/` (CGNAT, e.g. Tailscale/cloud VPC) was allowed, as were `%00` obfuscation and authority-external `@`; reachable unauthenticated through `GET /api/covers?url=` | **Medium** | CWE-918 | Deleted the fork; `covers.py` imports `app.security.is_safe_public_url`, so one policy covers feeds, metadata, webhooks and cover downloads | `test_cover_guard_is_the_central_guard` (asserts guard identity and the divergent vectors) |
+| **NT-04** | Stored `javascript:` URL: `POST /api/series/{id}/link` persisted any scheme and `series.html` rendered it as an `href`; CSP `'unsafe-inline'` permits the resulting inline script. `feeds.html`'s `escapeHtml` also left quotes intact while feeding an attribute | **Medium** | CWE-79 | New `sanitize_href()` (absolute http/https only) validates the write and backs a `safe_href` Jinja filter now applied to every server-rendered link (`series.html`, `index.html`, `audiobooks.html`, and the three release/discovery partials); `escapeHtml` escapes quotes | `test_stored_javascript_link_is_rejected_and_not_rendered` |
+| **NT-05** | EPUB decompression bomb: `read_epub_metadata`/`write_epub_metadata` read entries unbounded (a 195 KB archive yields 200 MB; ratio 1029×) and the write path materialised every entry at once | **Medium** | CWE-409 | Bounded reads (`MAX_OPF_BYTES` 8 MiB), entry-count and declared-size caps (512 MiB/entry, 1 GiB total, 5000 entries) enforced from actual decompressed bytes, and streaming entry copy instead of a payload dict | `tests/test_epub_metadata.py` (`test_oversized_opf_rejected`, `test_oversized_entry_blocks_write`, `test_roundtrip_leaves_no_temp_file`) |
+| **NT-06** | `safe_http_get()` enforced its “10 MB ceiling” only after httpx had buffered the whole body: a measured 32 MiB body was downloaded and 66 MiB allocated before the `max_bytes=1024` rejection | **Low** | CWE-400 | The httpx path now uses `client.stream()` and aborts the moment accumulated bytes exceed `max_bytes`; `content-length` is still pre-checked | `test_safe_http_get_aborts_before_buffering_the_whole_body` (asserts ≤4 of 1000 chunks consumed) |
+| **NT-07** | `write_epub_metadata` wrote to the predictable `"<path>.noveltrax-meta-tmp"` and followed symlinks, on a `/downloads` volume the Dockerfile makes world-writable | **Low** | CWE-377 | `tempfile.mkstemp` in the target directory, mode preserved from the original, symlinked targets refused, temp removed on every failure path | `test_roundtrip_leaves_no_temp_file` plus the symlink refusal in `write_epub_metadata` |
+| **NT-08** | Both compose files published `8080:8080` on every interface while their own comments recommended loopback (SEC-07 has no authentication) | **Low** | CWE-284 | `"${NOVELTRAX_BIND:-127.0.0.1}:8080:8080"` in both files and the README, so exposure is an explicit opt-in | `test_compose_defaults_to_loopback_and_requirements_are_pinned` |
+| **NT-09** | `backend/requirements.txt` used `>=` for every dependency with no lock or hashes, so each image rebuild resolved a different tree | **Low** | CWE-1104 | Pinned to the verified versions (`fastapi 0.162.4`, `uvicorn 0.54.0`, `jinja2 3.1.6`, `httpx 0.28.1`, `beautifulsoup4 4.15.0`, `feedparser 6.0.14`, `apscheduler 3.11.3`); `pip-audit -r` reports no known advisories for the pinned set | same test (asserts every line is `==`) |
+
+### 10.3 Test-suite state at revision 4
+
+The full runner (`python tests/run_tests.py`, 92 suites) was executed twice — once on `0d03ccf`
+and once on this revision. Baseline: 85 pass, 7 fail. Three were environmental
+(`test_challenger_adversarial_ip` asserts Calibre's `optimize==2`; `test_challenger_m4_integration`
+and `test_full_workflow` hit `SchedulerNotRunningError` on teardown). Four were stale suites:
+
+- `test_challenger_m1_adversarial` patched `urllib.request.urlopen` while production uses httpx, so
+  it silently performed live network fetches (1369 items) and failed 8 assertions. Repaired to drive
+  the urllib fallback explicitly for the parsing tests and to stub DNS for the httpx branch; it now
+  runs with no outbound socket.
+- `test_challenger_m2_it2_regression` asserted the pre-`M2` `/api/series` list contract and
+  `GET /api/settings` (POST-only). Updated to the current contracts.
+- `test_e2e_suite` fails one non-security source-text check (`T1_F13_4`, duplicate-return scan of
+  `metadata.py`); all T1_F06…F11 and T2_F06…F08 security cases pass.
+- `test_publication_metadata` fails `GraphQL query requests the format field` (AniList query drift).
+  This is a pre-existing functional gap, unrelated to the security controls, and is left open.
+
+The remaining failures are recorded rather than silently skipped; none of them exercises an SSRF,
+XSS, path, secret or resource control that this revision changed.
+
+### 10.4 Residual risk additions
+
+| ID | Residual risk | Rationale |
+| :--- | :--- | :--- |
+| RR-11 | `'unsafe-inline'` CSP means a *new* missed escape still executes (NT-04 depended on this) | Removing it requires nonce/hash refactoring across all templates (RR-06). The href allow-list and quote-safe escaping are the primary controls; treat any new server-rendered link as requiring `safe_href` |
+| RR-12 | `urllib` fallback branches (J-Novels, metadata, webhook `_post_json`) follow redirects without hop validation | Only reachable when `httpx` cannot be imported; `httpx` is a pinned hard requirement (RR-05). The EPUB sidecar call in `fetch-epub` is exempt by design: it targets an operator-configured local service, now destination-validated |
+| RR-13 | EPUB limits are per-file, not per-request-batch | NT-05 caps one archive; a caller able to trigger many fetches can still consume proportional memory/disk. Bounded by the existing single-slot EPUB pipeline |
+| RR-14 | DNS-rebinding window remains for `epub_fetcher_url` and the downloader | Same validate-then-connect gap as RR-04; the fetcher URL is operator-controlled and the request is a single POST |
