@@ -394,9 +394,14 @@
 
     function escapeHtml(str) {
         if (str === null || str === undefined) return '';
-        const div = document.createElement('div');
-        div.textContent = String(str);
-        return div.innerHTML;
+        // textContent->innerHTML leaves quotes intact, which is unsafe when the value
+        // lands in an attribute (href/title). Escape the quote characters too.
+        return String(str)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
     }
 
     function sanitizeLink(url) {

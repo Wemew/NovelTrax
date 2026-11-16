@@ -36,7 +36,13 @@ from app.parser import extract_series_and_volume
 from app.providers.registry import create_provider
 from app.scheduler import TaskManager
 from app.covers import CoverCache
-from app.security import is_safe_public_url, sanitize_calibre_path, safe_fetch_text
+from app.security import (
+    is_safe_public_url,
+    sanitize_calibre_path,
+    sanitize_href,
+    safe_fetch_text,
+    validate_downloader_destination,
+)
 from app.providers.jnovels import extract_source_link, find_jnovels_article, is_ad_tracking_url, is_jnovels_listing, is_jnovels_page
 from app.downloader.qbit import QBitClient, qbit_client_from_settings
 from app.download_state import release_download_state
@@ -58,6 +64,10 @@ CALIBRE_DIR = os.getenv("CALIBRE_DIR", "/calibre")
 
 # TorBox debrid download engine (see .agents/torbox_port/CONTRACT.md)
 TORBOX_API_KEY_MASK = "••••••••••••"
+# Both stored secrets are masked on the way out: the settings/downloads pages are
+# reachable by anyone who can load the dashboard (SEC-07), so the raw values must
+# never be rendered back into HTML.
+QBIT_PASSWORD_MASK = "••••••••••••"
 DOWNLOADER_ENGINES = ("qbit", "torbox")
 
 # Initialize Database, Cache & Task Manager
@@ -93,10 +103,12 @@ def _active_downloader_engine() -> str:
 
 
 def _masked_settings() -> Dict[str, Any]:
-    """Returns a copy of the settings with the TorBox API key replaced by the mask token."""
+    """Returns a copy of the settings with stored secrets replaced by mask tokens."""
     settings = db.get_all_settings()
     api_key = str(settings.get("torbox_api_key") or "").strip()
     settings["torbox_api_key"] = TORBOX_API_KEY_MASK if api_key else ""
+    qbit_password = str(settings.get("qbit_password") or "").strip()
+    settings["qbit_password"] = QBIT_PASSWORD_MASK if qbit_password else ""
     return settings
 
 
@@ -229,6 +241,21 @@ def _prepare_settings_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     if "downloads_dir" in clean:
         clean["downloads_dir"] = _validated_downloads_dir(clean.get("downloads_dir"))
+
+    # The EPUB sidecar URL becomes a server-side POST target, so it follows the same
+    # destination policy as the downloader: http(s) only, no cloud metadata hosts.
+    # Loopback and RFC 1918 stay permitted because the sidecar normally runs beside
+    # the app on localhost or the internal Docker network.
+    if "epub_fetcher_url" in clean:
+        fetcher_url = str(clean.get("epub_fetcher_url") or "").strip().rstrip("/")
+        if fetcher_url:
+            is_valid, reason = validate_downloader_destination(fetcher_url)
+            if not is_valid:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"epub_fetcher_url is not an allowed destination: {reason}",
+                )
+        clean["epub_fetcher_url"] = fetcher_url
 
     return clean
 
@@ -813,6 +840,9 @@ async def add_security_headers(request: Request, call_next):
 
 # Setup Templates
 templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
+# Every server-rendered link goes through the scheme allow-list: autoescaping stops
+# markup injection but not `javascript:`/`data:` hrefs stored from feeds or settings.
+templates.env.filters["safe_href"] = sanitize_href
 
 from app.timezone_util import format_localtime, format_localdate
 
@@ -1596,7 +1626,13 @@ async def api_toggle_series(series_id: int):
 @app.post("/api/series/{series_id}/link")
 async def api_update_series_link(series_id: int, payload: Dict[str, Any]):
     """Update or save custom website link for a series."""
-    website_url = payload.get("website_url", "")
+    raw_url = str(payload.get("website_url") or "").strip()
+    website_url = sanitize_href(raw_url) if raw_url else ""
+    if raw_url and not website_url:
+        return JSONResponse({
+            "status": "error",
+            "message": "website_url must be an absolute http(s) URL",
+        }, status_code=400)
     db.update_series_website_url(series_id, website_url)
     return JSONResponse({"status": "success", "website_url": website_url})
 
@@ -2620,6 +2656,15 @@ async def api_fetch_release_epub(release_id: int):
         fetch_reporter.report(message=message, force=True)
         db.finish_background_task(fetch_task_id, "failed", message)
         raise HTTPException(status_code=400, detail=message)
+    # Re-validate at use: the setting may predate validation or have been edited
+    # directly in SQLite. This is the last gate before a server-side POST.
+    base_is_safe, base_reason = validate_downloader_destination(base)
+    if not base_is_safe:
+        message = f"EPUB Fetcher URL is not an allowed destination: {base_reason}"
+        _mark_failed(message)
+        fetch_reporter.report(message=message, force=True)
+        db.finish_background_task(fetch_task_id, "failed", message)
+        raise HTTPException(status_code=400, detail=message)
 
     def _fetch_worker():
         fetch_reporter.report(
@@ -2637,14 +2682,11 @@ async def api_fetch_release_epub(release_id: int):
             with urllib.request.urlopen(request, timeout=280) as response:
                 return response.read(), response.headers.get("Content-Disposition", "")
         except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", "replace")[:500]
-            try:
-                detail = json.loads(detail).get("detail") or detail
-            except Exception:
-                pass
-            raise ValueError(f"Fetcher rejected the request: {detail}")
+            # Status only: the response body belongs to whatever answered on the
+            # configured URL and must not become a read oracle for the caller.
+            raise ValueError(f"Fetcher rejected the request with HTTP {exc.code}")
         except Exception as exc:
-            raise ValueError(f"Fetcher unreachable: {exc}") from exc
+            raise ValueError(f"Fetcher unreachable: {type(exc).__name__}") from exc
 
     def _post_worker(content: bytes, disposition: str):
         fetch_reporter.report(total=100, done=85, message="Validating downloaded archive…", force=True)
@@ -2950,12 +2992,14 @@ async def api_downloader_configure(payload: Dict[str, Any]):
     qbit_savepath = (payload.get("qbit_savepath") or "/downloads").strip() or "/downloads"
     qbit_url = (payload.get("qbit_url") or "").strip()
 
-    # SSRF destination safety validation before saving configuration
-    dest_to_check = qbit_url or qbit_host
-    if dest_to_check:
-        from app.security import validate_downloader_destination
-        scheme = "https" if qbit_ssl in ("true", "1", "yes") else "http"
-        is_safe, error_msg = validate_downloader_destination(dest_to_check, scheme=scheme)
+    # SSRF destination safety validation before saving configuration. Validate the
+    # explicit URL *and* the host field: sending both used to validate only the URL
+    # while persisting an unchecked host.
+    scheme = "https" if qbit_ssl in ("true", "1", "yes") else "http"
+    for dest in (qbit_url, qbit_host):
+        if not dest:
+            continue
+        is_safe, error_msg = validate_downloader_destination(dest, scheme=scheme)
         if not is_safe:
             return JSONResponse({
                 "status": "error",
@@ -2973,7 +3017,11 @@ async def api_downloader_configure(payload: Dict[str, Any]):
         db.set_setting("qbit_port", qbit_port)
     db.set_setting("qbit_username", qbit_user)
     if qbit_pass is not None:
-        db.set_setting("qbit_password", qbit_pass)
+        # Blank or masked means "keep the saved password": the form no longer echoes
+        # the real value, so an untouched field must not wipe it.
+        supplied_password = str(qbit_pass).strip()
+        if supplied_password and supplied_password != QBIT_PASSWORD_MASK:
+            db.set_setting("qbit_password", qbit_pass)
     db.set_setting("qbit_use_ssl", qbit_ssl)
     db.set_setting("qbit_enabled", qbit_enabled)
     db.set_setting("qbit_category", qbit_category)

@@ -107,14 +107,15 @@
                         <!-- Website Hub -->
                         <td class="py-4 px-4 text-center" data-label="Website Hub">
                             <div class="flex items-center justify-center gap-1.5">
-                                {% if s.website_url %}
-                                <a href="{{ s.website_url }}" target="_blank" rel="noopener noreferrer" class="px-2.5 py-1 rounded-lg bg-brand-500/10 hover:bg-brand-500/20 text-brand-400 border border-brand-500/20 font-medium inline-flex items-center gap-1.5 transition-colors" title="Open Series Hub on Website">
+                                {% set hub_href = s.website_url | safe_href %}
+                                {% if hub_href %}
+                                <a href="{{ hub_href }}" target="_blank" rel="noopener noreferrer" class="px-2.5 py-1 rounded-lg bg-brand-500/10 hover:bg-brand-500/20 text-brand-400 border border-brand-500/20 font-medium inline-flex items-center gap-1.5 transition-colors" title="Open Series Hub on Website">
                                     <i data-lucide="globe" class="w-3.5 h-3.5"></i>
                                     <span>Browse</span>
                                     <i data-lucide="external-link" class="w-2.5 h-2.5 text-slate-400"></i>
                                 </a>
                                 {% endif %}
-                                <button data-series-id="{{ s.id }}" data-website-url="{{ s.website_url or '' }}" data-series-name="{{ s.name }}" onclick="handleEditLink(this)" class="p-1 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-white transition-colors" title="Edit custom series website URL">
+                                <button data-series-id="{{ s.id }}" data-website-url="{{ hub_href }}" data-series-name="{{ s.name }}" onclick="handleEditLink(this)" class="p-1 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-white transition-colors" title="Edit custom series website URL">
                                     <i data-lucide="edit-3" class="w-3.5 h-3.5"></i>
                                 </button>
                                 <button data-series-id="{{ s.id }}" data-series-name="{{ s.name }}" onclick="handleFetchSeriesDetails(this)" class="p-1 rounded-lg hover:bg-amber-500/20 text-slate-400 hover:text-amber-400 transition-colors" title="Import series description & cover from website">

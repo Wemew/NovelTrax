@@ -232,12 +232,12 @@
                 <!-- Action Toolbar -->
                 <div class="mt-4 pt-3 border-t border-slate-800/80 flex items-center justify-between gap-2">
                     <div class="flex items-center gap-1.5 flex-wrap">
-                        <a href="{{ req.link }}" target="_blank" rel="noopener noreferrer" class="text-xs px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 flex items-center gap-1.5 transition-colors font-medium" title="Go to specific novel release post">
+                        <a href="{{ req.link | safe_href }}" target="_blank" rel="noopener noreferrer" class="text-xs px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 flex items-center gap-1.5 transition-colors font-medium" title="Go to specific novel release post">
                             <i data-lucide="external-link" class="w-3.5 h-3.5 text-slate-400"></i>
                             Release
                         </a>
                         {% if req.series_link %}
-                        <a href="{{ req.series_link }}" target="_blank" rel="noopener noreferrer" class="text-xs px-2.5 py-1.5 rounded-lg bg-brand-500/10 hover:bg-brand-500/20 text-brand-400 border border-brand-500/20 flex items-center gap-1.5 transition-colors font-medium" title="View all releases for this series on website">
+                        <a href="{{ req.series_link | safe_href }}" target="_blank" rel="noopener noreferrer" class="text-xs px-2.5 py-1.5 rounded-lg bg-brand-500/10 hover:bg-brand-500/20 text-brand-400 border border-brand-500/20 flex items-center gap-1.5 transition-colors font-medium" title="View all releases for this series on website">
                             <i data-lucide="layers" class="w-3.5 h-3.5"></i>
                             Series Hub
                         </a>

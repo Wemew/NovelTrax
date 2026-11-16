@@ -10,7 +10,7 @@
         </div>
         {% endif %}
         <div class="min-w-0">
-            <a href="{{ r.link }}" target="_blank" rel="noopener noreferrer" class="font-bold text-white hover:text-brand-400 transition-colors line-clamp-2 leading-snug">
+            <a href="{{ r.link | safe_href }}" target="_blank" rel="noopener noreferrer" class="font-bold text-white hover:text-brand-400 transition-colors line-clamp-2 leading-snug">
                 {{ r.title }}
             </a>
             {% if r.author %}
@@ -26,7 +26,7 @@
                 {{ r.release_group }}
             </span>
             {% endif %}
-            <a href="{{ r.link }}" target="_blank" rel="noopener noreferrer" class="text-[10px] text-brand-400/80 hover:text-brand-300 flex items-center gap-1 mt-0.5 font-mono">
+            <a href="{{ r.link | safe_href }}" target="_blank" rel="noopener noreferrer" class="text-[10px] text-brand-400/80 hover:text-brand-300 flex items-center gap-1 mt-0.5 font-mono">
                 <i data-lucide="external-link" class="w-3 h-3"></i> Open Feed Item
             </a>
         </div>
@@ -35,7 +35,7 @@
     <!-- Series & Volume -->
     <td class="py-3.5 px-4" data-label="Series &amp; Volume">
         {% if r.series_link %}
-        <a href="{{ r.series_link }}" target="_blank" rel="noopener noreferrer" class="font-bold text-white hover:text-brand-400 transition-colors inline-flex items-center gap-1 group/slink" title="Open Series page on website">
+        <a href="{{ r.series_link | safe_href }}" target="_blank" rel="noopener noreferrer" class="font-bold text-white hover:text-brand-400 transition-colors inline-flex items-center gap-1 group/slink" title="Open Series page on website">
             <span>{{ r.series_name or '—' }}</span>
             <i data-lucide="external-link" class="w-3 h-3 text-slate-500 group-hover/slink:text-brand-400"></i>
         </a>
@@ -137,7 +137,7 @@
             </button>
             {% endif %}
             {% if r.source_link %}
-            <a href="{{ r.source_link }}" target="_blank" rel="noopener noreferrer" title="Open the direct source download link" aria-label="Open the direct source download link" class="p-1.5 rounded-lg bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-300 border border-cyan-500/20 transition-colors">
+            <a href="{{ r.source_link | safe_href }}" target="_blank" rel="noopener noreferrer" title="Open the direct source download link" aria-label="Open the direct source download link" class="p-1.5 rounded-lg bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-300 border border-cyan-500/20 transition-colors">
                 <i data-lucide="download-cloud" class="w-3.5 h-3.5"></i>
             </a>
             {% endif %}

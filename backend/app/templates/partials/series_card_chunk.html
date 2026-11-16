@@ -39,7 +39,7 @@
                     <h2 class="text-xl font-display font-bold text-white tracking-tight flex items-center gap-2">
                         <span>{{ group.series_name }}</span>
                         {% if group.website_url %}
-                        <a href="{{ group.website_url }}" target="_blank" rel="noopener noreferrer" class="text-brand-400 hover:text-brand-300" title="Open series website hub">
+                        <a href="{{ group.website_url | safe_href }}" target="_blank" rel="noopener noreferrer" class="text-brand-400 hover:text-brand-300" title="Open series website hub">
                             <i data-lucide="external-link" class="w-3.5 h-3.5"></i>
                         </a>
                         {% endif %}
@@ -134,7 +134,7 @@
                 <div class="p-3 rounded-xl bg-slate-900/60 border border-slate-800/70 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
                     <div class="min-w-0 flex-1">
                         <div class="flex items-center gap-2 flex-wrap">
-                            <a href="{{ r.link }}" target="_blank" rel="noopener noreferrer" class="font-bold text-white hover:text-brand-400 transition-colors">
+                            <a href="{{ r.link | safe_href }}" target="_blank" rel="noopener noreferrer" class="font-bold text-white hover:text-brand-400 transition-colors">
                                 {{ r.title }}
                             </a>
                             {% if r.series_pinned %}
@@ -222,7 +222,7 @@
                             </button>
                             {% endif %}
                             {% if r.source_link %}
-                            <a href="{{ r.source_link }}" target="_blank" rel="noopener noreferrer" title="Open the direct source download link" aria-label="Open the direct source download link" class="p-1.5 rounded-lg bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-300 border border-cyan-500/20 transition-colors">
+                            <a href="{{ r.source_link | safe_href }}" target="_blank" rel="noopener noreferrer" title="Open the direct source download link" aria-label="Open the direct source download link" class="p-1.5 rounded-lg bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-300 border border-cyan-500/20 transition-colors">
                                 <i data-lucide="download-cloud" class="w-3.5 h-3.5"></i>
                             </a>
                             {% endif %}
