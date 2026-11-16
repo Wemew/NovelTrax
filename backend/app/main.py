@@ -1465,7 +1465,14 @@ async def api_calibre_test(path: str = Query(...)):
         scanner = CalibreScanner(clean_path)
         return scanner.get_library_summary()
     summary = await asyncio.to_thread(_test)
-    return JSONResponse(summary)
+    # The caller supplies the path, so echoing the resolved form or a raw SQLite
+    # message adds nothing but a layout/readability oracle on an unauthenticated
+    # endpoint. Report the availability bit and the counts only.
+    payload = dict(summary or {})
+    payload.pop("db_path", None)
+    if payload.get("error"):
+        payload["error"] = "Could not read a Calibre metadata.db at that location"
+    return JSONResponse(payload)
 
 FALLBACK_COVER_SVG = """<svg xmlns="http://www.w3.org/2000/svg" width="100" height="150" viewBox="0 0 100 150"><rect width="100" height="150" rx="8" fill="#1e293b" stroke="#334155" stroke-width="2"/><path d="M35 55h30M35 70h30M35 85h20" stroke="#64748b" stroke-width="2" stroke-linecap="round"/><text x="50" y="115" font-family="system-ui,-apple-system,sans-serif" font-size="10" font-weight="600" fill="#94a3b8" text-anchor="middle">EPUB</text></svg>"""
 
@@ -2554,6 +2561,19 @@ async def api_backfill_source_links(payload: Optional[Dict[str, Any]] = None):
     return JSONResponse({"status": "success", **result, "task_id": backfill_task_id})
 
 
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Surface 3xx responses to the caller instead of following them.
+
+    urllib follows redirects by default and converts a 302 POST into a GET, so a
+    configured sidecar URL could bounce this server to a different destination (and
+    different path) that was never validated. The sidecar answers ``/fetch`` directly;
+    a redirect therefore indicates a wrong URL and is reported as an HTTP error.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 @app.post("/api/releases/{release_id}/fetch-epub")
 async def api_fetch_release_epub(release_id: int):
     """Run the EPUB fetcher sidecar for one release and store the file locally.
@@ -2679,7 +2699,8 @@ async def api_fetch_release_epub(release_id: int):
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=280) as response:
+            opener = urllib.request.build_opener(_NoRedirectHandler())
+            with opener.open(request, timeout=280) as response:
                 return response.read(), response.headers.get("Content-Disposition", "")
         except urllib.error.HTTPError as exc:
             # Status only: the response body belongs to whatever answered on the

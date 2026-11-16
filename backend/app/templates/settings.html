@@ -719,7 +719,7 @@
                 box.innerHTML = `✓ Connection Successful! Found ${data.total_books} books, ${data.total_series} series in metadata.db.`;
             } else {
                 box.className = 'p-3 rounded-xl text-xs font-mono bg-rose-500/10 text-rose-300 border border-rose-500/20';
-                box.innerHTML = `✗ metadata.db not found at "${data.db_path}". Please verify mount path.`;
+                box.innerHTML = '✗ No readable metadata.db at that path. Please verify the mount path.';
             }
         } catch (err) {
             box.className = 'p-3 rounded-xl text-xs font-mono bg-rose-500/10 text-rose-300 border border-rose-500/20';

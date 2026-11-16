@@ -28,6 +28,7 @@ os.environ["DATA_DIR"] = _DATA_DIR
 os.environ.setdefault("CALIBRE_DIR", _DATA_DIR)
 os.environ.setdefault("DOWNLOAD_DIR", os.path.join(_DATA_DIR, "downloads"))
 
+import urllib.error  # noqa: E402
 import urllib.request  # noqa: E402
 from unittest.mock import MagicMock, patch  # noqa: E402
 
@@ -94,30 +95,124 @@ def test_fetch_epub_never_posts_to_a_stored_metadata_url():
     app_main.db.set_setting("epub_fetcher_url", "")
 
 
-def test_fetch_epub_error_does_not_reflect_remote_body():
-    """NT-01: an HTTP error from whatever answers on that URL yields status only."""
-    app_main.db.set_setting("epub_fetcher_url", "http://127.0.0.1:8010")
-    release_id = _make_release("hardening-nt01b")
-    body = b'{"detail":"INTERNAL-ORACLE: secret-token-abc"}'
-
-    def _raise(req, *args, **kwargs):
-        raise urllib.error.HTTPError(getattr(req, "full_url", ""), 404, "Not Found", {}, _BytesReader(body))
-
-    client = _client()
-    with patch.object(urllib.request, "urlopen", side_effect=_raise):
-        res = client.post(f"/api/releases/{release_id}/fetch-epub")
-    check(res.status_code == 502, f"expected 502, got {res.status_code}")
-    check("INTERNAL-ORACLE" not in res.text, f"remote body reflected to the caller: {res.text[:300]}")
-    check("HTTP 404" in res.text, f"status code should still be reported: {res.text[:200]}")
-    app_main.db.set_setting("epub_fetcher_url", "")
-
-
 class _BytesReader:
     def __init__(self, payload):
         self._payload = payload
 
     def read(self, *_args):
         return self._payload
+
+
+class _StubOpener:
+    """Minimal urllib opener: records calls and raises the supplied error."""
+
+    def __init__(self, error=None, body=b"", headers=None):
+        self.error = error
+        self.body = body
+        self.headers = headers or {}
+        self.calls = []
+
+    def open(self, request, *args, **kwargs):
+        self.calls.append(getattr(request, "full_url", str(request)))
+        if self.error is not None:
+            raise self.error
+        return _StubResponse(self.body, self.headers)
+
+
+class _StubResponse:
+    def __init__(self, body, headers):
+        self._body = body
+        self.headers = headers
+
+    def read(self, *_args):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def test_fetch_epub_error_does_not_reflect_remote_body():
+    """NT-01: an HTTP error from whatever answers on that URL yields status only."""
+    app_main.db.set_setting("epub_fetcher_url", "http://127.0.0.1:8010")
+    release_id = _make_release("hardening-nt01b")
+    body = b'{"detail":"INTERNAL-ORACLE: secret-token-abc"}'
+    opener = _StubOpener(
+        error=urllib.error.HTTPError("http://127.0.0.1:8010/fetch", 404, "Not Found", {}, _BytesReader(body))
+    )
+    client = _client()
+    with patch.object(urllib.request, "build_opener", return_value=opener):
+        res = client.post(f"/api/releases/{release_id}/fetch-epub")
+    check(res.status_code == 502, f"expected 502, got {res.status_code}")
+    check("INTERNAL-ORACLE" not in res.text, f"remote body reflected to the caller: {res.text[:300]}")
+    check("HTTP 404" in res.text, f"status code should still be reported: {res.text[:200]}")
+    check(len(opener.calls) == 1, f"unexpected request count: {opener.calls}")
+    app_main.db.set_setting("epub_fetcher_url", "")
+
+
+def test_fetcher_never_follows_a_redirect():
+    """NT-01: a 302 must not pivot the server to a destination that was never validated.
+
+    A real loopback server answers ``/fetch`` with 302 -> ``/internal``. Following the
+    Location (urllib's default) would show up as a request for ``/internal``; the
+    no-redirect opener must stop at the 302 instead.
+    """
+    import http.server
+    import threading
+
+    hits = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            hits.append(self.path)
+            if self.path == "/fetch":
+                self.send_response(302)
+                self.send_header("Location", "/internal")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header("Content-Length", "4")
+            self.end_headers()
+            self.wfile.write(b"PK\x03\x04")
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        app_main.db.set_setting("epub_fetcher_url", base)
+        release_id = _make_release("hardening-nt01c")
+        res = _client().post(f"/api/releases/{release_id}/fetch-epub")
+    finally:
+        server.shutdown()
+        server.server_close()
+        app_main.db.set_setting("epub_fetcher_url", "")
+
+    check(res.status_code == 502, f"expected 502, got {res.status_code}")
+    check("HTTP 302" in res.text, f"redirect should be reported as an HTTP error: {res.text[:200]}")
+    check(hits == ["/fetch"], f"redirect target was contacted: {hits}")
+
+
+def test_calibre_test_does_not_echo_paths():
+    """SEC-06 residual: no resolved path or raw SQLite text on this unauthenticated probe."""
+    client = _client()
+    with tempfile.TemporaryDirectory() as directory:
+        # An existing metadata.db that is not SQLite forces the scanner error branch.
+        with open(os.path.join(directory, "metadata.db"), "wb") as handle:
+            handle.write(b"not a sqlite database")
+        res = client.get("/api/calibre/test", params={"path": directory})
+        check(res.status_code == 200, f"unexpected status: {res.status_code}")
+        payload = res.json()
+        check("db_path" not in payload, f"resolved path echoed to the caller: {payload}")
+        check(directory not in res.text, f"requested path echoed: {res.text[:300]}")
+        check(payload.get("available") is False, f"invalid library reported as available: {payload}")
+        check((payload.get("error") or "").startswith("Could not read a Calibre metadata.db"),
+              f"error text is not generic: {payload.get('error')!r}")
 
 
 def test_downloads_page_never_echoes_the_qbit_password():
@@ -260,6 +355,8 @@ def main():
     test_epub_fetcher_url_rejects_metadata_destination()
     test_fetch_epub_never_posts_to_a_stored_metadata_url()
     test_fetch_epub_error_does_not_reflect_remote_body()
+    test_fetcher_never_follows_a_redirect()
+    test_calibre_test_does_not_echo_paths()
     test_downloads_page_never_echoes_the_qbit_password()
     test_downloader_configure_keeps_saved_password_and_validates_both_fields()
     test_cover_guard_is_the_central_guard()
