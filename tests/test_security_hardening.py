@@ -102,6 +102,10 @@ class _BytesReader:
     def read(self, *_args):
         return self._payload
 
+    def close(self):
+        # urllib's HTTPError wraps this as the response fp; the deallocator calls close.
+        return None
+
 
 class _StubOpener:
     """Minimal urllib opener: records calls and raises the supplied error."""
