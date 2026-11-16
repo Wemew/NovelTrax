@@ -847,11 +847,32 @@ def test_t1_f13_centralized_ssrf_imported():
     if not ("from app.security import" in src): raise AssertionError("assertion failed at line 824")
 runner.run_test("T1_F13_3: main.py imports security guards from app.security", test_t1_f13_centralized_ssrf_imported)
 
+def _unreachable_after_exit(tree):
+    """(line, following-line) pairs where a statement follows return/raise in one block.
+
+    Parses the module instead of regex-matching two adjacent lines: a guard such as
+    ``if not text: return ""`` immediately followed by another ``return`` is correct
+    code, while a statement after a return in the *same* block is genuinely unreachable.
+    """
+    import ast
+    offenders = []
+    for node in ast.walk(tree):
+        body = getattr(node, "body", None)
+        if not isinstance(body, list):
+            continue
+        for stmt, following in zip(body, body[1:]):
+            if isinstance(stmt, (ast.Return, ast.Raise)):
+                offenders.append((stmt.lineno, following.lineno))
+    return offenders
+
+
 def test_t1_f13_metadata_clean_syntax():
+    import ast
     meta_path = os.path.join(BACKEND_DIR, "app", "providers", "metadata.py")
     with open(meta_path, "r", encoding="utf-8") as f:
         src = f.read()
-    if not (not re.search(r'return\s+[^\n]+\n\s+return\s+', src)): raise AssertionError("assertion failed at line 831")
+    offenders = _unreachable_after_exit(ast.parse(src))
+    if not (not offenders): raise AssertionError(f"unreachable statements after return/raise: {offenders}")
 runner.run_test("T1_F13_4: metadata.py free from duplicate/unreachable return statements", test_t1_f13_metadata_clean_syntax)
 
 def test_t1_f13_clean_module_level_namespaces():

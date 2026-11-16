@@ -6,8 +6,8 @@ Covers:
 * ``NovelMetadataProvider.query_anilist`` GraphQL fields (format/status/volumes/
   chapters, ``format_in: [NOVEL]`` kept) and the mapped result keys
   (format, format_label, is_light_novel, status, status_label, volumes, chapters,
-  total_volumes) — including a monkeypatched ``urllib.request.urlopen`` response
-  because this test interpreter has no httpx;
+  total_volumes) — including a stubbed AniList transport (httpx when present,
+  ``urllib.request.urlopen`` otherwise) so no test performs live network I/O;
 * ``publication_from_meta`` matrix: dict / JSON string / nested GraphQL envelope /
   empty / garbage / label-only round-trips, count validation and status labels;
 * publication keys surviving ``fetch_series_metadata`` / ``fetch_novel_metadata``
@@ -29,6 +29,7 @@ import gc
 import json
 import os
 import shutil
+import socket
 import sqlite3
 import sys
 import tempfile
@@ -42,6 +43,7 @@ for _path in (BASE_DIR, BACKEND_DIR):
     if _path not in sys.path:
         sys.path.insert(0, _path)
 
+from app import security as security_module
 from app.database import Database
 from app.providers import metadata as metadata_module
 from app.providers.metadata import (
@@ -177,13 +179,60 @@ class _FakeResponse:
         return False
 
 
+class _FakeHttpxResponse:
+    """Just enough of ``httpx.Response`` for the shared safe-client helper."""
+
+    status_code = 200
+    headers = {}
+    is_redirect = False
+
+    def __init__(self, payload):
+        self._payload = payload
+
+    def json(self):
+        return self._payload
+
+
+class _FakeHttpxClient:
+    def __init__(self, stub):
+        self._stub = stub
+
+    def post(self, url, **kwargs):
+        self._stub.requests.append(kwargs.get("json") or {})
+        return _FakeHttpxResponse({"data": {"Media": self._stub.media}})
+
+    def get(self, url, **kwargs):  # pragma: no cover - AniList posts only
+        return self.post(url, **kwargs)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+
+class _FakeHttpxModule:
+    def __init__(self, stub):
+        self._stub = stub
+
+    def Client(self, *args, **kwargs):
+        return _FakeHttpxClient(self._stub)
+
+
 class _AniListStub:
-    """Monkeypatches ``urllib.request.urlopen`` for query_anilist tests."""
+    """Records the GraphQL payload sent by ``query_anilist`` without any network.
+
+    Production runs the httpx branch whenever httpx is importable (it is a hard
+    requirement), so stubbing only ``urllib.request.urlopen`` let these tests reach the
+    live AniList API. This patches the transport that is actually used and keeps the
+    urllib fallback patched for interpreters without httpx.
+    """
 
     def __init__(self, media):
         self.media = media
         self.requests = []
         self._original = None
+        self._httpx_patcher = None
 
     def __enter__(self):
         self._original = urllib.request.urlopen
@@ -198,9 +247,25 @@ class _AniListStub:
             return _FakeResponse({"data": {"Media": stub.media}})
 
         urllib.request.urlopen = fake_urlopen
+        from unittest.mock import patch
+        # The shared client validates the AniList host with socket.getaddrinfo before
+        # the (stubbed) request. Fix the answer so the suite never depends on DNS.
+        self._patching = [
+            patch.object(
+                security_module.socket,
+                "getaddrinfo",
+                return_value=[(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))],
+            )
+        ]
+        if metadata_module.httpx is not None:
+            self._patching.append(patch.object(metadata_module, "httpx", _FakeHttpxModule(self)))
+        for patcher in self._patching:
+            patcher.start()
         return self
 
     def __exit__(self, exc_type, exc, tb):
+        for patcher in reversed(getattr(self, "_patching", [])):
+            patcher.stop()
         if self._original is not None:
             urllib.request.urlopen = self._original
         return False

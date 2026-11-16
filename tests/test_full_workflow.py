@@ -1108,7 +1108,12 @@ def run_e2e_test():
     templates_dir = os.path.join(backend_dir, "app", "templates")
     try:
         from jinja2 import Environment, FileSystemLoader
+        from app.security import sanitize_href
         jinja_env = Environment(loader=FileSystemLoader(templates_dir))
+        # The partials use the application's safe_href filter; the real environment in
+        # app.main registers the same function, so register it here instead of rendering
+        # with a filter set production never has.
+        jinja_env.filters["safe_href"] = sanitize_href
 
         # Series chunk
         tpl_series = jinja_env.get_template("partials/series_card_chunk.html")

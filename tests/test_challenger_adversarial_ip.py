@@ -32,14 +32,35 @@ def check(condition: bool, message: str = "") -> None:
         raise AssertionError(message or "Assertion check failed")
 
 
+def _bare_assert_survives(optimize_level: int) -> bool:
+    """True when a failing bare ``assert`` still raises at this compile level."""
+    namespace = {}
+    source = "def probe(flag):\n    assert flag\n    return True\n"
+    exec(compile(source, "<assert-probe>", "exec", optimize=optimize_level), namespace)
+    try:
+        namespace["probe"](False)
+    except AssertionError:
+        return True
+    return False
+
+
 def test_calibre_o2_optimization_behavior():
     print("\n--- [CHALLENGER 1] Calibre -O2 Compiler & Assertion Behavior ---")
     print(f"  sys.flags.optimize: {sys.flags.optimize}")
     print(f"  __debug__: {__debug__}")
 
-    # Under -O2, __debug__ must be False and optimize must be 2
-    check(sys.flags.optimize == 2, f"Expected sys.flags.optimize == 2, got {sys.flags.optimize}")
-    check(__debug__ is False, f"Expected __debug__ is False under Calibre, got {__debug__}")
+    # The hazard this suite exists for: bare asserts vanish at optimize>=1. Assert the
+    # property directly instead of demanding the ambient flag, because tests/run_tests.py
+    # deliberately recompiles suites at optimize=0 so their own bare asserts stay live.
+    check(_bare_assert_survives(0) is True,
+          "a failing bare assert must raise at optimize=0")
+    check(_bare_assert_survives(2) is False,
+          "a failing bare assert must be stripped at optimize=2 (the Calibre hazard)")
+    if sys.flags.optimize >= 1:
+        check(__debug__ is False, f"Expected __debug__ is False under -O, got {__debug__}")
+    else:
+        print(f"  (interpreter runs at optimize={sys.flags.optimize}; the -O2 hazard is")
+        print("   verified by the explicit optimize=2 compile instead of the ambient flag)")
 
     # Empirically demonstrate that check() raises AssertionError
     caught = False
@@ -49,7 +70,7 @@ def test_calibre_o2_optimization_behavior():
         caught = True
         check("Empirical invalidation test" in str(e), "Error message corrupted")
 
-    check(caught is True, "check() failed to raise AssertionError under -O2!")
+    check(caught is True, "check() failed to raise AssertionError")
     print("  ✓ Confirmed check() is strictly enforced and cannot be stripped by -O2 compiler.")
 
 

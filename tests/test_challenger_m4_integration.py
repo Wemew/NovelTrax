@@ -203,6 +203,18 @@ class ChallengerRecorder:
             return False
 
 
+def template_name_of(response):
+    """Template name across Starlette versions and this suite's no-FastAPI shim.
+
+    Starlette exposes ``response.template.name``; older releases and the shim in this
+    file expose ``response.template_name``.
+    """
+    name = getattr(response, "template_name", None)
+    if name:
+        return name
+    return getattr(getattr(response, "template", None), "name", None)
+
+
 def run_async(coro):
     """Executes a coroutine safely without Windows IOCP deadlocks in embedded Calibre."""
     try:
@@ -758,8 +770,9 @@ def run_part_2_api_surface(r: ChallengerRecorder):
 
     # Test direct execution of prioritized_view for 'series' mode
     req_mock = MockRequest() if not HAS_FASTAPI else Request({"type": "http", "method": "GET", "url": "/prioritized"})
-    view_series_res = run_async(handler_prio_view(req_mock, view="series"))
-    r.check(hasattr(view_series_res, "template_name") and view_series_res.template_name == "prioritized.html",
+    prio_defaults = {"page": 1, "page_size": 30, "sort": "wanted_first", "q": None, "status": None}
+    view_series_res = run_async(handler_prio_view(req_mock, view="series", **prio_defaults))
+    r.check(template_name_of(view_series_res) == "prioritized.html",
             "prioritized_view renders 'prioritized.html'")
     ctx_series = getattr(view_series_res, "context", {})
     r.check(ctx_series.get("active_page") == "prioritized", "Context has active_page='prioritized'")
@@ -768,7 +781,7 @@ def run_part_2_api_surface(r: ChallengerRecorder):
     r.check("grouped_series" in ctx_series, "Context contains 'grouped_series'")
 
     # Test direct execution of prioritized_view for 'flat' mode
-    view_flat_res = run_async(handler_prio_view(req_mock, view="flat"))
+    view_flat_res = run_async(handler_prio_view(req_mock, view="flat", **prio_defaults))
     ctx_flat = getattr(view_flat_res, "context", {})
     r.check(ctx_flat.get("current_view") == "flat", "Context has current_view='flat'")
     r.check("releases" in ctx_flat, "Context contains 'releases'")
