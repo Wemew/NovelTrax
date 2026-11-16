@@ -11,7 +11,13 @@ for _p in (_BASE, os.path.join(_BASE, "backend"), _HERE):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from app.epub_metadata import read_epub_metadata, write_epub_metadata  # noqa: E402
+from app.epub_metadata import (  # noqa: E402
+    MAX_ENTRY_BYTES,
+    MAX_OPF_BYTES,
+    EpubMetadataError,
+    read_epub_metadata,
+    write_epub_metadata,
+)
 from app import epub_prefill  # noqa: E402
 from app.database import Database  # noqa: E402
 
@@ -174,8 +180,99 @@ def test_read_missing_and_non_epub():
         raise AssertionError("PDF accepted")
 
 
+def _add_zero_entry(book, name, size):
+    info = zipfile.ZipInfo(name)
+    info.compress_type = zipfile.ZIP_DEFLATED
+    chunk = b"\0" * (1024 * 1024)
+    with book.open(info, "w") as handle:
+        remaining = size
+        while remaining > 0:
+            piece = chunk if remaining >= len(chunk) else chunk[:remaining]
+            handle.write(piece)
+            remaining -= len(piece)
+
+
+def _container_xml(opf_path):
+    return (
+        '<?xml version="1.0"?>\n'
+        '<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">\n'
+        f'  <rootfiles><rootfile full-path="{opf_path}" '
+        'media-type="application/oebps-package+xml"/></rootfiles>\n'
+        '</container>'
+    )
+
+
+def _temp_leftovers(path):
+    directory = os.path.dirname(os.path.abspath(path))
+    basename = os.path.basename(path)
+    return [
+        name for name in os.listdir(directory)
+        if name.startswith(f".{basename}.") and name.endswith(".ntmeta")
+    ]
+
+
+def test_oversized_opf_rejected():
+    fd, path = tempfile.mkstemp(suffix=".epub")
+    os.close(fd)
+    try:
+        with zipfile.ZipFile(path, "w") as book:
+            book.writestr("META-INF/container.xml", _container_xml("OEBPS/content.opf"))
+            _add_zero_entry(book, "OEBPS/content.opf", MAX_OPF_BYTES + 1)
+        for label, call in (
+            ("read", lambda: read_epub_metadata(path)),
+            ("write", lambda: write_epub_metadata(path, {"title": "Too Big"})),
+        ):
+            try:
+                call()
+            except EpubMetadataError:
+                pass
+            else:
+                raise AssertionError(f"{label} accepted an oversized OPF entry")
+    finally:
+        os.remove(path)
+
+
+def test_oversized_entry_blocks_write():
+    fd, path = tempfile.mkstemp(suffix=".epub")
+    os.close(fd)
+    try:
+        make_epub(path)
+        with zipfile.ZipFile(path, "a") as book:
+            _add_zero_entry(book, "OEBPS/payload.bin", MAX_ENTRY_BYTES + 1)
+        with open(path, "rb") as handle:
+            before = handle.read()
+        try:
+            write_epub_metadata(path, {"title": "Should Not Apply"})
+        except EpubMetadataError:
+            pass
+        else:
+            raise AssertionError("write accepted an oversized entry")
+        with open(path, "rb") as handle:
+            after = handle.read()
+        check(before == after, "archive changed despite rejected write")
+        check(not _temp_leftovers(path), _temp_leftovers(path))
+    finally:
+        os.remove(path)
+
+
+def test_roundtrip_leaves_no_temp_file():
+    fd, path = tempfile.mkstemp(suffix=".epub")
+    os.close(fd)
+    try:
+        make_epub(path)
+        written = write_epub_metadata(path, {"title": "Temp Free"})
+        check(written["title"] == "Temp Free", written)
+        check(read_epub_metadata(path)["title"] == "Temp Free", "roundtrip")
+        check(not _temp_leftovers(path), _temp_leftovers(path))
+    finally:
+        os.remove(path)
+
+
 def main():
     test_roundtrip_preserves_epub()
+    test_oversized_opf_rejected()
+    test_oversized_entry_blocks_write()
+    test_roundtrip_leaves_no_temp_file()
     test_prefill_writes_and_queues_review()
     test_prefill_uses_real_series_row()
     test_existing_download_backfill()
