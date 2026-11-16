@@ -404,15 +404,25 @@ class ChallengerStressSuite:
         except ValueError as e:
             check("SSRF blocked" in str(e), f"Unexpected exception message: {e}")
 
+        # safe_http_get streams the body so the byte ceiling is enforced in flight; the
+        # stub therefore models ``client.stream(...)`` and ``resp.iter_bytes()``.
+        def stub_stream(mock_client, resp):
+            stream_cm = MagicMock()
+            stream_cm.__enter__.return_value = resp
+            stream_cm.__exit__.return_value = False
+            mock_client.stream.return_value = stream_cm
+            return resp
+
+        def iter_chunks(payload):
+            return lambda: iter([payload[i:i + 65536] for i in range(0, len(payload), 65536)])
+
         # 2. Redirect to private IP under httpx
         mock_httpx = MagicMock()
         mock_client = MagicMock()
         mock_resp_redir = MagicMock()
         mock_resp_redir.is_redirect = True
         mock_resp_redir.headers = {"location": "http://192.168.1.100/internal"}
-        mock_client.get.return_value = mock_resp_redir
-        mock_client.__enter__.return_value = mock_client
-        mock_client.__exit__.return_value = None
+        stub_stream(mock_client, mock_resp_redir)
         mock_httpx.Client.return_value = mock_client
 
         with patch.object(security_mod, "httpx", mock_httpx):
@@ -426,7 +436,7 @@ class ChallengerStressSuite:
         mock_resp_loop = MagicMock()
         mock_resp_loop.is_redirect = True
         mock_resp_loop.headers = {"location": "http://1.1.1.1/loop"}
-        mock_client.get.return_value = mock_resp_loop
+        stub_stream(mock_client, mock_resp_loop)
 
         with patch.object(security_mod, "httpx", mock_httpx):
             try:
@@ -439,7 +449,7 @@ class ChallengerStressSuite:
         mock_resp_oversized_header = MagicMock()
         mock_resp_oversized_header.is_redirect = False
         mock_resp_oversized_header.headers = {"content-length": "20000000"}  # 20MB
-        mock_client.get.return_value = mock_resp_oversized_header
+        stub_stream(mock_client, mock_resp_oversized_header)
 
         with patch.object(security_mod, "httpx", mock_httpx):
             try:
@@ -452,8 +462,8 @@ class ChallengerStressSuite:
         mock_resp_oversized_body = MagicMock()
         mock_resp_oversized_body.is_redirect = False
         mock_resp_oversized_body.headers = {}
-        mock_resp_oversized_body.content = b"X" * (1024 * 1024 + 50)
-        mock_client.get.return_value = mock_resp_oversized_body
+        mock_resp_oversized_body.iter_bytes = iter_chunks(b"X" * (1024 * 1024 + 50))
+        stub_stream(mock_client, mock_resp_oversized_body)
 
         with patch.object(security_mod, "httpx", mock_httpx):
             try:

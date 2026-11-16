@@ -300,11 +300,12 @@ def is_safe_downloader_url(url: str) -> bool:
     return is_valid
 
 class SafeResponse:
-    """Lightweight response abstraction for urllib fallback."""
-    def __init__(self, status_code: int, content: bytes, headers: dict):
+    """Lightweight response abstraction for the bounded fetchers (httpx stream and urllib)."""
+    def __init__(self, status_code: int, content: bytes, headers: dict, encoding: Optional[str] = None):
         self.status_code = status_code
         self.content = content
-        self.text = content.decode("utf-8", errors="ignore")
+        self.encoding = encoding or "utf-8"
+        self.text = content.decode(self.encoding, errors="ignore")
         self.headers = headers
 
 class SSRFSafeRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -416,27 +417,38 @@ def safe_http_get(
         try:
             redirects = 0
             while True:
-                resp = client.get(current_url)
+                # Stream so the byte ceiling is enforced while the body arrives; a
+                # fully buffered `client.get()` would already have allocated the
+                # whole payload before the size check could reject it.
+                with client.stream("GET", current_url) as resp:
+                    if resp.is_redirect and "location" in resp.headers:
+                        redirects += 1
+                        if redirects > max_redirects:
+                            raise ValueError(f"Maximum redirects ({max_redirects}) exceeded.")
 
-                if resp.is_redirect and "location" in resp.headers:
-                    redirects += 1
-                    if redirects > max_redirects:
-                        raise ValueError(f"Maximum redirects ({max_redirects}) exceeded.")
+                        next_url = urljoin(current_url, resp.headers["location"])
+                        if not is_safe_public_url(next_url):
+                            raise ValueError(f"SSRF blocked: Redirect hop targets unsafe destination: {next_url}")
+                        current_url = next_url
+                        continue
 
-                    next_url = urljoin(current_url, resp.headers["location"])
-                    if not is_safe_public_url(next_url):
-                        raise ValueError(f"SSRF blocked: Redirect hop targets unsafe destination: {next_url}")
-                    current_url = next_url
-                    continue
+                    content_length = resp.headers.get("content-length")
+                    if content_length and content_length.isdigit() and int(content_length) > max_bytes:
+                        raise ValueError(f"Response size ({content_length} bytes) exceeds limit of {max_bytes} bytes.")
 
-                content_length = resp.headers.get("content-length")
-                if content_length and content_length.isdigit() and int(content_length) > max_bytes:
-                    raise ValueError(f"Response size ({content_length} bytes) exceeds limit of {max_bytes} bytes.")
+                    body = bytearray()
+                    for chunk in resp.iter_bytes():
+                        body.extend(chunk)
+                        if len(body) > max_bytes:
+                            raise ValueError(f"Response payload exceeds maximum allowed size of {max_bytes} bytes.")
 
-                if len(resp.content) > max_bytes:
-                    raise ValueError(f"Response payload exceeds maximum allowed size of {max_bytes} bytes.")
-
-                return resp
+                    encoding = getattr(resp, "charset_encoding", None)
+                    return SafeResponse(
+                        status_code=resp.status_code,
+                        content=bytes(body),
+                        headers=dict(resp.headers),
+                        encoding=encoding if isinstance(encoding, str) else None,
+                    )
         finally:
             client.close()
     else:
@@ -476,3 +488,27 @@ def sanitize_calibre_path(path_str: str) -> str:
         raise ValueError(f"Invalid path: Probing of '{base_name}' files is disallowed.")
 
     return cleaned
+
+
+def sanitize_href(url: Any) -> str:
+    """
+    Returns ``url`` only when it is an absolute http(s) URL; otherwise an empty string.
+
+    Every server-rendered link passes through this filter. Jinja's autoescaping stops
+    markup injection but does not restrict the URL scheme, so a stored value such as
+    ``javascript:alert(1)`` would otherwise render as a clickable script in the
+    dashboard origin (CSP permits inline script, see RR-06). No DNS resolution is
+    performed: rendering a page must not depend on the network.
+    """
+    if not url or not isinstance(url, str):
+        return ""
+    candidate = url.strip()
+    if not candidate or any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in candidate):
+        return ""
+    try:
+        parsed = urlparse(candidate)
+    except ValueError:
+        return ""
+    if parsed.scheme.lower() not in ("http", "https") or not parsed.hostname:
+        return ""
+    return candidate

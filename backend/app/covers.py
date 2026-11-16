@@ -1,14 +1,14 @@
 import os
 import hashlib
 import logging
-import socket
-import ipaddress
 from typing import Optional, Tuple
-from urllib.parse import urlparse, urljoin
+from urllib.parse import urljoin
 try:
     import httpx
 except ImportError:
     httpx = None
+
+from app.security import is_safe_public_url
 
 logger = logging.getLogger("noveltrax.covers")
 
@@ -21,45 +21,6 @@ HEADERS = {
 MAX_COVER_BYTES = 5 * 1024 * 1024  # 5 MB maximum image size
 DOWNLOAD_TIMEOUT_SECONDS = 7.0
 MAX_REDIRECTS = 3
-
-def is_safe_public_url(url: str) -> bool:
-    """
-    Prevents Server-Side Request Forgery (SSRF).
-    Ensures that the URL targets a public HTTP/HTTPS host,
-    and explicitly blocks private, loopback, link-local, and reserved IP ranges.
-    """
-    if not url or not isinstance(url, str):
-        return False
-
-    try:
-        parsed = urlparse(url)
-        if parsed.scheme not in ("http", "https"):
-            return False
-
-        hostname = parsed.hostname
-        if not hostname:
-            return False
-
-        # Disallow localhost by name
-        if hostname.lower() in ("localhost", "127.0.0.1", "::1", "0.0.0.0"):
-            return False
-
-        # Resolve DNS addresses
-        addr_info = socket.getaddrinfo(hostname, None)
-        for family, _, _, _, sockaddr in addr_info:
-            ip_str = sockaddr[0]
-            ip = ipaddress.ip_address(ip_str)
-
-            # Block private, loopback, cloud metadata (169.254.x.x), multicast, or reserved IPs
-            if (ip.is_private or ip.is_loopback or ip.is_link_local 
-                or ip.is_reserved or ip.is_multicast or ip.is_unspecified):
-                logger.warning(f"SSRF Protection blocked request to private/internal IP: {ip_str} ({url})")
-                return False
-
-        return True
-    except Exception as e:
-        logger.debug(f"SSRF check failed/blocked for URL {url}: {e}")
-        return False
 
 def detect_valid_image(data: bytes) -> Optional[str]:
     """
