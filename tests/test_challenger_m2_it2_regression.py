@@ -285,7 +285,9 @@ def test_api_routes_smoke():
         # 2. API Series List
         res = client.get("/api/series")
         check(res.status_code == 200, f"GET /api/series status code: {res.status_code}")
-        check(isinstance(res.json(), list), "/api/series returns list")
+        payload = res.json()
+        check(isinstance(payload, dict) and isinstance(payload.get("series"), list),
+              "/api/series returns dict with series list")
 
         # 3. API Releases List
         res = client.get("/api/releases")
@@ -293,13 +295,13 @@ def test_api_routes_smoke():
         data = res.json()
         check("releases" in data or isinstance(data, list), "/api/releases response structure valid")
 
-        # 4. API Discovery List
-        res = client.get("/api/discovery")
-        check(res.status_code == 200, f"GET /api/discovery status code: {res.status_code}")
+        # 4. API Discovery Cards List
+        res = client.get("/api/discovery/cards")
+        check(res.status_code == 200, f"GET /api/discovery/cards status code: {res.status_code}")
 
-        # 5. API Settings
-        res = client.get("/api/settings")
-        check(res.status_code == 200, f"GET /api/settings status code: {res.status_code}")
+        # 5. Settings Page (settings API is POST-only; read-only smoke uses the page)
+        res = client.get("/settings")
+        check(res.status_code == 200, f"GET /settings status code: {res.status_code}")
 
         # 6. Security Header Checks
         check(res.headers.get("X-Content-Type-Options") == "nosniff", "Security header X-Content-Type-Options present")

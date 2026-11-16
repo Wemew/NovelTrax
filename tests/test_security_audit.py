@@ -304,9 +304,13 @@ def test_dependency_minimization():
         check(not line.startswith("pydantic"), "redundant top-level pydantic must be removed")
 
     expected_pkgs = {"fastapi", "uvicorn[standard]", "jinja2", "httpx", "beautifulsoup4", "feedparser", "apscheduler"}
-    manifest_pkgs = {line.split(">=")[0] for line in req_lines}
+    # Strip any version specifier (`>=`, `==`, `<`, extras kept) so the set stays the
+    # dependency contract while the manifest is free to pin exact versions.
+    manifest_pkgs = {re.split(r"[<>=!~ ]", line, maxsplit=1)[0] for line in req_lines}
     check(manifest_pkgs == expected_pkgs, f"Manifest mismatch: {manifest_pkgs} != {expected_pkgs}")
-    print(f"  ✓ Verified requirements.txt contains exactly 7 optimized packages: {sorted(list(expected_pkgs))}")
+    for line in req_lines:
+        check("==" in line, f"dependencies must be pinned to exact versions: {line}")
+    print(f"  ✓ Verified requirements.txt contains exactly 7 pinned packages: {sorted(list(expected_pkgs))}")
 
 
 def test_jnovels_master_index_indentation_fix():

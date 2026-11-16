@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import patch, MagicMock
 import io
 import ast
+import socket
 import time
 import re
 
@@ -30,6 +31,15 @@ class ChallengerJNovelsStressTest(unittest.TestCase):
     - High-throughput load testing
     - Network exception resilience
     """
+
+    def setUp(self):
+        # Force the urllib fallback branch so the patched urlopen transport is the
+        # one under test. That branch parses straight from urlopen and never
+        # consults the SSRF guard, so no DNS or network call escapes the mocks.
+        # test_httpx_client_branch overrides this with its own mock_httpx patch.
+        httpx_patcher = patch("app.providers.jnovels.httpx", None)
+        httpx_patcher.start()
+        self.addCleanup(httpx_patcher.stop)
 
     def _mock_urllib_response(self, html_str: str):
         mock_resp = MagicMock()
@@ -254,20 +264,28 @@ class ChallengerJNovelsStressTest(unittest.TestCase):
         mock_client.__exit__.return_value = None
         mock_httpx.Client.return_value = mock_client
 
-        with patch("app.providers.jnovels.httpx", mock_httpx):
+        # The httpx branch goes through safe_client_get, whose SSRF guard resolves the
+        # host. Stub DNS with a public address so the guard still validates the URL
+        # without any real outbound lookup.
+        public_dns = [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("93.184.216.34", 0))]
+
+        with patch("app.providers.jnovels.httpx", mock_httpx), \
+                patch("app.security.socket.getaddrinfo", return_value=public_dns):
             res = JNovelsProvider.fetch_master_index()
             self.assertEqual(len(res), 1)
             self.assertEqual(res[0].series_name, "HTTPX Series")
 
         # Test HTTP 500 error in httpx
         mock_resp.status_code = 500
-        with patch("app.providers.jnovels.httpx", mock_httpx):
+        with patch("app.providers.jnovels.httpx", mock_httpx), \
+                patch("app.security.socket.getaddrinfo", return_value=public_dns):
             res = JNovelsProvider.fetch_master_index()
             self.assertEqual(res, [])
 
         # Test Request exception in httpx
         mock_client.get.side_effect = Exception("HTTPX Connection Failure")
-        with patch("app.providers.jnovels.httpx", mock_httpx):
+        with patch("app.providers.jnovels.httpx", mock_httpx), \
+                patch("app.security.socket.getaddrinfo", return_value=public_dns):
             res = JNovelsProvider.fetch_master_index()
             self.assertEqual(res, [])
 

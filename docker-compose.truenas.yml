@@ -24,9 +24,13 @@ services:
       - ALL
 
     ports:
-      # Format: "HOST_PORT:CONTAINER_PORT"
-      # If 8080 is used by another service on TrueNAS, change left side (e.g., "8282:8080")
-      - "8080:8080"
+      # Default binds loopback: the API has no authentication (SEC-07). Keep the port
+      # on 127.0.0.1 and front it with an authenticating reverse proxy, or opt in to
+      # LAN exposure explicitly: NOVELTRAX_BIND=0.0.0.0 (TrueNAS: set the same value
+      # in the app's environment variables).
+      # Format: "${NOVELTRAX_BIND:-127.0.0.1}:HOST_PORT:CONTAINER_PORT"
+      # If 8080 is used by another service, change the middle number (e.g. 8282:8080).
+      - "${NOVELTRAX_BIND:-127.0.0.1}:8080:8080"
 
     environment:
       - PORT=8080

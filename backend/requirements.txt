@@ -1,7 +1,11 @@
-fastapi>=0.110.0
-uvicorn[standard]>=0.28.0
-jinja2>=3.1.3
-httpx>=0.27.0
-beautifulsoup4>=4.12.3
-feedparser>=6.0.11
-apscheduler>=3.10.4
+# Runtime dependencies, pinned to the versions this build is verified against.
+# The previous `>=` ranges meant every image rebuild resolved a different tree, so
+# a compromised or broken transitive release could enter without a code change.
+# Update deliberately, then re-run tests/run_tests.py and `pip-audit -r` this file.
+fastapi==0.162.4
+uvicorn[standard]==0.54.0
+jinja2==3.1.6
+httpx==0.28.1
+beautifulsoup4==4.15.0
+feedparser==6.0.14
+apscheduler==3.11.3

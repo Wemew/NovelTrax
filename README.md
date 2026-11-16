@@ -139,7 +139,10 @@ services:
     cap_drop:
       - ALL
     ports:
-      - "8080:8080"
+      # Loopback by default: the API is unauthenticated (see SECURITY_AUDIT.md
+      # SEC-07). Front it with an authenticating proxy, or set
+      # NOVELTRAX_BIND=0.0.0.0 to expose it on a trusted LAN.
+      - "${NOVELTRAX_BIND:-127.0.0.1}:8080:8080"
     environment:
       - PORT=8080
       - CALIBRE_DIR=/calibre
@@ -198,7 +201,10 @@ services:
     cap_drop:
       - ALL
     ports:
-      - "8080:8080"
+      # Loopback by default: the API is unauthenticated (see SECURITY_AUDIT.md
+      # SEC-07). Front it with an authenticating proxy, or set
+      # NOVELTRAX_BIND=0.0.0.0 to expose it on a trusted LAN.
+      - "${NOVELTRAX_BIND:-127.0.0.1}:8080:8080"
     environment:
       - PORT=8080
       - CALIBRE_DIR=/calibre
