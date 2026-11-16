@@ -362,24 +362,24 @@ opened from inspection alone; each item below was reproduced before being filed.
 
 ### 10.3 Test-suite state at revision 4
 
-The full runner (`python tests/run_tests.py`, 92 suites) was executed twice — once on `0d03ccf`
-and once on this revision. Baseline: 85 pass, 7 fail. Three were environmental
-(`test_challenger_adversarial_ip` asserts Calibre's `optimize==2`; `test_challenger_m4_integration`
-and `test_full_workflow` hit `SchedulerNotRunningError` on teardown). Four were stale suites:
+The full runner (`python tests/run_tests.py`) was executed on `0d03ccf`, during the audit, and on
+this revision. Baseline: 85 of 92 suites passed. All seven failures were pre-existing harness or
+drift problems, not control regressions; each was diagnosed and is now closed. At this revision:
+**93 of 93 suites pass.**
 
-- `test_challenger_m1_adversarial` patched `urllib.request.urlopen` while production uses httpx, so
-  it silently performed live network fetches (1369 items) and failed 8 assertions. Repaired to drive
-  the urllib fallback explicitly for the parsing tests and to stub DNS for the httpx branch; it now
-  runs with no outbound socket.
-- `test_challenger_m2_it2_regression` asserted the pre-`M2` `/api/series` list contract and
-  `GET /api/settings` (POST-only). Updated to the current contracts.
-- `test_e2e_suite` fails one non-security source-text check (`T1_F13_4`, duplicate-return scan of
-  `metadata.py`); all T1_F06…F11 and T2_F06…F08 security cases pass.
-- `test_publication_metadata` fails `GraphQL query requests the format field` (AniList query drift).
-  This is a pre-existing functional gap, unrelated to the security controls, and is left open.
+| Suite | Baseline failure | Disposition |
+| :--- | :--- | :--- |
+| `test_challenger_adversarial_ip` | asserted the ambient `sys.flags.optimize == 2`; `run_tests.py` deliberately recompiles suites at `optimize=0` so their own bare asserts stay live | Rewritten to prove the property the probe exists for: a failing bare `assert` raises at `optimize=0` and is stripped at `optimize=2`, with the ambient flag-reported, not demanded |
+| `test_challenger_m4_integration` | `SchedulerNotRunningError` in `TaskManager.stop()`, then (after that) direct handler calls that relied on FastAPI parameter defaults | App fix: `stop()` now shuts the scheduler down only when it is running, so teardown is idempotent. Test fix: the `/prioritized` handler is called with its parameter defaults, and the template name is read through `template.name` (current Starlette) or `template_name` (older releases and the suite's own shim) |
+| `test_full_workflow` | same `stop()` failure; then `TemplateAssertionError: No filter named 'safe_href'` because the stage rendered the partials with a bare `jinja2.Environment` | App fix as above. Test fix: the rendering stage registers the application's `safe_href` filter, so it renders with the filter set production actually uses |
+| `test_e2e_suite` | `T1_F13_4` regex flagged any `return` line followed by another `return` line, including correct guard-then-return code (`if not text: return ""` / `return str(value)`) | Check rewritten to parse the module and report statements that follow `return`/`raise` **in the same block** — the actual unreachable-code defect. Verified it still flags a genuine `return 1; return 2` pair and ignores guards |
+| `test_publication_metadata` | stubbed only `urllib.request.urlopen` while `_anilist_graphql` uses the httpx path whenever httpx is importable, so the suite queried the live AniList API and then failed its own query assertion | Stub now patches the transport actually used (httpx client, with the urllib fallback kept for interpreters without httpx) and fixes DNS for the guard, so the suite is deterministic and performs no network I/O (verified with `socket.getaddrinfo` and `socket.create_connection` raising) |
+| `test_challenger_m1_adversarial` | patched `urllib.request.urlopen` while production uses httpx, so it silently performed live network fetches (1369 items) and failed 8 assertions | Drives the urllib fallback explicitly for the parsing tests and stubs DNS for the httpx branch; runs with no outbound socket |
+| `test_challenger_m2_it2_regression` | asserted the pre-M2 `/api/series` list contract and `GET /api/settings` (POST-only) | Updated to the current contracts (`series` list inside the JSON envelope; the settings page is read via `GET /settings`) |
 
-The remaining failures are recorded rather than silently skipped; none of them exercises an SSRF,
-XSS, path, secret or resource control that this revision changed.
+Suite counts are reported as evidence of what actually ran: `test_e2e_suite` 255/255,
+`test_publication_metadata` 359/359 checks, `test_security_hardening` all checks,
+`test_security_audit`, the adversarial M1 suites and `test_epub_metadata` all passing.
 
 ### 10.4 Residual risk additions
 
