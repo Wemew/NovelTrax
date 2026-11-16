@@ -2807,7 +2807,11 @@ class TaskManager:
                 logger.warning(f"Could not reschedule feed_check: {e}")
 
     def stop(self):
-        self.scheduler.shutdown(wait=False)
+        # Teardown must be safe to call when the scheduler never started (tests,
+        # failed startup, repeated shutdown): APScheduler 3 raises
+        # SchedulerNotRunningError otherwise.
+        if getattr(self.scheduler, "running", False):
+            self.scheduler.shutdown(wait=False)
         self._cover_executor.shutdown(wait=False)
 
     @background_tasks.tracked_task("calibre_sync", "Calibre library sync")
