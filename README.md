@@ -269,7 +269,7 @@ bar on phones.
 4. **Downloading What Is Actually Missing**:
    - Sending a bundle release to qBittorrent (`POST /api/releases/{release_id}/download`) inspects the torrent's file list and deselects files whose volumes are all already owned in Calibre.
    - Example: a `DanMachi Vol 1-18` pack when Calibre owns volumes 1-15 downloads only files for volumes 16-18.
-   - A monolithic single-file archive cannot be split inside the file, so it is fetched whole; multi-file torrents always fetch the exact missing volumes only, and when a wanted volume is not present in the torrent the fetched subset is recorded as `PARTIAL` so the leftovers remain wanted.
+   - A standalone/unnumbered release's single novel file is fetched as-is (it is the release), a monolithic single-file archive cannot be split inside the file so it is fetched whole; multi-file torrents always fetch the exact missing volumes only, and when a wanted volume is not present in the torrent the fetched subset is recorded as `PARTIAL` so the leftovers remain wanted.
 
 5. **Consolidated Detection Rules** (shared with MangaTrax — see `AI-Workspace/RELEASE_DETECTION_SPEC.md`):
    - **Chapter-range → volume mapping**: `Reading Our Way … 001-009 as v01-02 + 010-012 (Digital-Compilation) (Oak)` resolves to series `Reading Our Way to a Happy New World`, volumes `[1, 2]`, chapter data `[[1,9],[10,12]]`, group `Oak`. Chapter numbers never become volumes, and the whole clause is removed from the Calibre matching key.

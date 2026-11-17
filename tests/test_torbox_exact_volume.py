@@ -90,6 +90,7 @@ def test_unknown_wanted_volumes_never_fetch_whole_torrent():
         release = env.add_release("Mystery Bundle [EPUB]", volume=None)
         outcome = poll_ready(env, release, [
             {"id": 1, "name": "Mystery v01.epub", "size": 10},
+            {"id": 2, "name": "Mystery v02.epub", "size": 10},
         ])
         check_eq(outcome.get("completed"), 0, "unknown wanted volumes are not fetched")
         row = env.db.get_release_by_id(release["id"])
@@ -97,6 +98,24 @@ def test_unknown_wanted_volumes_never_fetch_whole_torrent():
         check_eq(env.fake.fetched, [], "no file download was attempted")
         files = json.loads(row.get("download_files_json") or "[]")
         check_eq(files, [], "no files recorded")
+    finally:
+        env.cleanup()
+
+
+def test_standalone_single_file_is_fetched():
+    """An unnumbered/standalone release is exactly its one novel file."""
+    env = ManagerEnv()
+    try:
+        release = env.add_release("Standalone Novel [EPUB]", volume=None)
+        outcome = poll_ready(env, release, [
+            {"id": 1, "name": "Standalone Novel.epub", "size": 8},
+        ])
+        check_eq(outcome.get("completed"), 1, "standalone single-file torrent is fetched")
+        row = env.db.get_release_by_id(release["id"])
+        check_eq(row.get("download_status"), "COMPLETED", "standalone release is completed")
+        saved = json.loads(row.get("download_files_json") or "[]")
+        check_eq(saved, [os.path.join(env.downloads, "Standalone Novel.epub")],
+                 "standalone file lands flat in downloads_dir")
     finally:
         env.cleanup()
 
@@ -186,6 +205,7 @@ def test_cleanup_only_removes_this_fetch_files():
 def main():
     test_wanted_volumes_come_from_calibre_ownership()
     test_unknown_wanted_volumes_never_fetch_whole_torrent()
+    test_standalone_single_file_is_fetched()
     test_partial_selection_keeps_missing_volumes_wanted()
     test_flat_folder_collision_is_disambiguated()
     test_cleanup_only_removes_this_fetch_files()

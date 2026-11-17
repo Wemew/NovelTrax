@@ -1275,16 +1275,7 @@ class TorBoxManager:
             "mapping": [],
         }
 
-        # Exact-volume policy: never fall back to the whole-torrent archive.  If
-        # the missing volumes cannot be determined, or TorBox has not returned a
-        # file list yet, skip instead of pulling owned volumes onto disk.
-        if not wanted:
-            return {
-                **plan,
-                "action": "skip",
-                "files": None,
-                "reason": "wanted volumes unknown: refusing a whole-torrent fetch",
-            }
+        # Exact-volume policy: never fall back to the whole-torrent archive.
         if not file_items:
             return {
                 **plan,
@@ -1323,6 +1314,30 @@ class TorBoxManager:
                 "action": "skip",
                 "files": None,
                 "reason": "no novel file names could be mapped to volumes",
+            }
+
+        if not wanted:
+            # A standalone/unnumbered release is exactly its single file; any
+            # multi-file torrent without known wanted volumes is refused.
+            if len(novel_indices) == 1:
+                standalone = file_items[novel_indices[0]]
+                self._check_file_size(standalone, self._max_download_bytes())
+                return {
+                    **plan,
+                    "action": "files",
+                    "files": [standalone],
+                    "selected_count": 1,
+                    "selected_volumes": sorted(mapping[novel_indices[0]]["volumes"]),
+                    "reason": "standalone release: single novel file",
+                }
+            return {
+                **plan,
+                "action": "skip",
+                "files": None,
+                "reason": (
+                    f"wanted volumes unknown and the torrent has "
+                    f"{len(novel_indices)} novel files: refusing a whole-torrent fetch"
+                ),
             }
         if unmapped:
             logger.info(

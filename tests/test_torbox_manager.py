@@ -1133,7 +1133,7 @@ def test_plan_selection():
         empty = env.manager._plan_selection(release, [], [])
         check_equal(empty.get("action"), "skip",
                     "unknown wanted volumes never trigger a whole-torrent fetch")
-        check_contains(empty.get("reason"), "wanted volumes unknown", "skip reason explains itself")
+        check_contains(empty.get("reason"), "no file list", "skip reason explains itself")
 
         no_files = env.manager._plan_selection(release, [], [1.0])
         check_equal(no_files.get("action"), "skip",
