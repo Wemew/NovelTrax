@@ -4437,6 +4437,140 @@ class Database:
             )
             conn.commit()
 
+    def reconcile_missing_downloads(self, downloads_dir: str) -> int:
+        """Revert downloaded volumes whose files disappeared and are not in Calibre.
+
+        Runs on every Calibre sync.  For each release with recorded files, every
+        missing file is mapped back to its volume; volumes that are not owned in
+        Calibre become wanted again.  The release goes to REQUESTED for a tracked,
+        monitored series (or NEW/Discovery otherwise), keeps only the files that
+        still exist, and its stale engine handle is reset.  If the release's
+        volumes are all in Calibre, the row is marked IN_CALIBRE instead — a
+        DOWNLOADED row never transitions there on its own.
+        """
+        raw = str(downloads_dir or "").strip()
+        if not raw:
+            return 0
+        root = os.path.abspath(raw)
+        if not os.path.isdir(root):
+            return 0
+        from app.parser import extract_series_and_volume, strip_ordinal_date_suffix
+        touched: List[int] = []
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            rows = cur.execute(
+                "SELECT id, series_name, status, download_status, download_files_json, "
+                "volume, volumes_json FROM releases WHERE status != 'IN_CALIBRE' "
+                "AND download_status IN ('COMPLETED', 'PARTIAL') "
+                "AND download_files_json IS NOT NULL AND download_files_json NOT IN ('', '[]');"
+            ).fetchall()
+            for row in rows:
+                try:
+                    paths = json.loads(row["download_files_json"] or "[]")
+                except (TypeError, ValueError):
+                    continue
+                paths = [str(path) for path in (paths or []) if path]
+                under_root = [
+                    path for path in paths
+                    if os.path.abspath(path).startswith(root + os.sep)
+                ]
+                if not under_root:
+                    # Never reconcile based on paths from another mount/container.
+                    continue
+                existing = [path for path in under_root if os.path.isfile(path)]
+                missing = [path for path in under_root if path not in existing]
+                if not missing:
+                    continue
+
+                raw_series = str(row["series_name"] or "")
+                series_name = strip_ordinal_date_suffix(raw_series) or raw_series
+                tracked = cur.execute(
+                    "SELECT is_monitored, owned_volumes_json FROM series_tracking "
+                    "WHERE lower(trim(name)) = lower(trim(?)) "
+                    "   OR noveltrax_series_key(name) = noveltrax_series_key(?) "
+                    "LIMIT 1;",
+                    (series_name, series_name),
+                ).fetchone()
+                if tracked is None:
+                    tracked = cur.execute(
+                        "SELECT st.is_monitored, st.owned_volumes_json "
+                        "FROM series_alias_overrides sao "
+                        "JOIN series_tracking st "
+                        "  ON lower(trim(st.name)) = lower(trim(sao.target_name)) "
+                        "WHERE lower(trim(sao.source_name)) = lower(trim(?)) "
+                        "   OR noveltrax_series_key(sao.source_name) = noveltrax_series_key(?) "
+                        "LIMIT 1;",
+                        (raw_series, raw_series),
+                    ).fetchone()
+                owned = set()
+                if tracked is not None:
+                    try:
+                        owned = {
+                            round(float(value), 2)
+                            for value in (json.loads(tracked["owned_volumes_json"] or "[]") or [])
+                        }
+                    except (TypeError, ValueError):
+                        owned = set()
+                try:
+                    release_volumes = {
+                        round(float(value), 2)
+                        for value in (json.loads(row["volumes_json"] or "[]") or [])
+                    }
+                except (TypeError, ValueError):
+                    release_volumes = set()
+                if not release_volumes and row["volume"] is not None:
+                    release_volumes = {round(float(row["volume"]), 2)}
+                if release_volumes and owned and release_volumes <= owned:
+                    # Already imported into Calibre even though the row never
+                    # flipped (pending resolution only covers REQUESTED rows).
+                    cur.execute(
+                        "UPDATE releases SET status = 'IN_CALIBRE', download_status = 'IDLE', "
+                        "download_error = '', download_attempts = 0, downloader_id = NULL, "
+                        "torrent_hash = NULL, downloader_started_at = NULL, "
+                        "download_wanted_json = '[]', torbox_progress_json = '{}', "
+                        "download_files_json = '[]', missing_vols_json = '[]', "
+                        "downloaded_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?;",
+                        (int(row["id"]),),
+                    )
+                    touched.append(int(row["id"]))
+                    continue
+
+                missing_volumes = set()
+                for path in missing:
+                    try:
+                        parsed = extract_series_and_volume(os.path.basename(path))
+                    except Exception:
+                        parsed = {}
+                    volume = parsed.get("volume")
+                    if volume is not None:
+                        missing_volumes.add(round(float(volume), 2))
+                if not missing_volumes:
+                    # File names without a volume marker: fall back to the release.
+                    missing_volumes = set(release_volumes) if len(existing) == 0 else set()
+                wanted_volumes = sorted(missing_volumes - owned)
+                tracked_monitored = bool(tracked and int(tracked["is_monitored"] or 0) == 1)
+                new_status = "REQUESTED" if tracked_monitored else "NEW"
+                new_download_status = "PARTIAL" if existing else "IDLE"
+                cur.execute(
+                    "UPDATE releases SET status = ?, download_status = ?, "
+                    "download_error = '', download_attempts = 0, downloader_id = NULL, "
+                    "torrent_hash = NULL, downloader_started_at = NULL, "
+                    "download_wanted_json = '[]', torbox_progress_json = '{}', "
+                    "download_files_json = ?, missing_vols_json = ?, "
+                    "downloaded_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?;",
+                    (new_status, new_download_status, json.dumps(existing),
+                     json.dumps(wanted_volumes), int(row["id"])),
+                )
+                touched.append(int(row["id"]))
+            conn.commit()
+        if touched:
+            self.log_activity(
+                "RELEASE_DOWNLOAD_MISSING",
+                f"Reconciled {len(touched)} release(s) whose downloaded files disappeared",
+                json.dumps({"release_ids": touched[:100], "count": len(touched)}),
+            )
+        return len(touched)
+
     def backfill_completed_download_statuses(self) -> int:
         """One-shot repair for rows downloaded before DOWNLOADED existed."""
         with self.get_connection() as conn:

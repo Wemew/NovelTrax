@@ -2890,6 +2890,22 @@ class TaskManager:
                 if notify_acquired_enabled:
                     notifier.notify_acquired(acq)
 
+            # A downloaded volume whose file was removed from disk and never
+            # reached Calibre must become wanted again (or a discovery row).
+            try:
+                downloads_dir = str(
+                    self.db.get_setting("downloads_dir", os.getenv("DOWNLOAD_DIR", "/downloads"))
+                    or "/downloads"
+                )
+                missing_count = self.db.reconcile_missing_downloads(downloads_dir)
+                if missing_count:
+                    self._task_report(
+                        message=f"Cleared {missing_count} download(s) whose files are gone…",
+                        progress_pct=88,
+                    )
+            except Exception as exc:
+                logger.debug(f"Missing-download reconciliation skipped: {exc}")
+
             # --- 3. Series identity: auto-link, bounded AniList enrichment, reconcile ---
             # Everything below is best-effort: a metadata outage or a database
             # that has not had the identity migration applied must never break

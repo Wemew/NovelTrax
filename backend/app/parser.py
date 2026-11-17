@@ -153,10 +153,28 @@ for _group in SERIES_ALIASES:
     for _alias in _group["aliases"]:
         CANONICAL_LOOKUP[normalize_text(_alias)] = _canon
 
+# J-Novels numbers some volumes as ordinal "dates": "Our Dating Story 8th Date
+# Volume 8 Epub".  The ordinal-date phrase is a volume marker, not part of the
+# series title, so it must not split one series into a card per volume.
+_ORDINAL_DATE_SUFFIX_RE = re.compile(
+    r"(?i)\s*(?:[-–—:,]\s*)?\b\d{1,2}(?:st|nd|rd|th)\s+date\b\s*$"
+)
+
+
+def strip_ordinal_date_suffix(name: str) -> str:
+    """Removes a trailing ordinal-date volume marker ("… 8th Date")."""
+    text = str(name or "").strip()
+    if not text:
+        return ""
+    stripped = _ORDINAL_DATE_SUFFIX_RE.sub("", text).strip(" -–—:,|.")
+    return stripped or text
+
+
 def get_canonical_series_name(name: str) -> str:
     """Returns canonical series name if matched against known alias sets, otherwise original name."""
     if not name:
         return ""
+    name = strip_ordinal_date_suffix(name)
     norm = normalize_text(name)
     if norm in CANONICAL_LOOKUP:
         return CANONICAL_LOOKUP[norm]
@@ -613,6 +631,11 @@ def _strip_chapter_residue(series: str) -> str:
 def _finalize_parse(raw_title: str, result: Dict[str, Any]) -> Dict[str, Any]:
     """Add the Part II detection fields and chapter data to a parse result."""
     raw = raw_title if isinstance(raw_title, str) else ""
+    # Store the series identity, not the per-volume "8th Date" suffix.
+    for key in ("series_name", "numbered_series_name"):
+        value = result.get(key)
+        if value:
+            result[key] = strip_ordinal_date_suffix(value)
     result.setdefault("chapter_number", None)
     result.setdefault("chapter_ranges", [])
     result.setdefault("chapter_range", None)
