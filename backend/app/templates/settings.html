@@ -279,6 +279,18 @@
                     </p>
                 </div>
 
+                <div>
+                    <label for="setting-hardcover-api-key" class="block text-xs font-semibold text-slate-300 mb-1">
+                        Hardcover API Key (optional)
+                    </label>
+                    <input type="password" id="setting-hardcover-api-key" name="hardcover_api_key" value=""
+                           placeholder="{% if hardcover_api_key_set %}API key saved — leave blank to keep{% else %}Paste a read-only token from hardcover.app{% endif %}"
+                           autocomplete="new-password" class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white font-mono focus:outline-none focus:border-brand-500">
+                    <p class="text-[11px] text-slate-500 mt-1">
+                        Used only to sanity-check series grouping/volume counts after AniList. Cached and rate-limited; the key is never logged or rendered back.
+                    </p>
+                </div>
+
                 <div id="torbox-test-result" class="hidden p-3 rounded-xl text-xs font-mono"></div>
 
                 <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2 border-t border-slate-800/70">
@@ -837,6 +849,7 @@
             downloader_engine: document.getElementById('setting-downloader-engine').value,
             torbox_enabled: document.getElementById('setting-torbox-enabled').checked ? 'true' : 'false',
             torbox_api_key: document.getElementById('setting-torbox-api-key').value,
+            hardcover_api_key: document.getElementById('setting-hardcover-api-key').value,
             torbox_delete_after_download: document.getElementById('setting-torbox-delete-after').checked ? 'true' : 'false',
             torbox_delete_on_failure: document.getElementById('setting-torbox-delete-on-failure').checked ? 'true' : 'false',
             torbox_download_concurrency: document.getElementById('setting-torbox-download-concurrency').value,

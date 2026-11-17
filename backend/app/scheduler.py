@@ -2,6 +2,7 @@ import os
 import json
 import logging
 import math
+import re
 import threading
 import time
 import concurrent.futures
@@ -39,6 +40,14 @@ from app.covers import CoverCache
 from app.downloader.qbit import qbit_client_from_settings
 
 logger = logging.getLogger("noveltrax.scheduler")
+
+
+def _coerce_int(value):
+    try:
+        return int(value) if value not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
+
 
 #: Settings keys for the time-aware catch-up scan.  Read with hard-coded
 #: defaults (nothing is seeded into app_settings) so existing databases get the
@@ -1455,6 +1464,133 @@ class TaskManager:
                 self._publication_cache.pop(key, None)
             except Exception:
                 pass
+
+    def reconcile_hardcover_series(self, limit: int = 5) -> Dict[str, int]:
+        """Cross-check AniList identities against Hardcover (bounded, cached).
+
+        Flags disagreements where Hardcover reports a larger primary series than
+        the AniList entry.  Nothing is merged here: a ``series_metadata_reviews``
+        row lets the user combine the per-volume trackers or split them apart.
+        """
+        result = {"checked": 0, "queued": 0}
+        try:
+            batch_limit = max(0, int(limit))
+        except (TypeError, ValueError):
+            batch_limit = 5
+        if batch_limit <= 0:
+            return result
+        try:
+            from app.providers.hardcover import HardcoverProvider
+            from app.parser import normalize_text
+
+            HardcoverProvider.set_db(self.db)
+            rows = self.db.get_series_identity_rows() or []
+            reviews = self.db.list_series_metadata_reviews(status=None, limit=5000)
+            reviewed_series = {int(r["series_id"]) for r in reviews if r.get("series_id")}
+            review_keys = {
+                (int(r["series_id"]), int(r["hardcover_id"]))
+                for r in reviews if r.get("series_id") and r.get("hardcover_id")
+            }
+            for row in rows:
+                if result["checked"] >= batch_limit:
+                    break
+                series_id = row.get("id")
+                name = str(row.get("name") or "").strip()
+                if series_id is None or not name:
+                    continue
+                if int(series_id) in reviewed_series:
+                    continue
+                if self._series_identity_locked(row) or self._series_anilist_locked(row):
+                    continue
+                try:
+                    meta = json.loads(row.get("anilist_meta_json") or "{}")
+                except (TypeError, ValueError):
+                    meta = {}
+                if not isinstance(meta, dict) or not meta:
+                    continue
+                info = HardcoverProvider.search_series(name)
+                result["checked"] += 1
+                if not info:
+                    continue
+                hardcover_id = info.get("id")
+                hardcover_volumes = int(info.get("primary_books_count") or 0)
+                if not hardcover_id or hardcover_volumes <= 1:
+                    continue
+                anilist_volumes = int(meta.get("volumes") or meta.get("total_volumes") or 0)
+                current_index = int(float(row.get("latest_index") or 0))
+                if hardcover_volumes <= max(anilist_volumes, current_index):
+                    continue
+                if (int(series_id), int(hardcover_id)) in review_keys:
+                    continue
+
+                base = normalize_text(info.get("name") or name)
+                base = re.sub(r"\b(light novel|novel|ln)\b", " ", base)
+                base = " ".join(base.split())
+                prefix = " ".join(base.split()[:5])
+                if len(prefix) < 6:
+                    continue
+                candidates = []
+                for other in rows:
+                    other_id = other.get("id")
+                    other_name = str(other.get("name") or "").strip()
+                    if other_id is None or not other_name:
+                        continue
+                    other_norm = normalize_text(other_name)
+                    if other_norm == normalize_text(name):
+                        continue
+                    if prefix and other_norm.startswith(prefix):
+                        candidates.append({
+                            "id": int(other_id),
+                            "name": other_name,
+                            "calibre_series_id": other.get("calibre_series_id"),
+                            "releases_count": other.get("releases_count") or 0,
+                            "owned_volumes": other.get("owned_volumes") or [],
+                        })
+                if not candidates:
+                    continue
+                # Prefer an existing Calibre-linked, volume-rich anchor.
+                anchor = next(
+                    (c for c in candidates if c.get("calibre_series_id")),
+                    None,
+                )
+                anchor_row = row
+                if anchor is not None:
+                    anchor_row = next(
+                        (r for r in rows if int(r.get("id")) == int(anchor["id"])), row,
+                    )
+                    anchor["id"] = int(anchor_row["id"])
+                proposed_name = str(info.get("name") or name)
+                candidates = [c for c in candidates if int(c["id"]) != int(anchor_row["id"])]
+                if not candidates:
+                    continue
+                self.db.upsert_series_metadata_review(
+                    int(anchor_row["id"]),
+                    _coerce_int(anchor_row.get("anilist_id")),
+                    int(hardcover_id),
+                    proposed_name,
+                    anilist_volumes,
+                    hardcover_volumes,
+                    candidates,
+                    note=(
+                        f"Hardcover reports {hardcover_volumes} primary volumes; "
+                        f"AniList reports {anilist_volumes or 'unknown'}."
+                    ),
+                )
+                result["queued"] += 1
+                self.db.log_activity(
+                    "HARDCOVER_REVIEW_QUEUED",
+                    f"Metadata review queued: '{proposed_name}'",
+                    json.dumps({
+                        "series_id": int(anchor_row["id"]),
+                        "hardcover_id": int(hardcover_id),
+                        "hardcover_volumes": hardcover_volumes,
+                        "anilist_volumes": anilist_volumes,
+                        "candidates": [c["name"] for c in candidates],
+                    }),
+                )
+        except Exception as exc:
+            logger.debug(f"Hardcover cross-check skipped: {exc}")
+        return result
 
     def enrich_tracked_series_anilist(self, limit: int = SERIES_ANILIST_SYNC_LIMIT_DEFAULT) -> dict:
         """Fetches AniList metadata for a bounded batch of un-enriched tracked rows.
@@ -2953,6 +3089,21 @@ class TaskManager:
                             logger.debug(f"Post-enrichment auto-link skipped: {exc}")
             except Exception as exc:
                 logger.debug(f"Series AniList enrichment skipped: {exc}")
+
+            # Hardcover sanity check: bounded lookups, cached across syncs. Only
+            # queues review rows; never merges automatically.
+            try:
+                hardcover_result = self.reconcile_hardcover_series(limit=5)
+                if hardcover_result.get("queued"):
+                    self._task_report(
+                        message=(
+                            f"Queued {hardcover_result['queued']} Hardcover "
+                            "series review(s)…"
+                        ),
+                        progress_pct=92,
+                    )
+            except Exception as exc:
+                logger.debug(f"Hardcover cross-check skipped: {exc}")
 
             linked_targets = self._link_targets(auto_links)
             series_linked = len(linked_targets)

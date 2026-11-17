@@ -64,6 +64,7 @@ CALIBRE_DIR = os.getenv("CALIBRE_DIR", "/calibre")
 
 # TorBox debrid download engine (see .agents/torbox_port/CONTRACT.md)
 TORBOX_API_KEY_MASK = "••••••••••••"
+HARDCOVER_API_KEY_MASK = "••••••••••••"
 # Both stored secrets are masked on the way out: the settings/downloads pages are
 # reachable by anyone who can load the dashboard (SEC-07), so the raw values must
 # never be rendered back into HTML.
@@ -107,6 +108,8 @@ def _masked_settings() -> Dict[str, Any]:
     settings = db.get_all_settings()
     api_key = str(settings.get("torbox_api_key") or "").strip()
     settings["torbox_api_key"] = TORBOX_API_KEY_MASK if api_key else ""
+    hardcover_key = str(settings.get("hardcover_api_key") or "").strip()
+    settings["hardcover_api_key"] = HARDCOVER_API_KEY_MASK if hardcover_key else ""
     qbit_password = str(settings.get("qbit_password") or "").strip()
     settings["qbit_password"] = QBIT_PASSWORD_MASK if qbit_password else ""
     return settings
@@ -194,6 +197,11 @@ def _prepare_settings_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         supplied_text = "" if supplied is None else str(supplied).strip()
         if not supplied_text or supplied_text == TORBOX_API_KEY_MASK:
             clean.pop("torbox_api_key", None)
+    if "hardcover_api_key" in clean:
+        supplied = clean.get("hardcover_api_key")
+        supplied_text = "" if supplied is None else str(supplied).strip()
+        if not supplied_text or supplied_text == HARDCOVER_API_KEY_MASK:
+            clean.pop("hardcover_api_key", None)
 
     if "downloader_engine" in clean:
         engine = str(clean.get("downloader_engine") or "").strip().lower()
@@ -1240,7 +1248,8 @@ async def settings_view(request: Request):
             "active_page": "settings",
             "settings": settings,
             "downloader_engine": _active_downloader_engine(),
-            "torbox_api_key_set": _torbox_api_key_is_set()
+            "torbox_api_key_set": _torbox_api_key_is_set(),
+            "hardcover_api_key_set": bool(str(db.get_setting("hardcover_api_key", "") or "").strip()),
         }
     )
 
@@ -1248,11 +1257,83 @@ async def settings_view(request: Request):
 async def metadata_review_view(request: Request):
     reviews = db.list_epub_metadata_reviews(limit=300)
     pending = sum(1 for row in reviews if (row.get("review_status") or "") == "pending")
+    series_reviews = db.list_series_metadata_reviews(status="pending", limit=100)
+    for review_row in series_reviews:
+        try:
+            review_row["candidates"] = json.loads(review_row.get("candidates_json") or "[]")
+        except (TypeError, ValueError):
+            review_row["candidates"] = []
     return templates.TemplateResponse(
         request=request,
         name="metadata_review.html",
-        context={"active_page": "metadata-review", "reviews": reviews, "pending_count": pending},
+        context={
+            "active_page": "metadata-review",
+            "reviews": reviews,
+            "pending_count": pending,
+            "series_reviews": series_reviews,
+        },
     )
+
+
+@app.get("/api/series-metadata-review")
+async def api_series_metadata_reviews(status: Optional[str] = Query("pending")):
+    rows = await asyncio.to_thread(db.list_series_metadata_reviews, status, 200)
+    return JSONResponse({"status": "success", "count": len(rows), "reviews": rows})
+
+
+@app.post("/api/series-metadata-review/{review_id}/combine")
+async def api_series_metadata_review_combine(review_id: int,
+                                             payload: Optional[Dict[str, Any]] = None):
+    row = db.get_series_metadata_review(review_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Series metadata review not found")
+    if (row.get("review_status") or "") != "pending":
+        raise HTTPException(status_code=409, detail="Series metadata review is already resolved")
+    try:
+        candidates = json.loads(row.get("candidates_json") or "[]")
+    except (TypeError, ValueError):
+        candidates = []
+    p = payload or {}
+    keep_id = _coerce_int(p.get("keep_series_id")) or _coerce_int(row.get("series_id"))
+    drop_ids = [
+        _coerce_int(c.get("id")) for c in candidates
+        if isinstance(c, dict) and _coerce_int(c.get("id")) is not None
+    ]
+    if keep_id is None or not drop_ids:
+        raise HTTPException(status_code=400, detail="Review has no candidate series to combine")
+    try:
+        result = await asyncio.to_thread(
+            db.force_combine_series, keep_id, drop_ids, "user",
+        )
+    except Exception as exc:
+        logger.warning(f"Series combine failed for review #{review_id}: {exc}")
+        raise HTTPException(status_code=500, detail="Could not combine the series") from exc
+    db.resolve_series_metadata_review(review_id, "combined", note=json.dumps(result))
+    _invalidate_series_picker_cache()
+    db.log_activity(
+        "SERIES_METADATA_COMBINED",
+        f"Combined series from Hardcover review: '{result.get('keep')}'",
+        json.dumps(result),
+    )
+    return JSONResponse({"status": "success", **result})
+
+
+@app.post("/api/series-metadata-review/{review_id}/split")
+async def api_series_metadata_review_split(review_id: int,
+                                           payload: Optional[Dict[str, Any]] = None):
+    row = db.get_series_metadata_review(review_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Series metadata review not found")
+    if (row.get("review_status") or "") != "pending":
+        raise HTTPException(status_code=409, detail="Series metadata review is already resolved")
+    note = str((payload or {}).get("note") or "Kept separate")
+    db.resolve_series_metadata_review(review_id, "split", note=note)
+    db.log_activity(
+        "SERIES_METADATA_SPLIT",
+        f"Kept series separate from Hardcover review: '{row.get('proposed_name')}'",
+        note,
+    )
+    return JSONResponse({"status": "success", "note": note})
 
 
 @app.post("/api/metadata-review/scan")

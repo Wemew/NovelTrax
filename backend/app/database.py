@@ -470,6 +470,32 @@ class Database:
             except Exception:
                 pass
 
+            # Hardcover series-identity cache + manual series review queue.
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS hardcover_series_cache (
+                    cache_key TEXT PRIMARY KEY,
+                    payload TEXT NOT NULL,
+                    fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS series_metadata_reviews (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    series_id INTEGER,
+                    anilist_id INTEGER,
+                    hardcover_id INTEGER,
+                    proposed_name TEXT DEFAULT '',
+                    anilist_volumes INTEGER DEFAULT 0,
+                    hardcover_volumes INTEGER DEFAULT 0,
+                    candidates_json TEXT DEFAULT '[]',
+                    review_status TEXT DEFAULT 'pending',
+                    note TEXT DEFAULT '',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(series_id, hardcover_id)
+                );
+            """)
+
             # Persisted background tasks (live status board)
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS background_tasks (
@@ -3975,6 +4001,188 @@ class Database:
                 f"SELECT * FROM epub_metadata_reviews{where} ORDER BY id DESC LIMIT ?;", params,
             ).fetchall()
         return [dict(row) for row in rows]
+
+    # --- Hardcover cache + series identity review -------------------------
+    def get_hardcover_cache(self, cache_key: str, max_age_seconds: int = 0) -> Optional[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT payload, fetched_at FROM hardcover_series_cache WHERE cache_key = ?;",
+                (str(cache_key),),
+            ).fetchone()
+        if row is None:
+            return None
+        if max_age_seconds:
+            from datetime import datetime, timezone
+            try:
+                stamp = datetime.fromisoformat(str(row["fetched_at"]).replace("Z", "+00:00"))
+                if stamp.tzinfo is None:
+                    stamp = stamp.replace(tzinfo=timezone.utc)
+                if (datetime.now(timezone.utc) - stamp).total_seconds() > int(max_age_seconds):
+                    return None
+            except (TypeError, ValueError):
+                return None
+        try:
+            return json.loads(row["payload"] or "{}")
+        except (TypeError, ValueError):
+            return None
+
+    def set_hardcover_cache(self, cache_key: str, payload: Dict[str, Any]) -> None:
+        with self.get_connection() as conn:
+            conn.execute(
+                "INSERT INTO hardcover_series_cache (cache_key, payload, fetched_at) "
+                "VALUES (?, ?, CURRENT_TIMESTAMP) "
+                "ON CONFLICT(cache_key) DO UPDATE SET payload = excluded.payload, "
+                "fetched_at = CURRENT_TIMESTAMP;",
+                (str(cache_key), json.dumps(payload or {})),
+            )
+            conn.commit()
+
+    def upsert_series_metadata_review(
+        self,
+        series_id: int,
+        anilist_id: Optional[int],
+        hardcover_id: Optional[int],
+        proposed_name: str,
+        anilist_volumes: int,
+        hardcover_volumes: int,
+        candidates: Optional[List[Dict[str, Any]]] = None,
+        note: str = "",
+    ) -> int:
+        """Queue a series-identity disagreement for manual review (idempotent).
+
+        Resolved rows (combined/split) are never reopened automatically.
+        """
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "INSERT INTO series_metadata_reviews "
+                "(series_id, anilist_id, hardcover_id, proposed_name, anilist_volumes, "
+                " hardcover_volumes, candidates_json, review_status, note) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?) "
+                "ON CONFLICT(series_id, hardcover_id) DO UPDATE SET "
+                "anilist_id = COALESCE(excluded.anilist_id, series_metadata_reviews.anilist_id), "
+                "proposed_name = excluded.proposed_name, "
+                "anilist_volumes = excluded.anilist_volumes, "
+                "hardcover_volumes = excluded.hardcover_volumes, "
+                "candidates_json = excluded.candidates_json, "
+                "note = excluded.note, updated_at = CURRENT_TIMESTAMP "
+                "WHERE series_metadata_reviews.review_status = 'pending';",
+                (
+                    int(series_id), anilist_id, hardcover_id, str(proposed_name or ""),
+                    int(anilist_volumes or 0), int(hardcover_volumes or 0),
+                    json.dumps(candidates or []), str(note or ""),
+                ),
+            )
+            cur.execute(
+                "SELECT id FROM series_metadata_reviews WHERE series_id = ? "
+                "AND hardcover_id IS ? ORDER BY id DESC LIMIT 1;",
+                (int(series_id), hardcover_id),
+            )
+            row = cur.fetchone()
+            conn.commit()
+        return int(row["id"]) if row else 0
+
+    def list_series_metadata_reviews(self, status: Optional[str] = "pending",
+                                     limit: int = 100) -> List[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            params: List[Any] = []
+            where = ""
+            if status:
+                where = " WHERE review_status = ?"
+                params.append(str(status))
+            params.append(max(1, min(int(limit), 500)))
+            rows = conn.execute(
+                f"SELECT * FROM series_metadata_reviews{where} ORDER BY id DESC LIMIT ?;",
+                tuple(params),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_series_metadata_review(self, review_id: int) -> Optional[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM series_metadata_reviews WHERE id = ?;", (int(review_id),),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def resolve_series_metadata_review(self, review_id: int, action: str,
+                                       note: str = "") -> bool:
+        action = str(action or "").strip().lower()
+        if action not in ("combined", "split"):
+            raise ValueError("action must be 'combined' or 'split'")
+        with self.get_connection() as conn:
+            cur = conn.execute(
+                "UPDATE series_metadata_reviews SET review_status = ?, note = ?, "
+                "updated_at = CURRENT_TIMESTAMP WHERE id = ? AND review_status = 'pending';",
+                (action, str(note or ""), int(review_id)),
+            )
+            conn.commit()
+        return bool(cur.rowcount)
+
+    def force_combine_series(self, keep_id: int, drop_ids: List[int],
+                             actor: str = "user") -> Dict[str, Any]:
+        """Merge reviewed series rows even when names differ (user-confirmed).
+
+        Re-keys every release spelling, unions owned volumes/book counts, deletes
+        the dropped trackers and stores alias overrides so future releases follow
+        the combined series.  Only call from an explicit review action.
+        """
+        keep = self.get_series_by_id(int(keep_id))
+        if keep is None:
+            raise KeyError(f"series {keep_id} not found")
+        drops = []
+        for drop_id in drop_ids or []:
+            if int(drop_id) == int(keep["id"]):
+                continue
+            row = self.get_series_by_id(int(drop_id))
+            if row is not None:
+                drops.append(row)
+        if not drops:
+            return {"status": "skipped", "reason": "no_drops", "merged": []}
+        target_name = _coerce_text(keep.get("name"))
+        keep_volumes = set(_coerce_owned_volumes(keep.get("owned_volumes_json")))
+        keep_book_count = _coerce_int(keep.get("book_count")) or 0
+        keep_latest = _coerce_float(keep.get("latest_index"))
+        keep_monitored = _coerce_int(keep.get("is_monitored")) or 0
+        merged: List[str] = []
+        rekeyed = 0
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            for drop in drops:
+                drop_name = _coerce_text(drop.get("name"))
+                if not drop_name or drop_name == target_name:
+                    continue
+                keep_volumes |= set(_coerce_owned_volumes(drop.get("owned_volumes_json")))
+                keep_book_count = max(keep_book_count, _coerce_int(drop.get("book_count")) or 0)
+                keep_latest = max(keep_latest, _coerce_float(drop.get("latest_index")))
+                keep_monitored = max(keep_monitored, _coerce_int(drop.get("is_monitored")) or 0)
+                spellings = self._series_release_spellings(drop_name)
+                rekeyed += self._rekey_releases_to_target(cur, spellings, target_name)
+                cur.execute("DELETE FROM series_tracking WHERE id = ?;", (int(drop["id"]),))
+                merged.append(drop_name)
+            cur.execute(
+                "UPDATE series_tracking SET book_count = ?, latest_index = ?, "
+                "is_monitored = ?, owned_volumes_json = ?, last_sync = CURRENT_TIMESTAMP "
+                "WHERE id = ?;",
+                (keep_book_count, keep_latest, keep_monitored,
+                 json.dumps(sorted(keep_volumes)), int(keep["id"])),
+            )
+            conn.commit()
+        for name in merged:
+            try:
+                self.add_series_alias_override(
+                    name, target_name,
+                    calibre_series_id=_coerce_int(keep.get("calibre_series_id")),
+                    origin="manual", actor=actor,
+                )
+            except Exception as exc:
+                logger.debug("Alias override after combine failed for %r: %s", name, exc)
+        return {
+            "status": "success",
+            "keep": target_name,
+            "merged": merged,
+            "rekeyed_releases": rekeyed,
+            "owned_volumes": sorted(keep_volumes),
+        }
 
     def get_epub_metadata_review(self, review_id: int) -> Optional[Dict[str, Any]]:
         with self.get_connection() as conn:
