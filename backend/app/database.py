@@ -5084,6 +5084,20 @@ class Database:
 
         track_official_only = self.get_setting("track_official_only", "true").lower() == "true"
 
+        # Volumes whose files are already in the downloads folder (downloaded but
+        # not yet imported into Calibre).  Without this the card only knows
+        # Calibre ownership, so a fetched volume kept showing as amber "Wanted".
+        downloaded_volumes_map: Dict[str, List[float]] = {}
+        try:
+            from app.download_inventory import scan_downloaded_volumes
+            downloads_root = str(
+                self.get_setting("downloads_dir", os.getenv("DOWNLOAD_DIR", "/downloads"))
+                or "/downloads"
+            )
+            downloaded_volumes_map = scan_downloaded_volumes(downloads_root)
+        except Exception as exc:
+            logger.debug(f"Downloaded-volume scan unavailable: {exc}")
+
         with self.get_connection() as conn:
             cur = conn.cursor()
 
@@ -5312,6 +5326,7 @@ class Database:
                         "releases_count": 0,
                         "all_volumes_set": set(),
                         "missing_volumes_set": set(),
+                        "downloaded_volumes_set": set(),
                         "has_wanted": False,
                         "has_downloaded": False,
                         "has_discovery": False,
@@ -5351,6 +5366,21 @@ class Database:
                     for mv in rel.get("missing_volumes", []):
                         group["missing_volumes_set"].add(mv)
 
+                # A completed fetch/download marks its volumes blue even when the
+                # release is not (yet) IN_CALIBRE.
+                if (
+                    str(rel.get("status") or "").upper() == "DOWNLOADED"
+                    or str(rel.get("download_status") or "").upper() == "COMPLETED"
+                ):
+                    downloaded = rel_vols or (
+                        [rel.get("volume")] if rel.get("volume") is not None else []
+                    )
+                    for dv in downloaded:
+                        try:
+                            group["downloaded_volumes_set"].add(round(float(dv), 2))
+                        except (TypeError, ValueError):
+                            continue
+
                 st = rel.get("status")
                 if st == "REQUESTED":
                     group["has_wanted"] = True
@@ -5367,6 +5397,16 @@ class Database:
                 missing_vols = sorted(list(g["missing_volumes_set"]))
                 g["all_volumes"] = all_vols
                 g["missing_volumes"] = missing_vols
+                downloaded_from_files = set()
+                for candidate_name in (
+                    g.get("stable_name"), g.get("series_name"), g.get("raw_name")
+                ):
+                    key = normalize_text(str(candidate_name or ""))
+                    if key and key in downloaded_volumes_map:
+                        downloaded_from_files.update(downloaded_volumes_map[key])
+                g["downloaded_volumes"] = sorted(
+                    set(g.pop("downloaded_volumes_set", set())) | downloaded_from_files
+                )
                 latest_owned = g["calibre_latest_index"]
 
                 # Determine if books from this series are present in Calibre

@@ -104,17 +104,18 @@
                     </span>
                     <div class="flex items-center gap-3 text-[10px]">
                         <span class="flex items-center gap-1 text-emerald-400"><span class="w-2 h-2 rounded-full bg-emerald-500"></span> In Calibre</span>
-                        {% if group.has_downloaded %}
                         <span class="flex items-center gap-1 text-cyan-300"><span class="w-2 h-2 rounded-full bg-cyan-500"></span> Downloaded</span>
-                        {% else %}
                         <span class="flex items-center gap-1 text-amber-400"><span class="w-2 h-2 rounded-full bg-amber-500"></span> Wanted</span>
-                        {% endif %}
                     </div>
                 </div>
 
                 <div class="flex flex-wrap gap-1.5 max-h-24 overflow-y-auto custom-scrollbar pr-1">
                     {% for v in group.all_volumes %}
-                    {% if v in group.owned_volumes %}
+                    {% if v in group.downloaded_volumes %}
+                    <span class="vol-badge vol-spine vol-spine-downloaded px-2 py-0.5 text-[11px] font-mono font-bold border flex items-center gap-1" title="Volume {{ v|int if v == v|int else v }} is downloaded (file in the downloads folder) and awaiting Calibre">
+                        <i data-lucide="download" class="w-2.5 h-2.5"></i> Vol {{ v|int if v == v|int else v }}
+                    </span>
+                    {% elif v in group.owned_volumes %}
                     <span class="vol-badge vol-spine vol-spine-owned px-2 py-0.5 text-[11px] font-mono font-bold border flex items-center gap-1" title="Volume {{ v|int if v == v|int else v }} is already in Calibre">
                         <i data-lucide="check" class="w-2.5 h-2.5"></i> Vol {{ v|int if v == v|int else v }}
                     </span>

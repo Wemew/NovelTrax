@@ -16,6 +16,103 @@ def format_bytes(value: int) -> str:
     return f"{size:.1f} TB"
 
 
+_EBOOK_SUFFIXES = (".epub", ".azw3", ".mobi", ".kepub")
+
+# The series-card API is polled while scrolling; a filesystem walk per card page
+# is wasted work when the folder has not changed.  A short TTL keeps new
+# downloads visible without hammering the disk.
+_VOLUME_SCAN_CACHE: Dict[str, Any] = {"key": None, "ts": 0.0, "value": {}}
+_VOLUME_SCAN_TTL_SECONDS = 5.0
+
+
+def scan_downloaded_volumes(root: str, max_files: int = 5000,
+                            max_depth: int = 4) -> Dict[str, List[float]]:
+    """Maps normalized series name -> volumes present in the downloads folder.
+
+    A downloaded volume is not necessarily ``IN_CALIBRE`` yet (or tracked by any
+    release row), so the series card derives per-volume state from the files on
+    disk as well as from release download status.  Bounded and symlink-safe:
+    files are only counted when a series name and at least one volume number can
+    be parsed from the filename (falling back to the containing folder name for
+    torrent folders whose files are named bare ``Volume 3.epub``).
+    """
+    from app.parser import extract_series_and_volume, normalize_text
+
+    result: Dict[str, set] = {}
+    root = os.path.abspath(str(root or "/downloads"))
+    cache_key = (root, int(max_files), int(max_depth))
+    now = time.monotonic()
+    if (
+        _VOLUME_SCAN_CACHE.get("key") == cache_key
+        and now - float(_VOLUME_SCAN_CACHE.get("ts") or 0.0) < _VOLUME_SCAN_TTL_SECONDS
+    ):
+        return _VOLUME_SCAN_CACHE.get("value") or {}
+    if not os.path.isdir(root):
+        _VOLUME_SCAN_CACHE.update(key=cache_key, ts=now, value={})
+        return {}
+    seen = 0
+
+    def keyed(series: str) -> str:
+        return normalize_text(series or "")
+
+    def add(series: str, volumes) -> None:
+        key = keyed(series)
+        numbers = set()
+        for value in volumes or []:
+            try:
+                number = round(float(value), 2)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= number <= 10000:
+                numbers.add(number)
+        if key and numbers:
+            result.setdefault(key, set()).update(numbers)
+
+    def walk(path: str, depth: int, folder_series: str = "") -> None:
+        nonlocal seen
+        try:
+            with os.scandir(path) as iterator:
+                entries = list(iterator)
+        except OSError:
+            return
+        entries.sort(key=lambda entry: entry.name.lower())
+        for entry in entries:
+            if seen >= max_files:
+                return
+            try:
+                if entry.is_symlink():
+                    continue
+                if entry.is_dir(follow_symlinks=False):
+                    if depth < max_depth:
+                        walk(entry.path, depth + 1, entry.name)
+                    continue
+                if not entry.name.lower().endswith(_EBOOK_SUFFIXES):
+                    continue
+                seen += 1
+                stem = os.path.splitext(entry.name)[0]
+                parsed = extract_series_and_volume(stem)
+                volumes = parsed.get("volumes") or []
+                if not volumes and parsed.get("volume") is not None:
+                    volumes = [parsed.get("volume")]
+                if not volumes:
+                    continue
+                series = str(parsed.get("series_name") or "").strip()
+                # "Volume 4.epub" parses as series "Volume"; use the torrent
+                # folder name instead of inventing a bogus series.
+                if normalize_text(series) in ("volume", "vol", "vols", "book", "v"):
+                    series = ""
+                if not series:
+                    series = folder_series
+                add(series, volumes)
+            except OSError:
+                continue
+
+    walk(root, 0)
+    resolved = {key: sorted(values) for key, values in result.items()}
+    _VOLUME_SCAN_CACHE.update(key=cache_key, ts=now, value=resolved)
+    return resolved
+
+
 def scan_download_tree(root: str, max_entries: int = 2000, max_depth: int = 8,
                        max_per_dir: int = 500) -> Dict[str, Any]:
     """Build a bounded display tree; never follows directory symlinks."""
