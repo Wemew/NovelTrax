@@ -1003,8 +1003,9 @@ def test_backfill_enrichment_keeps_stable_key():
             db, "backfill-unknown", "Unknown Parsed Series (Novel)", "Unknown Parsed Series",
             volume=None,
         )
-        # A discovered release whose stored spelling normalizes to a tracked row
-        # (differs by punctuation, so it is still a discovery row).
+        # A release whose stored spelling normalizes to a tracked row: it is
+        # kept in the DB (never silently dropped) but must NOT be a Discovery
+        # item, because the series is already tracked (series-identity fix).
         tracked_name = TRAPPED_ANILIST
         discovered_spelling = TRAPPED_ANILIST.rstrip("!")
         insert_series(db, tracked_name, is_monitored=0)
@@ -1031,8 +1032,10 @@ def test_backfill_enrichment_keeps_stable_key():
 
         tracked_row = db.get_series_by_name(tracked_name)
         check(tracked_row is not None, "tracked row present")
-        check(tracked_row["display_title"] == discovered_spelling + " AniList Display",
-              f"tracked display_title gets the provider title: {tracked_row['display_title']}")
+        check(all(
+            (item.get("series_name") or "") != discovered_spelling
+            for item in db.get_discovery_releases(limit=100)
+        ), "a spelling that resolves to a tracked series must not be a Discovery item")
 
         cached = db.get_cached_novel_metadata(normalize_text("Unknown Parsed Series"))
         check(cached is not None, "unknown series provider title must be cached for later matching")

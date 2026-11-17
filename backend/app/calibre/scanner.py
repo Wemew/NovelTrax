@@ -7,6 +7,8 @@ from typing import List, Dict, Any, Optional, Set, Tuple
 
 logger = logging.getLogger("noveltrax.calibre")
 
+_UNREGISTERED = object()
+
 def parse_calibre_volumes_and_series(
     title: str,
     series_name: Optional[str] = None,
@@ -388,33 +390,105 @@ class CalibreScanner:
         try:
             rows = self._run_read(query, label="series volumes map")
             res: Dict[str, Set[float]] = {}
+            # Key -> owning Calibre series id.  A name shared by two Calibre
+            # series must never be merged: the first owner wins and callers fall
+            # back to the unambiguous id key.  Orphan books (no series row) get
+            # owner None, so a real series can still claim their key later.
+            owners: Dict[Any, Any] = {}
             from app.parser import normalize_text
+
+            def register(key: Any, series_id: Any, vols: Set[float]) -> None:
+                if not key:
+                    return
+                owner = owners.get(key, _UNREGISTERED)
+                if (
+                    owner is not _UNREGISTERED
+                    and owner is not None
+                    and series_id is not None
+                    and owner != series_id
+                ):
+                    return
+                if series_id is not None:
+                    owners[key] = series_id
+                else:
+                    owners.setdefault(key, None)
+                res.setdefault(key, set()).update(vols)
+
+            parsed_rows = []
             for row in rows:
                 s_id = row["series_id"]
                 s_name = row["ser_name"] or ""
                 b_title = row["title"] or ""
                 idx = float(row["series_index"]) if row["series_index"] is not None else None
-
                 extracted_series, vols = parse_calibre_volumes_and_series(b_title, s_name, idx)
                 target_series = s_name.strip() or (extracted_series or "").strip()
-                if target_series and vols:
-                    t_lower = target_series.lower()
-                    t_norm = normalize_text(target_series)
-                    res.setdefault(target_series, set()).update(vols)
-                    res.setdefault(t_lower, set()).update(vols)
-                    if t_norm:
-                        res.setdefault(t_norm, set()).update(vols)
-                    if s_id is not None:
-                        res.setdefault(str(s_id), set()).update(vols)
-                        res.setdefault(s_id, set()).update(vols)
-                    parts = [p.strip() for p in re.split(r"\s*[|/–—]\s*|\s+-\s+|//|;", target_series) if p.strip()]
-                    if len(parts) > 1:
-                        for p in parts:
-                            res.setdefault(p, set()).update(vols)
-                            res.setdefault(p.lower(), set()).update(vols)
-                            p_norm = normalize_text(p)
-                            if p_norm:
-                                res.setdefault(p_norm, set()).update(vols)
+                if not target_series or not vols:
+                    continue
+                parsed_rows.append((s_id, target_series, extracted_series, vols))
+
+            # Pass 1: ids and full names.  Must complete for every series before
+            # any component key is registered, otherwise a sibling's component
+            # ("Classroom of the Elite" from "... - Year 3") could claim the
+            # parent's name first.
+            name_to_id: Dict[str, Any] = {}
+            for s_id, target_series, _extracted, vols in parsed_rows:
+                if s_id is None:
+                    # Standalone/orphan book: keep its own name key so callers
+                    # that only pass names still see omnibus volumes.
+                    register(target_series, None, vols)
+                    register(target_series.lower(), None, vols)
+                    register(normalize_text(target_series), None, vols)
+                    continue
+                register(str(s_id), s_id, vols)
+                register(s_id, s_id, vols)
+                register(target_series, s_id, vols)
+                register(target_series.lower(), s_id, vols)
+                register(normalize_text(target_series), s_id, vols)
+                for key in (target_series, target_series.lower(),
+                            normalize_text(target_series)):
+                    if key:
+                        name_to_id.setdefault(key, s_id)
+
+            # Pass 1b: a standalone Calibre book (no series link) whose title
+            # names a known series ("86 - 1-4") contributes its volumes to that
+            # series' id entry, not only to an orphan name key.
+            for s_id, target_series, extracted_series, vols in parsed_rows:
+                if s_id is not None:
+                    continue
+                for candidate in (target_series, extracted_series or ""):
+                    if not candidate:
+                        continue
+                    owner_id = (
+                        name_to_id.get(candidate)
+                        or name_to_id.get(candidate.lower())
+                        or name_to_id.get(normalize_text(candidate))
+                    )
+                    if owner_id is not None:
+                        register(str(owner_id), owner_id, vols)
+                        register(owner_id, owner_id, vols)
+                        register(candidate, owner_id, vols)
+                        register(candidate.lower(), owner_id, vols)
+                        register(normalize_text(candidate), owner_id, vols)
+                        break
+
+            # Pass 2: dual-title components ("KonoSuba | God Blessing ...",
+            # "Dungeon ni Deai / Is It Wrong ...") stay lookup keys, but only
+            # when no other series owns that name.
+            for s_id, target_series, extracted_series, vols in parsed_rows:
+                keys = [target_series, extracted_series or ""]
+                for value in keys:
+                    if not value:
+                        continue
+                    parts = [
+                        p.strip() for p in re.split(r"\s*[|/–—]\s*|\s+-\s+|//|;", value)
+                        if p.strip()
+                    ]
+                    if len(parts) < 2:
+                        continue
+                    for part in parts:
+                        register(part, s_id, vols)
+                        register(part.lower(), s_id, vols)
+                        register(normalize_text(part), s_id, vols)
             return res
         except Exception as e:
             logger.error(f"Error reading series volumes map: {e}")

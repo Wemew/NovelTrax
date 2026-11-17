@@ -38,6 +38,26 @@ _PRIORITIZED_GROUP_MATCH_SQL = """(
 # Split a legacy/compound group tag into the set of groups it names (§12.11.1).
 _GROUP_DELIMITER_RE = re.compile(r"\s*(?:,|&|/|\+|\band\b)\s*", re.IGNORECASE)
 
+# Discovery means "a series NovelTrax does not already know".  The series
+# resolver (aliases, AniList titles, punctuation/case variants) uses
+# ``app.parser.normalize_text``; comparing raw ``lower(trim(...))`` strings let
+# tracked/owned spellings ("The Devil Is a Part-Timer" vs "...!") leaked into
+# Discovery.  ``noveltrax_series_key`` is the same Python function registered on
+# every connection in ``get_connection``.
+_DISCOVERY_DEDUP_KEY_SQL = """noveltrax_series_key(
+    REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(r.series_name, ' (Light Novel)', ''), ' [Light Novel]', ''), ' (Novel)', ''), ' (Web Novel)', ''), ' (LN)', '')
+)"""
+
+# ``noveltrax_discovery_excluded`` is bound per query by
+# ``Database._install_discovery_exclusion`` to a Python set of
+# ``parser.series_key`` values (tracked names, blacklist, alias sources whose
+# target is tracked).  A set lookup costs microseconds; the earlier correlated
+# ``NOT IN (SELECT series_key(...))`` subqueries re-normalized every tracked and
+# alias row for every release (~3.5 s per page on the live 4.5k-row database).
+_DISCOVERY_SERIES_FILTER_SQL = """
+      AND (r.series_name IS NULL OR noveltrax_discovery_excluded(r.series_name) = 0)
+"""
+
 
 def _split_group_string(value: Optional[str]) -> List[str]:
     """Splits one legacy/compound group value on ``,``, ``&``, ``/``, ``+`` and ``and``."""
@@ -172,6 +192,14 @@ class Database:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode = WAL;")
         conn.execute("PRAGMA foreign_keys = ON;")
+        # The series identity resolver compares spellings after punctuation and
+        # case folding (``parser.series_key``).  Register it as a deterministic
+        # SQL function so discovery/blacklist/alias exclusion use the same
+        # notion of "same series" as the Python resolver instead of raw
+        # ``lower(trim(...))`` equality.
+        from app.parser import series_key
+        conn.create_function("noveltrax_series_key", 1, series_key,
+                             deterministic=True)
         return conn
 
     def init_db(self):
@@ -999,15 +1027,26 @@ class Database:
 
                 owned_vols_set: Set[float] = set()
                 if volumes_map:
-                    for k in (str(ser_id), ser_id, name, name.lower(), normalize_text(name)):
-                        if k in volumes_map:
-                            owned_vols_set.update(volumes_map[k])
-                    parts = [p.strip() for p in re.split(r"\s*[|/–—]\s*|\s+-\s+|//|;", name) if p.strip()]
-                    if len(parts) > 1:
-                        for p in parts:
-                            for pk in (p, p.lower(), normalize_text(p)):
-                                if pk in volumes_map:
-                                    owned_vols_set.update(volumes_map[pk])
+                    # ``volumes_map`` is keyed by Calibre series id; using it is
+                    # the only unambiguous lookup.  Series names are a fallback
+                    # for callers that only pass name keys.  Never union the
+                    # name *components* of a series: sibling series
+                    # ("Classroom of the Elite" vs "... - Year 3") share the
+                    # prefix, and unioning made Year 3 "own" volumes 1-12.5 with
+                    # only two books in Calibre, silently suppressing requests.
+                    id_keys = (str(ser_id), ser_id)
+                    for k in id_keys:
+                        try:
+                            mapped = volumes_map.get(k)
+                        except TypeError:
+                            mapped = None
+                        if mapped:
+                            owned_vols_set.update(mapped)
+                            break
+                    if not owned_vols_set:
+                        for k in (name, name.lower(), normalize_text(name)):
+                            if k in volumes_map:
+                                owned_vols_set.update(volumes_map[k])
                 elif latest and float(latest) > 0:
                     owned_vols_set.add(float(latest))
 
@@ -5638,6 +5677,37 @@ class Database:
             return cur.fetchone() is not None
 
     # --- Discovery Operations ---
+    def _discovery_exclusion_keys(self, conn: sqlite3.Connection) -> Set[str]:
+        """``series_key`` values that mean "already known" for Discovery.
+
+        Tracked series, blacklisted series, and alias spellings that resolve to a
+        tracked series (mirrors the resolver, including non-Latin lead-ins).
+        """
+        from app.parser import series_key
+        keys: Set[str] = set()
+        for row in conn.execute("SELECT name FROM series_tracking;"):
+            keys.add(series_key(row[0]))
+        for row in conn.execute("SELECT name FROM series_blacklist;"):
+            keys.add(series_key(row[0]))
+        for row in conn.execute(
+            "SELECT source_name, target_name FROM series_alias_overrides;"
+        ):
+            if series_key(row[1]) in keys:
+                keys.add(series_key(row[0]))
+        keys.discard("")
+        return keys
+
+    def _install_discovery_exclusion(self, conn: sqlite3.Connection) -> Set[str]:
+        """Binds the exclusion set to ``conn``; returns it for tests/diagnostics."""
+        from app.parser import series_key
+        keys = self._discovery_exclusion_keys(conn)
+        conn.create_function(
+            "noveltrax_discovery_excluded", 1,
+            lambda value: 1 if series_key(value) in keys else 0,
+            deterministic=True,
+        )
+        return keys
+
     def get_discovery_releases(
         self,
         limit: int = 100,
@@ -5650,10 +5720,11 @@ class Database:
         which are NOT currently in Calibre, NOT in series_tracking, NOT blacklisted,
         and are still unreviewed (status='NEW'). Pending wishlist requests (status
         'REQUESTED') are intentionally not Discovery items.
-        Deduplicates by series name so each series appears at most once.
+        Deduplicates by normalized series key so each series appears at most once.
         Strictly excludes PDF releases.
         """
         with self.get_connection() as conn:
+            self._install_discovery_exclusion(conn)
             cur = conn.cursor()
             search_clause = ""
             search_params = []
@@ -5682,9 +5753,7 @@ class Database:
                 WITH ranked_discovery AS (
                     SELECT r.*,
                            ROW_NUMBER() OVER (
-                               PARTITION BY lower(trim(
-                                   REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(r.series_name, ' (Light Novel)', ''), ' [Light Novel]', ''), ' (Novel)', ''), ' (Web Novel)', ''), ' (LN)', '')
-                               ))
+                               PARTITION BY {_DISCOVERY_DEDUP_KEY_SQL}
                                ORDER BY 
                                    (CASE WHEN r.description IS NOT NULL AND length(trim(r.description)) > 0 THEN 1 ELSE 0 END) DESC,
                                    (CASE WHEN r.cover_url IS NOT NULL AND length(trim(r.cover_url)) > 0 THEN 1 ELSE 0 END) DESC,
@@ -5698,13 +5767,7 @@ class Database:
                       AND COALESCE(lower(r.title), '') NOT LIKE '%pdf%'
                       AND COALESCE(lower(r.link), '') NOT LIKE '%.pdf%'
                       AND COALESCE(lower(r.guid), '') NOT LIKE '%pdf%'
-                      AND (r.series_name IS NULL OR lower(trim(r.series_name)) NOT IN (SELECT lower(trim(name)) FROM series_blacklist))
-                      AND (r.series_name IS NULL OR lower(trim(r.series_name)) NOT IN (SELECT lower(trim(name)) FROM series_tracking))
-                      AND (r.series_name IS NULL OR lower(trim(r.series_name)) NOT IN (
-                          SELECT lower(trim(sao.source_name))
-                          FROM series_alias_overrides sao
-                          JOIN series_tracking st ON lower(trim(st.name)) = lower(trim(sao.target_name))
-                      ))
+                      {_DISCOVERY_SERIES_FILTER_SQL}
                       {search_clause}
                 )
                 SELECT * FROM ranked_discovery
@@ -5733,6 +5796,7 @@ class Database:
         Strictly excludes PDF releases.
         """
         with self.get_connection() as conn:
+            self._install_discovery_exclusion(conn)
             cur = conn.cursor()
             search_clause = ""
             search_params = []
@@ -5745,9 +5809,7 @@ class Database:
                 WITH ranked_discovery AS (
                     SELECT r.id,
                            ROW_NUMBER() OVER (
-                               PARTITION BY lower(trim(
-                                   REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(r.series_name, ' (Light Novel)', ''), ' [Light Novel]', ''), ' (Novel)', ''), ' (Web Novel)', ''), ' (LN)', '')
-                               ))
+                               PARTITION BY {_DISCOVERY_DEDUP_KEY_SQL}
                                ORDER BY r.id DESC
                            ) as rn
                     FROM releases r
@@ -5757,13 +5819,7 @@ class Database:
                       AND COALESCE(lower(r.title), '') NOT LIKE '%pdf%'
                       AND COALESCE(lower(r.link), '') NOT LIKE '%.pdf%'
                       AND COALESCE(lower(r.guid), '') NOT LIKE '%pdf%'
-                      AND (r.series_name IS NULL OR lower(trim(r.series_name)) NOT IN (SELECT lower(trim(name)) FROM series_blacklist))
-                      AND (r.series_name IS NULL OR lower(trim(r.series_name)) NOT IN (SELECT lower(trim(name)) FROM series_tracking))
-                      AND (r.series_name IS NULL OR lower(trim(r.series_name)) NOT IN (
-                          SELECT lower(trim(sao.source_name))
-                          FROM series_alias_overrides sao
-                          JOIN series_tracking st ON lower(trim(st.name)) = lower(trim(sao.target_name))
-                      ))
+                      {_DISCOVERY_SERIES_FILTER_SQL}
                       {search_clause}
                 )
                 SELECT count(*) FROM ranked_discovery WHERE rn = 1;
@@ -6024,28 +6080,24 @@ class Database:
 
         Deletes exactly the rows that get_discovery_releases() would show: volume 1 or
         unnumbered unreviewed releases (status='NEW') that are not PDFs, belong to a
-        non-blacklisted series, do not resolve (by stable name OR alias override) to
-        a tracked series, and are not part of a monitored tracked series. Pending
+        non-blacklisted series, do not resolve (by stable name OR alias override,
+        compared with the same ``series_key`` normalization the Discovery page uses)
+        to a tracked series, and are not part of a monitored tracked series. Pending
         wishlist requests (status='REQUESTED') are never touched.
         """
         with self.get_connection() as conn:
+            self._install_discovery_exclusion(conn)
             cur = conn.cursor()
-            cur.execute("""
-                DELETE FROM releases
-                WHERE (volume IS NULL OR volume = 1.0)
-                  AND status NOT IN ('IN_CALIBRE', 'BLACKLISTED', 'IGNORED', 'REQUESTED')
-                  AND COALESCE(media_type, 'unknown') NOT IN ('audiobook', 'manga')
-                  AND COALESCE(lower(title), '') NOT LIKE '%pdf%'
-                  AND COALESCE(lower(link), '') NOT LIKE '%.pdf%'
-                  AND COALESCE(lower(guid), '') NOT LIKE '%pdf%'
-                  AND (series_name IS NULL OR lower(trim(series_name)) NOT IN (SELECT lower(trim(name)) FROM series_blacklist))
-                  AND (series_name IS NULL OR lower(trim(series_name)) NOT IN (SELECT lower(trim(name)) FROM series_tracking))
-                  AND (series_name IS NULL OR lower(trim(series_name)) NOT IN (
-                      SELECT lower(trim(sao.source_name))
-                      FROM series_alias_overrides sao
-                      JOIN series_tracking st ON lower(trim(st.name)) = lower(trim(sao.target_name))
-                  ))
-                  AND COALESCE(series_pinned, 0) = 0;
+            cur.execute(f"""
+                DELETE FROM releases AS r
+                WHERE (r.volume IS NULL OR r.volume = 1.0)
+                  AND r.status NOT IN ('IN_CALIBRE', 'BLACKLISTED', 'IGNORED', 'REQUESTED')
+                  AND COALESCE(r.media_type, 'unknown') NOT IN ('audiobook', 'manga')
+                  AND COALESCE(lower(r.title), '') NOT LIKE '%pdf%'
+                  AND COALESCE(lower(r.link), '') NOT LIKE '%.pdf%'
+                  AND COALESCE(lower(r.guid), '') NOT LIKE '%pdf%'
+                  {_DISCOVERY_SERIES_FILTER_SQL}
+                  AND COALESCE(r.series_pinned, 0) = 0;
             """)
             count = cur.rowcount
             conn.commit()

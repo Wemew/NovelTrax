@@ -461,6 +461,9 @@ def check_tracked_series_picker_route():
           "main.py: api_tracked_series_picker handler is missing")
     func = functions["api_tracked_series_picker"]
     segment = function_source(source, func)
+    check("_tracked_series_picker_payload" in functions,
+          "main.py: tracked picker payload helper is missing")
+    build_segment = function_source(source, functions["_tracked_series_picker_payload"])
 
     check(
         "_series_picker_snapshot" in to_thread_targets(func),
@@ -489,7 +492,7 @@ def check_tracked_series_picker_route():
         '"status": "success", "series": [], "count": 0',
     ):
         check(
-            marker in segment,
+            marker in segment or marker in build_segment,
             "main.py: tracked picker is missing the contract marker %r" % marker,
         )
     check(

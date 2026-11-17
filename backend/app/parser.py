@@ -18,6 +18,35 @@ def normalize_text(text: str) -> str:
     # Collapse whitespace
     return " ".join(cleaned.split())
 
+_LATIN_WORD_RE = re.compile(r"[A-Za-z0-9]+")
+
+
+def series_key(text: str) -> str:
+    """Normalized series identity key used for cross-source matching.
+
+    ``normalize_text`` keeps non-Latin scripts (so a Japanese title stays a
+    distinct key), but feed scrapers frequently store a translated title with a
+    native-script lead-in — e.g. the live alias
+    ``"มันผิดรึไงถ้าใจอยากจะพบรักในดันเจี้ยน ภาคพิเศษ Sword Oratoria"`` for
+    ``"Is It Wrong ... - Sword Oratoria"``.  Comparing only the whole normalized
+    string misses the Latin half, leaking the already-tracked series into
+    Discovery.  When a title contains Latin/digit words, use those; otherwise
+    fall back to the full normalized string so mono-script titles stay unique.
+    """
+    base = normalize_text(text)
+    if not base:
+        return ""
+    # NFKD first so accented Latin letters fold to ASCII instead of being
+    # dropped as non-Latin ("Ayakashi à la Mode" -> "ayakashi a la mode").
+    folded = unicodedata.normalize("NFKD", text or "")
+    latin = normalize_text(" ".join(_LATIN_WORD_RE.findall(folded)))
+    # Short/generic Latin fragments ("Novel", "Vol") must not become the key for
+    # a mono-script title: they would collide with unrelated series.
+    if len(latin.replace(" ", "")) >= 6:
+        return latin
+    return base
+
+
 def string_similarity(a: str, b: str) -> float:
     """Calculate similarity ratio between two strings (0.0 to 1.0)."""
     norm_a = normalize_text(a)

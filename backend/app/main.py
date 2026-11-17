@@ -347,7 +347,7 @@ _series_picker_cache = {"ts": 0.0, "calibre": [], "tracked": []}
 
 
 def _series_picker_snapshot() -> Dict[str, List[Dict[str, Any]]]:
-    """Returns the cached ``{"calibre": [...], "tracked": [...]}`` picker snapshot.
+    """Returns the cached ``{"calibre": [...], "tracked": [...], "aliases": [...]}`` snapshot.
 
     Double-checked under ``_series_picker_cache_lock``: a fresh snapshot is returned
     without touching Calibre/SQLite, while a cache miss loads both lists once inside
@@ -363,10 +363,12 @@ def _series_picker_snapshot() -> Dict[str, List[Dict[str, Any]]]:
                 return {
                     "calibre": list(cached.get("calibre") or []),
                     "tracked": list(cached.get("tracked") or []),
+                    "aliases": list(cached.get("aliases") or []),
                 }
 
             calibre: List[Dict[str, Any]] = []
             tracked: List[Dict[str, Any]] = []
+            aliases: List[Dict[str, Any]] = []
             try:
                 calibre = [
                     dict(row) for row in (_calibre_series_picker_rows() or [])
@@ -383,11 +385,27 @@ def _series_picker_snapshot() -> Dict[str, List[Dict[str, Any]]]:
             except Exception as exc:
                 logger.warning(f"Series picker snapshot: tracked series unavailable: {exc}")
                 tracked = []
+            # Alias spellings (AniList synonyms, J-Novels/Calibre title variants)
+            # must be searchable too: users search the release spelling
+            # ("DanMachi"), not the stable Calibre title.
+            try:
+                aliases = [
+                    dict(row) for row in (db.get_series_alias_overrides() or [])
+                    if isinstance(row, dict)
+                ]
+            except Exception as exc:
+                logger.warning(f"Series picker snapshot: series aliases unavailable: {exc}")
+                aliases = []
 
             cached["ts"] = time.monotonic()
             cached["calibre"] = calibre
             cached["tracked"] = tracked
-            return {"calibre": list(calibre), "tracked": list(tracked)}
+            cached["aliases"] = aliases
+            return {
+                "calibre": list(calibre),
+                "tracked": list(tracked),
+                "aliases": list(aliases),
+            }
     except Exception as exc:  # final containment: pickers must never 500
         logger.warning(f"Series picker snapshot failed: {exc}")
         return {"calibre": [], "tracked": []}
@@ -400,6 +418,7 @@ def _invalidate_series_picker_cache() -> None:
             _series_picker_cache["ts"] = 0.0
             _series_picker_cache["calibre"] = []
             _series_picker_cache["tracked"] = []
+            _series_picker_cache["aliases"] = []
     except Exception as exc:
         logger.warning(f"Could not invalidate the series picker cache: {exc}")
 
@@ -445,6 +464,7 @@ def _rank_series_picker_entries(entries: List[Dict[str, Any]], source: str) -> L
             norm for norm in (
                 _series_match_normalize(entry.get("name")),
                 _series_match_normalize(entry.get("display_title")),
+                *(_series_match_normalize(alias) for alias in entry.get("_aliases") or []),
             ) if norm
         ]
         best = 0.0
@@ -1793,6 +1813,7 @@ async def api_calibre_series_picker(
         snapshot = await asyncio.to_thread(_series_picker_snapshot)
         raw_rows = snapshot.get("calibre") or []
         tracked_rows = snapshot.get("tracked") or []
+        alias_rows = snapshot.get("aliases") or []
     except Exception as exc:
         logger.warning(f"Calibre series picker could not load series: {exc}")
         return JSONResponse({"status": "success", "series": [], "count": 0})
@@ -1810,12 +1831,29 @@ async def api_calibre_series_picker(
             if calibre_id is not None:
                 tracked_by_calibre_id.setdefault(calibre_id, row)
 
+        # Alias spellings registered for a tracked series also make its Calibre
+        # series findable: the user searches the release spelling ("DanMachi"),
+        # not the Calibre title ("Is It Wrong to Pick Up Girls in a Dungeon?").
+        aliases_by_calibre_id: Dict[int, List[str]] = {}
+        for alias in alias_rows or []:
+            if not isinstance(alias, dict):
+                continue
+            target_row = tracked_by_name.get(_series_match_normalize(alias.get("target_name")))
+            if not target_row:
+                continue
+            calibre_id = _coerce_int(target_row.get("calibre_series_id"))
+            source_name = str(alias.get("source_name") or "").strip()
+            if calibre_id is None or not source_name:
+                continue
+            aliases_by_calibre_id.setdefault(calibre_id, []).append(source_name)
+
         entries: List[Dict[str, Any]] = []
         seen_ids = set()
         for row in raw_rows or []:
             entry = _series_picker_entry(row, tracked_by_name, tracked_by_calibre_id)
             if entry is None or entry["id"] in seen_ids:
                 continue
+            entry["_aliases"] = aliases_by_calibre_id.get(entry["id"], [])
             seen_ids.add(entry["id"])
             entries.append(entry)
 
@@ -1826,10 +1864,16 @@ async def api_calibre_series_picker(
                 if search_norm in _series_match_normalize(entry.get("name"))
                 or search_norm in _series_match_normalize(entry.get("display_title"))
                 or search_norm in _series_match_normalize(entry.get("authors"))
+                or any(
+                    search_norm in _series_match_normalize(alias)
+                    for alias in entry.get("_aliases") or []
+                )
             ]
 
         entries = _rank_series_picker_entries(entries, source or "")
         payload = entries[:limit]
+        for entry in payload:
+            entry.pop("_aliases", None)
         return JSONResponse({"status": "success", "series": payload, "count": len(payload)})
     except Exception as exc:
         logger.warning(f"Calibre series picker failed: {exc}")
@@ -2146,6 +2190,73 @@ async def api_retarget_series_alias(
 
 # --- Release re-bind / per-series identity reset ---
 
+def _tracked_series_picker_payload(
+    rows: List[Dict[str, Any]],
+    alias_rows: List[Dict[str, Any]],
+    search: Optional[str],
+    limit: int,
+) -> List[Dict[str, Any]]:
+    """Builds the tracked-series picker payload (name/display/author/alias search).
+
+    Alias spellings are searched because users look for the release title
+    ("DanMachi"), not the stable Calibre title it resolves to.  Pure function so
+    the alias-aware matching is testable without a live DB.
+    """
+    aliases_by_target: Dict[str, List[str]] = {}
+    for alias in alias_rows or []:
+        if not isinstance(alias, dict):
+            continue
+        target_norm = _series_match_normalize(alias.get("target_name"))
+        source_name = str(alias.get("source_name") or "").strip()
+        if target_norm and source_name:
+            aliases_by_target.setdefault(target_norm, []).append(source_name)
+
+    search_norm = _series_match_normalize(search)
+    entries: List[Dict[str, Any]] = []
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        series_id = _coerce_int(row.get("id"))
+        name = str(row.get("name") or "").strip()
+        if series_id is None or not name:
+            continue
+        display_title = str(row.get("display_title") or "").strip()
+        authors = str(row.get("authors") or "").strip()
+        name_norm = _series_match_normalize(name)
+        alias_names = aliases_by_target.get(name_norm, [])
+        alias_norms = [_series_match_normalize(alias) for alias in alias_names]
+        if search_norm:
+            haystack = " ".join(
+                _series_match_normalize(part)
+                for part in (name, display_title, authors, *alias_names)
+            )
+            if search_norm not in haystack:
+                continue
+        entries.append({
+            "id": series_id,
+            "name": name,
+            "display_title": display_title,
+            "authors": authors,
+            "calibre_series_id": _coerce_int(row.get("calibre_series_id")),
+            "identity_locked": _coerce_bool(row.get("identity_locked"), False),
+            "book_count": _coerce_int(row.get("book_count")) or 0,
+            "owned_volumes": _coerce_volume_list(row.get("owned_volumes_json")),
+            "tracked": True,
+            "_exact": 1 if search_norm and (
+                name_norm == search_norm or search_norm in alias_norms
+            ) else 0,
+            "_prefix": 1 if search_norm and (
+                name_norm.startswith(search_norm)
+                or any(alias.startswith(search_norm) for alias in alias_norms)
+            ) else 0,
+        })
+    entries.sort(key=lambda item: (-item["_exact"], -item["_prefix"], item["name"].lower()))
+    for entry in entries:
+        entry.pop("_exact", None)
+        entry.pop("_prefix", None)
+    return entries[:limit]
+
+
 @app.get("/api/series")
 async def api_tracked_series_picker(
     search: Optional[str] = Query(None),
@@ -2155,47 +2266,13 @@ async def api_tracked_series_picker(
     try:
         snapshot = await asyncio.to_thread(_series_picker_snapshot)
         rows = snapshot.get("tracked") or []
+        alias_rows = snapshot.get("aliases") or []
     except Exception as exc:
         logger.warning(f"Tracked series picker could not load series: {exc}")
         return JSONResponse({"status": "success", "series": [], "count": 0})
 
     try:
-        search_norm = _series_match_normalize(search)
-        entries: List[Dict[str, Any]] = []
-        for row in rows or []:
-            if not isinstance(row, dict):
-                continue
-            series_id = _coerce_int(row.get("id"))
-            name = str(row.get("name") or "").strip()
-            if series_id is None or not name:
-                continue
-            display_title = str(row.get("display_title") or "").strip()
-            authors = str(row.get("authors") or "").strip()
-            if search_norm:
-                haystack = " ".join(
-                    _series_match_normalize(part) for part in (name, display_title, authors)
-                )
-                if search_norm not in haystack:
-                    continue
-            name_norm = _series_match_normalize(name)
-            entries.append({
-                "id": series_id,
-                "name": name,
-                "display_title": display_title,
-                "authors": authors,
-                "calibre_series_id": _coerce_int(row.get("calibre_series_id")),
-                "identity_locked": _coerce_bool(row.get("identity_locked"), False),
-                "book_count": _coerce_int(row.get("book_count")) or 0,
-                "owned_volumes": _coerce_volume_list(row.get("owned_volumes_json")),
-                "tracked": True,
-                "_exact": 1 if search_norm and name_norm == search_norm else 0,
-                "_prefix": 1 if search_norm and name_norm.startswith(search_norm) else 0,
-            })
-        entries.sort(key=lambda item: (-item["_exact"], -item["_prefix"], item["name"].lower()))
-        for entry in entries:
-            entry.pop("_exact", None)
-            entry.pop("_prefix", None)
-        payload = entries[:limit]
+        payload = _tracked_series_picker_payload(rows, alias_rows, search, limit)
         return JSONResponse({"status": "success", "series": payload, "count": len(payload)})
     except Exception as exc:
         logger.warning(f"Tracked series picker failed: {exc}")
