@@ -39,10 +39,10 @@ _PRIORITIZED_GROUP_MATCH_SQL = """(
 _GROUP_DELIMITER_RE = re.compile(r"\s*(?:,|&|/|\+|\band\b)\s*", re.IGNORECASE)
 
 # Discovery means "a series NovelTrax does not already know".  The series
-# resolver (aliases, AniList titles, punctuation/case variants) uses
-# ``app.parser.normalize_text``; comparing raw ``lower(trim(...))`` strings let
-# tracked/owned spellings ("The Devil Is a Part-Timer" vs "...!") leaked into
-# Discovery.  ``noveltrax_series_key`` is the same Python function registered on
+# resolver compares spellings after punctuation/case/accent/script folding
+# (``parser.series_key``); comparing raw ``lower(trim(...))`` strings let
+# tracked/owned spellings ("The Devil Is a Part-Timer" vs "...!") leak into
+# Discovery.  ``noveltrax_series_key`` is that Python function, registered on
 # every connection in ``get_connection``.
 _DISCOVERY_DEDUP_KEY_SQL = """noveltrax_series_key(
     REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(r.series_name, ' (Light Novel)', ''), ' [Light Novel]', ''), ' (Novel)', ''), ' (Web Novel)', ''), ' (LN)', '')
