@@ -69,6 +69,13 @@ def check_provider_cache_and_match():
         check_eq(calls["n"], 2, "search + series detail, then cached (2 calls total)")
         check_eq(first.get("primary_books_count"), 16, "Hardcover primary volume count")
         check_eq(second.get("id"), 132790, "cached result reused")
+        per_volume = hardcover.HardcoverProvider.search_series(
+            "Rascal Does Not Dream of a Sister Home Alone"
+        )
+        check(per_volume is not None,
+              "a per-volume AniList title resolves to the grouped Hardcover series")
+        check_eq(per_volume.get("primary_books_count"), 16,
+                 "per-volume lookup returns the grouped series size")
         miss = hardcover.HardcoverProvider.search_series("Completely Unrelated Title")
         check_eq(miss, None, "no low-similarity series is accepted")
     finally:
@@ -80,6 +87,13 @@ def check_review_queue_and_combine():
     db = make_db()
     tm = new_manager(db)
     try:
+        # Ordinary, alphabetically earlier series must not eat the lookup budget.
+        for index in range(6):
+            insert_series(
+                db, f"A Ordinary Series {index}", calibre_id=None, is_monitored=1,
+                book_count=10, latest_index=10.0,
+                anilist_meta={"volumes": 10, "anilist_id": 9000 + index},
+            )
         base_id = insert_series(
             db, "Rascal Does Not Dream of ...", calibre_id=128, is_monitored=1,
             book_count=15, latest_index=15.0,
@@ -99,10 +113,11 @@ def check_review_queue_and_combine():
                        "Rascal Does Not Dream Volume 15 Epub",
                        "Rascal Does Not Dream of ...", volume=15.0, status="IN_CALIBRE")
 
-        calls = {"n": 0}
+        calls = {"n": 0, "titles": []}
 
         def fake_search(title, per_page=5):
             calls["n"] += 1
+            calls["titles"].append(title)
             return dict(RASCAL)
 
         original = hardcover.HardcoverProvider.search_series
@@ -123,7 +138,11 @@ def check_review_queue_and_combine():
             before = calls["n"]
             again = tm.reconcile_hardcover_series(limit=5)
             check_eq(again.get("queued"), 0, "already-reviewed series is not re-queued")
-            check_eq(calls["n"], before, "pending review skips further lookups")
+            check_eq(len(db.list_series_metadata_reviews(status=None)), 1,
+                     "no second overlapping review is queued")
+            second_titles = calls["titles"][before:]
+            check(not any("Rascal" in title for title in second_titles),
+                  "reviewed/candidate series are not looked up again")
 
             anchor = db.get_series_by_id(review["series_id"])
             keep_id = int(anchor["id"])

@@ -1491,7 +1491,19 @@ class TaskManager:
                 (int(r["series_id"]), int(r["hardcover_id"]))
                 for r in reviews if r.get("series_id") and r.get("hardcover_id")
             }
-            for row in rows:
+
+            # Per-volume AniList entries (volumes<=1) first: alphabetically early,
+            # ordinary series would otherwise consume the whole lookup budget every
+            # sync before the split-series signature is reached.
+            def _priority(item):
+                try:
+                    meta_probe = json.loads(item.get("anilist_meta_json") or "{}")
+                    volumes = int(meta_probe.get("volumes") or meta_probe.get("total_volumes") or 0)
+                except (TypeError, ValueError):
+                    volumes = 0
+                return (0 if volumes <= 1 else 1, str(item.get("name") or "").lower())
+
+            for row in sorted(rows, key=_priority):
                 if result["checked"] >= batch_limit:
                     break
                 series_id = row.get("id")
@@ -1507,6 +1519,9 @@ class TaskManager:
                 except (TypeError, ValueError):
                     meta = {}
                 if not isinstance(meta, dict) or not meta:
+                    continue
+                if HardcoverProvider.has_cached(name):
+                    # Already checked within the cache TTL; do not spend budget.
                     continue
                 info = HardcoverProvider.search_series(name)
                 result["checked"] += 1
@@ -1528,6 +1543,11 @@ class TaskManager:
                 base = " ".join(base.split())
                 prefix = " ".join(base.split()[:5])
                 if len(prefix) < 6:
+                    continue
+                row_norm = normalize_text(name)
+                if not row_norm.startswith(prefix):
+                    # A fuzzy search hit for an unrelated tracked row must not
+                    # create a review; only members of the grouped family qualify.
                     continue
                 candidates = []
                 for other in rows:
@@ -1576,6 +1596,12 @@ class TaskManager:
                         f"AniList reports {anilist_volumes or 'unknown'}."
                     ),
                 )
+                reviewed_series.add(int(anchor_row["id"]))
+                for candidate in candidates:
+                    try:
+                        reviewed_series.add(int(candidate["id"]))
+                    except (TypeError, ValueError):
+                        continue
                 result["queued"] += 1
                 self.db.log_activity(
                     "HARDCOVER_REVIEW_QUEUED",

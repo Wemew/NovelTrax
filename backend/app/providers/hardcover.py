@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import threading
 import time
 import urllib.error
@@ -142,12 +143,40 @@ class HardcoverProvider:
             return None
         return payload.get("data") or {}
 
+    @staticmethod
+    def _query_variants(title: str) -> list:
+        """Search queries for a title, base grouping first.
+
+        AniList often names one volume ``Rascal Does Not Dream of a Sister Home
+        Alone`` while Hardcover groups ``Rascal Does Not Dream (Light Novel)``.
+        Querying the trailing ``of …`` subtitle scores below the similarity floor,
+        so try a conservative base title (≥3 words) first, then the full title.
+        """
+        text = str(title or "").strip()
+        if not text:
+            return []
+        variants = []
+        trimmed = re.sub(r"\s*\([^)]*\)\s*$", "", text).strip()
+        for separator in (r"\s+of\s+", r"\s*:\s*"):
+            parts = re.split(separator, trimmed, maxsplit=1, flags=re.IGNORECASE)
+            if len(parts) == 2 and len(parts[0].split()) >= 3:
+                variants.append(parts[0].strip(" -–—:,"))
+                break
+        variants.append(text)
+        unique = []
+        for value in variants:
+            if value and normalize_text(value) not in {normalize_text(v) for v in unique}:
+                unique.append(value)
+        return unique
+
     @classmethod
     def search_series(cls, title: str, per_page: int = 5) -> Optional[Dict[str, Any]]:
         """Best matching Hardcover series for *title*, or ``None``.
 
-        One request per uncached title; the chosen hit must beat a similarity
-        floor so a fuzzy search cannot attach an unrelated series.
+        Queries are cached per input title; a head-prefix match (the volume title
+        starts with the grouped series name) is accepted even when whole-string
+        similarity is below the floor, because that is exactly the per-volume
+        AniList case this check exists for.
         """
         query_title = str(title or "").strip()
         if not query_title:
@@ -156,44 +185,71 @@ class HardcoverProvider:
         cached = cls._cache_get(cache_key)
         if cached is not None:
             return cached or None
-        data = cls._graphql(
-            'query($q:String!){ search(query:$q, query_type:"series", per_page:10)'
-            '{ results } }',
-            {"q": query_title},
-        )
-        if not data:
-            return None
-        results = ((data.get("search") or {}).get("results") or {}).get("hits") or []
         wanted = normalize_text(query_title)
-        best: Optional[Dict[str, Any]] = None
-        best_score = 0.0
-        for hit in results:
-            document = (hit or {}).get("document") or {}
-            name = str(document.get("name") or "").strip()
-            if not name:
-                continue
-            candidate = normalize_text(name)
-            score = 1.0 if candidate == wanted else max(
-                string_similarity(wanted, candidate),
-                0.95 if wanted and (wanted in candidate or candidate in wanted) else 0.0,
+        for query in cls._query_variants(query_title):
+            data = cls._graphql(
+                'query($q:String!){ search(query:$q, query_type:"series", per_page:10)'
+                '{ results } }',
+                {"q": query},
             )
-            if score > best_score:
-                best_score = score
-                best = {
-                    "id": int(document.get("id") or 0) or None,
-                    "name": name,
-                    "books_count": int(document.get("books_count") or 0),
-                    "primary_books_count": int(document.get("primary_books_count") or 0),
-                    "slug": str(document.get("slug") or ""),
-                    "author_name": str(document.get("author_name") or ""),
-                    "score": round(score, 4),
-                }
-        if best is None or best_score < 0.72:
-            cls._cache_put(cache_key, {})
-            return None
-        series = cls.series_details(best.get("id")) or best
-        cls._cache_put(cache_key, series)
-        return series
+            if not data:
+                continue
+            results = ((data.get("search") or {}).get("results") or {}).get("hits") or []
+            best: Optional[Dict[str, Any]] = None
+            best_score = 0.0
+            for hit in results:
+                document = (hit or {}).get("document") or {}
+                name = str(document.get("name") or "").strip()
+                if not name:
+                    continue
+                candidate = normalize_text(name)
+                candidate_tokens = [
+                    token for token in candidate.split()
+                    if token not in ("light", "novel", "ln")
+                ]
+                wanted_tokens = wanted.split()
+                head_prefix = bool(candidate_tokens) and bool(wanted_tokens) and (
+                    wanted_tokens[:len(candidate_tokens)] == candidate_tokens
+                    or candidate_tokens[:len(wanted_tokens)] == wanted_tokens
+                )
+                score = 1.0 if candidate == wanted else max(
+                    string_similarity(wanted, candidate),
+                    0.95 if wanted and (wanted in candidate or candidate in wanted) else 0.0,
+                    0.9 if head_prefix else 0.0,
+                )
+                if score > best_score:
+                    best_score = score
+                    best = {
+                        "id": int(document.get("id") or 0) or None,
+                        "name": name,
+                        "books_count": int(document.get("books_count") or 0),
+                        "primary_books_count": int(document.get("primary_books_count") or 0),
+                        "slug": str(document.get("slug") or ""),
+                        "author_name": str(document.get("author_name") or ""),
+                        "score": round(score, 4),
+                    }
+            if best is None or best_score < 0.72:
+                continue
+            series = cls.series_details(best.get("id")) or best
+            cls._cache_put(cache_key, series)
+            return series
+        cls._cache_put(cache_key, {})
+        return None
+
+    @classmethod
+    def has_cached(cls, title: str) -> bool:
+        """True when this title was already looked up (hit or miss)."""
+        key = cls._cache_key(title)
+        with cls._cache_lock:
+            if key in cls._memory_cache:
+                return True
+        db = cls._db
+        if db is not None:
+            try:
+                return db.get_hardcover_cache(key, max_age_seconds=CACHE_TTL_SECONDS) is not None
+            except Exception:
+                return False
+        return False
 
     @classmethod
     def series_details(cls, series_id: Any) -> Optional[Dict[str, Any]]:
