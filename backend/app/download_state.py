@@ -28,7 +28,7 @@ from typing import Any, Dict
 
 
 # States from which the "Download" action may be offered again.
-DOWNLOADABLE_STATES = frozenset(("failed", "not_downloaded"))
+DOWNLOADABLE_STATES = frozenset(("failed", "not_downloaded", "partial"))
 # States that mean "the release is terminal; do not download again".
 TERMINAL_STATES = frozenset(("in_calibre",))
 
@@ -78,6 +78,8 @@ def release_download_state(release: Dict[str, Any]) -> Dict[str, Any]:
         state, label = "in_calibre", "In Calibre"
     elif download_status == "COMPLETED":
         state, label = "downloaded", "Downloaded"
+    elif download_status == "PARTIAL":
+        state, label = "partial", "Partially downloaded"
     elif download_status == "DOWNLOADING":
         state, label = "downloading", "Downloading"
     else:

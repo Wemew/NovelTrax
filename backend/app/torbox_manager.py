@@ -19,6 +19,7 @@ import logging
 import os
 import re
 import shutil
+import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -46,8 +47,6 @@ DEFAULT_DOWNLOADS_DIR = os.getenv("DOWNLOAD_DIR", "/downloads")
 # A whole-torrent zip is only used when it is comfortably under the size cap and
 # the bundle is small; otherwise the exact per-file links are fetched so every
 # file is individually size-checked (TorBox port §5.4).
-TORBOX_ZIP_MAX_FILES = 20
-TORBOX_ZIP_SAFETY_RATIO = 0.9
 
 # Retry rate limit per release (seconds) for ``retry_release`` (TorBox port §5.6).
 TORBOX_RETRY_MIN_SECONDS = 5.0
@@ -240,6 +239,18 @@ def _clamp_int(value: Any, low: int, high: int, default: int) -> int:
     return max(low, min(number, high))
 
 
+def _json_values(value: Any) -> List[Any]:
+    if isinstance(value, (list, tuple, set)):
+        return list(value)
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value or "[]")
+        except (TypeError, ValueError):
+            return []
+        return parsed if isinstance(parsed, list) else []
+    return []
+
+
 def _json_list(value: Any) -> List[Any]:
     """Decode a JSON list column (accepts an already-decoded list)."""
     if isinstance(value, (list, tuple, set)):
@@ -411,11 +422,6 @@ class TorBoxManager:
     def _delete_on_failure(self) -> bool:
         return as_bool(self.db.get_setting("torbox_delete_on_failure", "true"), default=True)
 
-    def _strict_selection(self) -> bool:
-        return as_bool(
-            self.db.get_setting("torbox_strict_volume_selection", "true"), default=True,
-        )
-
     # -- URL / wanted-volume helpers ---------------------------------------
     @staticmethod
     def _resolve_submit_url(release: Dict[str, Any]) -> str:
@@ -448,18 +454,55 @@ class TorBoxManager:
                 values.append(number)
         return values
 
-    def _resolve_wanted_volumes(self, release: Dict[str, Any]) -> List[float]:
-        """Authoritative wanted-volume list for a release.
+    def _owned_volumes_for_series(self, series_name: Any) -> set:
+        """Calibre-owned volumes for a release's series (tracker or alias target)."""
+        name = str(series_name or "").strip()
+        if not name:
+            return set()
+        row = None
+        try:
+            with self.db.get_connection() as conn:
+                row = conn.execute(
+                    "SELECT owned_volumes_json FROM series_tracking "
+                    "WHERE lower(trim(name)) = lower(trim(?)) LIMIT 1;",
+                    (name,),
+                ).fetchone()
+                if row is None:
+                    row = conn.execute(
+                        "SELECT st.owned_volumes_json FROM series_alias_overrides sao "
+                        "JOIN series_tracking st "
+                        "ON lower(trim(st.name)) = lower(trim(sao.target_name)) "
+                        "WHERE lower(trim(sao.source_name)) = lower(trim(?)) LIMIT 1;",
+                        (name,),
+                    ).fetchone()
+        except Exception as exc:
+            logger.debug("Could not resolve owned volumes for %r: %s", name, exc)
+            return set()
+        if row is None:
+            return set()
+        try:
+            return {round(float(value), 2) for value in _json_values(row[0])}
+        except Exception:
+            return set()
 
-        Order (TorBox port §5.1): persisted ``download_wanted_json`` (non-empty) →
-        ``missing_vols_json`` → ``volumes_json`` (all) → the single ``volume``
-        column → ``[]``.  Empty means "unknown", never "nothing missing".
+    def _resolve_wanted_volumes(self, release: Dict[str, Any]) -> List[float]:
+        """Wanted volumes that are genuinely missing from Calibre.
+
+        Persisted choices win: ``download_wanted_json`` (a partial fetch clears it
+        and stores the leftovers in ``missing_vols_json``).  Otherwise the
+        release's bundle volumes are reduced by the tracked series' owned
+        volumes, so a ``v01-08`` torrent fetches only volume 8.  Empty means
+        "nothing to fetch / unknown" and the planner refuses a whole-torrent pull.
         """
         release = release if isinstance(release, dict) else {}
-        for key in ("download_wanted_json", "missing_vols_json", "volumes_json"):
+        for key in ("download_wanted_json", "missing_vols_json"):
             values = self._json_float_list(release.get(key))
             if values:
                 return values
+        volumes = self._json_float_list(release.get("volumes_json"))
+        if volumes:
+            owned = self._owned_volumes_for_series(release.get("series_name"))
+            return [value for value in volumes if value not in owned]
         volume = release.get("volume")
         if volume is not None:
             try:
@@ -1209,22 +1252,21 @@ class TorBoxManager:
         wanted_volumes: Any,
         total_size: int = 0,
     ) -> Dict[str, Any]:
-        """Decide exactly which TorBox files to fetch — safe by default.
+        """Decide exactly which TorBox files to fetch — missing volumes only.
 
-        NovelTrax adaptation of the reference planner: when ownership cannot be
-        determined safely it falls back to the whole-torrent zip (never skip, never
-        download a subset it cannot justify).  Only a verifiable strict subset or a
-        verifiably-needed small bundle downloads exact files.
+        Whole-torrent archives are refused: when the wanted volumes are unknown,
+        TorBox has no file list yet, or no file maps to a wanted volume, the plan
+        is ``skip``.  A file list that covers only part of the wanted volumes is
+        fetched as that exact subset; the leftovers stay wanted by the caller.
         """
         release = release if isinstance(release, dict) else {}
         title = str(release.get("title") or "")
         series_name = str(release.get("series_name") or "").strip()
-        strict = self._strict_selection()
         wanted = {round(float(value), 2) for value in (wanted_volumes or [])}
         file_items = [item for item in (files or []) if isinstance(item, dict)]
 
         plan: Dict[str, Any] = {
-            "strict": strict,
+            "strict": True,
             "wanted_volumes": sorted(wanted),
             "selected_volumes": [],
             "skipped_volumes": [],
@@ -1233,26 +1275,22 @@ class TorBoxManager:
             "mapping": [],
         }
 
-        if not strict:
-            return {
-                **plan,
-                "action": "zip",
-                "files": None,
-                "reason": "strict volume selection is disabled: whole-torrent zip",
-            }
+        # Exact-volume policy: never fall back to the whole-torrent archive.  If
+        # the missing volumes cannot be determined, or TorBox has not returned a
+        # file list yet, skip instead of pulling owned volumes onto disk.
         if not wanted:
             return {
                 **plan,
-                "action": "zip",
+                "action": "skip",
                 "files": None,
-                "reason": "wanted volumes unknown: whole-torrent zip (never skipped)",
+                "reason": "wanted volumes unknown: refusing a whole-torrent fetch",
             }
         if not file_items:
             return {
                 **plan,
-                "action": "zip",
+                "action": "skip",
                 "files": None,
-                "reason": "TorBox returned no file list: whole-torrent zip",
+                "reason": "TorBox returned no file list: cannot select the exact volume",
             }
 
         mapping: List[Dict[str, Any]] = []
@@ -1282,45 +1320,42 @@ class TorBoxManager:
         if not novel_indices:
             return {
                 **plan,
-                "action": "zip",
+                "action": "skip",
                 "files": None,
-                "reason": "no novel file names could be mapped to volumes: whole-torrent zip",
+                "reason": "no novel file names could be mapped to volumes",
             }
         if unmapped:
-            reason = (
-                f"{len(unmapped)} file name(s) cannot be mapped to volumes "
-                f"({', '.join(unmapped[:3])}): whole-torrent zip"
+            logger.info(
+                "TorBox selection for '%s': ignoring %d unmappable file name(s): %s",
+                title, len(unmapped), ", ".join(unmapped[:3]),
             )
-            logger.info("TorBox selection for '%s': %s", title, reason)
-            return {**plan, "action": "zip", "files": None, "reason": reason}
 
         available = set()
         for index in novel_indices:
             available.update(mapping[index]["volumes"])
         absent = sorted(wanted - available)
         if absent:
-            reason = (
-                f"wanted volume(s) {_fmt_volumes(absent)} are absent from the torrent: "
-                "whole-torrent zip"
+            logger.info(
+                "TorBox selection for '%s': wanted volume(s) %s absent from the torrent; "
+                "fetching the available subset only",
+                title, _fmt_volumes(absent),
             )
-            logger.info("TorBox selection for '%s': %s", title, reason)
-            return {**plan, "action": "zip", "files": None, "reason": reason}
 
         selected_indices = [
             index for index in novel_indices if set(mapping[index]["volumes"]) & wanted
         ]
+        if not selected_indices:
+            return {
+                **plan,
+                "action": "skip",
+                "files": None,
+                "reason": "no torrent file matches the wanted volume(s)",
+            }
         covered = set()
         for index in selected_indices:
             covered.update(mapping[index]["volumes"])
-        all_needed = (
-            len(selected_indices) == len(novel_indices)
-            and (covered & wanted) == wanted
-        )
         selected_files = [file_items[index] for index in selected_indices]
         max_bytes = self._max_download_bytes()
-        estimated_total = _coerce_int(total_size, 0)
-        if not estimated_total:
-            estimated_total = sum(_coerce_int(item.get("size"), 0) for item in file_items)
 
         result = {
             **plan,
@@ -1329,33 +1364,8 @@ class TorBoxManager:
             "selected_count": len(selected_files),
         }
 
-        if all_needed:
-            if (
-                len(novel_indices) <= TORBOX_ZIP_MAX_FILES
-                and (
-                    not estimated_total
-                    or estimated_total <= int(max_bytes * TORBOX_ZIP_SAFETY_RATIO)
-                )
-            ):
-                return {
-                    **result,
-                    "action": "zip",
-                    "files": None,
-                    "reason": f"all {len(novel_indices)} needed file(s): whole-torrent zip",
-                }
-            for item in selected_files:
-                self._check_file_size(item, max_bytes)
-            return {
-                **result,
-                "action": "files",
-                "files": selected_files,
-                "reason": (
-                    f"all {len(novel_indices)} file(s) needed but the archive is "
-                    f"{estimated_total / (1024 ** 3):.1f} GiB / {len(novel_indices)} file(s); "
-                    "fetching the exact files per-file"
-                ),
-            }
-
+        # Always fetch the selected files individually: a whole-torrent zip also
+        # contains covers/NFOs and any owned volumes that share a bundle file.
         for item in selected_files:
             self._check_file_size(item, max_bytes)
         return {
@@ -1363,21 +1373,87 @@ class TorBoxManager:
             "action": "files",
             "files": selected_files,
             "reason": (
-                f"strict subset: {len(selected_files)}/{len(file_items)} file(s) selected, "
+                f"{len(selected_files)}/{len(file_items)} file(s) selected; "
                 f"{len(result['skipped_volumes'])} owned volume(s) skipped"
             ),
         }
 
+    def _unique_flat_destination(
+        self, final_dir: str, name: str, size_hint: int = 0, title: str = "",
+    ) -> tuple:
+        """Pick a flat destination without ever overwriting an unrelated file.
+
+        Returns ``(path, reuse_existing)``.  An existing file with the same name
+        and size is treated as the same download and reused; otherwise the
+        release title (or a numeric suffix) disambiguates Nyaa's generic names
+        such as ``Vol. 1.epub``.
+        """
+        base, ext = os.path.splitext(name)
+        candidate = os.path.join(final_dir, name)
+        if not os.path.exists(candidate):
+            return candidate, False
+        try:
+            existing_size = os.path.getsize(candidate)
+        except OSError:
+            existing_size = -1
+        if size_hint and existing_size == int(size_hint):
+            return candidate, True
+        prefix = _safe_dirname(title)[:80]
+        if prefix:
+            candidate = os.path.join(final_dir, f"{prefix} - {name}")
+            if not os.path.exists(candidate):
+                return candidate, False
+        counter = 2
+        while os.path.exists(candidate):
+            candidate = os.path.join(final_dir, f"{base} ({counter}){ext}")
+            counter += 1
+        return candidate, False
+
+    def _flatten_saved_files(
+        self, saved: Any, final_dir: str, title: str,
+    ) -> List[Dict[str, Any]]:
+        """Move fetched files from the temp dir into the flat downloads folder."""
+        flat: List[Dict[str, Any]] = []
+        try:
+            os.makedirs(final_dir, exist_ok=True)
+        except OSError as exc:
+            raise DownloaderFileError(self._filesystem_error("create directory", final_dir, exc)) from exc
+        for item in saved or []:
+            if not isinstance(item, dict):
+                continue
+            source = str(item.get("path") or "")
+            if not source or not os.path.isfile(source):
+                continue
+            name = os.path.basename(source)
+            target, reuse = self._unique_flat_destination(
+                final_dir, name, _coerce_int(item.get("size"), 0), title,
+            )
+            if reuse:
+                try:
+                    os.remove(source)
+                except OSError:
+                    pass
+            else:
+                try:
+                    os.replace(source, target)
+                except OSError as exc:
+                    raise DownloaderFileError(
+                        self._filesystem_error("move into", target, exc)
+                    ) from exc
+            flat.append({**item, "name": os.path.basename(target), "path": target})
+        return flat
+
     def _fetch_release(
         self, release: Dict[str, Any], downloader: Any, handle: Dict[str, Any], info: Dict[str, Any],
     ) -> Dict[str, Any]:
-        """Fetch one ready release into ``<downloads_dir>/<safe title>/`` (contained)."""
+        """Fetch the exact wanted volumes into the flat downloads folder."""
         release = release if isinstance(release, dict) else {}
         info = info if isinstance(info, dict) else {}
         release_id = _coerce_int(release.get("id"), 0)
         title = str(release.get("title") or "")
         reason = ""
         dest_dir = ""
+        temp_dir = ""
         try:
             # Safety net for the poller's media guard: never fetch a .cbz-only
             # torrent (manga rip) into the novel downloads folder.
@@ -1388,7 +1464,7 @@ class TorBoxManager:
                 )
                 return {"status": "rejected_manga"}
 
-            dest_dir = os.path.join(self.downloads_dir(), _safe_dirname(title))
+            dest_dir = self.downloads_dir()
             try:
                 os.makedirs(dest_dir, exist_ok=True)
             except OSError as exc:
@@ -1443,12 +1519,18 @@ class TorBoxManager:
 
             fetch_handle = dict(handle or {})
             fetch_handle["size"] = int(total_bytes or 0)
+            # Fetch into a private temp folder first: the flat downloads folder is
+            # shared, and a failed fetch must never clean up other releases' files.
+            temp_dir = tempfile.mkdtemp(
+                prefix=f".torbox-fetch-{release_id}-", dir=dest_dir,
+            )
             saved = downloader.fetch_files(
                 fetch_handle,
                 selection,
-                dest_dir,
+                temp_dir,
                 progress_cb=self._progress_callback(release_id, total_bytes),
             )
+            saved = self._flatten_saved_files(saved, dest_dir, title)
             fetch_finished_mono = time.monotonic()
             fetch_finished_iso = _utc_iso()
             fetch_seconds = max(0.001, fetch_finished_mono - fetch_started_mono)
@@ -1467,6 +1549,13 @@ class TorBoxManager:
                 self.db.set_download_files(release_id, paths)
             except Exception as exc:
                 logger.debug("Could not persist download files for release %s: %s", release_id, exc)
+            selected_volumes = {
+                round(float(v), 2) for v in (plan.get("selected_volumes") or [])
+            }
+            wanted_volumes = {
+                round(float(v), 2) for v in (plan.get("wanted_volumes") or [])
+            }
+            remaining_volumes = sorted(wanted_volumes - selected_volumes)
             try:
                 self.db.update_torbox_progress(
                     release_id,
@@ -1478,8 +1567,13 @@ class TorBoxManager:
                     progress_pct=100.0,
                 )
                 self.db.clear_download_error(release_id)
-                self.db.update_downloader_state(release_id, "COMPLETED", "torbox")
-                self.db.mark_release_downloaded(release_id)
+                if remaining_volumes:
+                    # Some wanted volumes are not in this torrent: keep them
+                    # wanted instead of letting status=DOWNLOADED suppress them.
+                    self.db.record_partial_download(release_id, remaining_volumes)
+                else:
+                    self.db.update_downloader_state(release_id, "COMPLETED", "torbox")
+                    self.db.mark_release_downloaded(release_id)
                 try:
                     from app.epub_prefill import prepare_downloaded_epub
                     release = self.db.get_release_by_id(release_id) or {}
@@ -1573,6 +1667,9 @@ class TorBoxManager:
                 pass
             self._notified.pop(release_id, None)
             return {"status": "failed", "error": message}
+        finally:
+            if temp_dir:
+                shutil.rmtree(temp_dir, ignore_errors=True)
 
     # -- failure / status helpers ------------------------------------------
     def _fail_release(
@@ -1781,13 +1878,10 @@ class TorBoxManager:
         wanted_volumes = self._json_float_list(release.get("download_wanted_json"))
         if not wanted_volumes:
             wanted_volumes = self._json_float_list(release.get("missing_vols_json"))
-        strict_volumes = self._strict_selection()
         if wanted_volumes:
             selection = "missing volumes " + _fmt_volumes(wanted_volumes)
-        elif not strict_volumes:
-            selection = "legacy whole-torrent"
         else:
-            selection = "all volumes"
+            selection = "wanted volumes unknown (not fetched)"
 
         failed = state == "failed" or db_status == "FAILED"
         error = str(release.get("download_error") or "").strip()

@@ -542,7 +542,6 @@ class Database:
                 ("torbox_enabled", os.getenv("TORBOX_ENABLED", "false")),
                 ("torbox_api_key", os.getenv("TORBOX_API_KEY", "")),
                 ("torbox_delete_after_download", "true"),
-                ("torbox_strict_volume_selection", "true"),
                 ("torbox_delete_on_failure", "true"),
                 ("torbox_download_concurrency", "4"),
                 ("torbox_parallel_chunks", "4"),
@@ -4415,6 +4414,26 @@ class Database:
                 "updated_at = CURRENT_TIMESTAMP WHERE id = ? "
                 "AND status NOT IN ('IN_CALIBRE', 'IGNORED', 'BLACKLISTED');",
                 (int(release_id),),
+            )
+            conn.commit()
+
+    def record_partial_download(self, release_id: int, remaining_volumes: List[float]) -> None:
+        """Persist a fetch that covered only part of the wanted volumes.
+
+        The release stays REQUESTED so the volumes absent from the torrent keep
+        their wishlist entry; ``download_wanted_json`` is cleared so a later click
+        targets the remaining volumes instead of re-fetching the same files.
+        """
+        remaining = sorted({
+            round(float(v), 2) for v in (remaining_volumes or [])
+        })
+        with self.get_connection() as conn:
+            conn.execute(
+                "UPDATE releases SET status = CASE "
+                "WHEN status IN ('NEW', 'REQUESTED') THEN 'REQUESTED' ELSE status END, "
+                "download_status = 'PARTIAL', download_wanted_json = '[]', "
+                "missing_vols_json = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?;",
+                (json.dumps(remaining), int(release_id)),
             )
             conn.commit()
 

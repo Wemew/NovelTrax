@@ -114,7 +114,9 @@ def _make_temp_dir(label):
     _TEMP_COUNTER += 1
     path = os.path.join(
         tempfile.gettempdir(),
-        "noveltrax-torbox-manager-%d-%d-%s" % (os.getpid(), _TEMP_COUNTER, label),
+        "noveltrax-torbox-manager-%d-%d-%s-%s" % (
+            os.getpid(), _TEMP_COUNTER, os.urandom(4).hex(), label,
+        ),
     )
     os.makedirs(path, exist_ok=True)
     return path
@@ -361,7 +363,7 @@ def test_database_migrations_and_methods():
         settings = env.db.get_all_settings()
         for key in (
             "downloader_engine", "torbox_enabled", "torbox_api_key",
-            "torbox_delete_after_download", "torbox_strict_volume_selection",
+            "torbox_delete_after_download",
             "torbox_delete_on_failure", "torbox_download_concurrency",
             "torbox_parallel_chunks", "torbox_max_download_gb",
             "torbox_poll_seconds", "torbox_max_concurrent", "torbox_timeout_hours",
@@ -727,11 +729,15 @@ def test_poll_ready_to_fetch_completion():
         check_contains(progress.get("fetch_started_at"), "T", "fetch_started_at is an ISO stamp")
         check(progress.get("downloaded_bytes", 0) > 0, "completion records downloaded bytes")
 
-        dest_dir = os.path.join(env.downloads, "Overland Vol 5 [EPUB]")
-        check_equal(env.fake.fetched[0]["dest_dir"], dest_dir,
-                    "fetch destination is <downloads_dir>/<safe title>")
-        check(env.fake.fetched[0]["files"] is None,
-              "small all-needed bundle fetches the whole-torrent zip")
+        check(os.path.basename(env.fake.fetched[0]["dest_dir"]).startswith(".torbox-fetch-"),
+              "fetch stages inside a private temp dir under downloads_dir")
+        check_equal(os.path.dirname(env.fake.fetched[0]["dest_dir"]), env.downloads,
+                    "temp dir lives directly under the flat downloads folder")
+        check(isinstance(env.fake.fetched[0]["files"], list),
+              "exact file list is fetched, not a whole-torrent zip")
+        dest_dir = env.downloads
+        check(os.path.isfile(os.path.join(dest_dir, "Overland Vol 5.epub")),
+              "fetched volume lands flat in downloads_dir")
         check(env.fake.cancelled and env.fake.cancelled[-1].get("torrent_id") == 123,
               "delete-after-download cancels the remote torrent")
         check("TORBOX_DOWNLOADED" in _log_event_types(env.db),
@@ -1125,33 +1131,25 @@ def test_plan_selection():
         release = {"id": 1, "title": "Overland Bundle [EPUB]", "series_name": "Overland"}
 
         empty = env.manager._plan_selection(release, [], [])
-        check_equal(empty.get("action"), "zip", "unknown wanted volumes fall back to zip")
-        check(bool(empty.get("reason")), "zip fallback explains itself")
-
-        no_strict_env = ManagerEnv(settings={"torbox_strict_volume_selection": "false"})
-        try:
-            relaxed = no_strict_env.manager._plan_selection(
-                release, [{"id": 1, "name": "Overland Vol 1.epub", "size": 10}], [1.0],
-            )
-            check_equal(relaxed.get("action"), "zip", "strict disabled forces zip")
-            check_equal(relaxed.get("strict"), False, "planner reports strict=False")
-        finally:
-            no_strict_env.cleanup()
+        check_equal(empty.get("action"), "skip",
+                    "unknown wanted volumes never trigger a whole-torrent fetch")
+        check_contains(empty.get("reason"), "wanted volumes unknown", "skip reason explains itself")
 
         no_files = env.manager._plan_selection(release, [], [1.0])
-        check_equal(no_files.get("action"), "zip", "no file list falls back to zip")
+        check_equal(no_files.get("action"), "skip",
+                    "no file list means the exact volume cannot be selected")
 
         unmappable = env.manager._plan_selection(
             release, [{"id": 1, "name": "bonus-content.epub", "size": 10}], [1.0],
         )
-        check_equal(unmappable.get("action"), "zip", "unmappable file names fall back to zip")
-        check_contains(unmappable.get("reason"), "cannot be mapped", "unmappable reason")
+        check_equal(unmappable.get("action"), "skip",
+                    "unmappable file names are ignored and nothing is fetched")
 
         absent = env.manager._plan_selection(
             release, [{"id": 1, "name": "Overland Vol 3.epub", "size": 10}], [1.0],
         )
-        check_equal(absent.get("action"), "zip", "wanted volume absent from torrent falls back to zip")
-        check_contains(absent.get("reason"), "absent from the torrent", "absent-volume reason")
+        check_equal(absent.get("action"), "skip",
+                    "wanted volume absent from torrent is not replaced by a whole-torrent pull")
 
         all_needed = env.manager._plan_selection(
             release,
@@ -1159,8 +1157,10 @@ def test_plan_selection():
              {"id": 2, "name": "Overland Vol 2.epub", "size": 10}],
             [1.0, 2.0],
         )
-        check_equal(all_needed.get("action"), "zip", "small all-needed bundle uses the zip")
+        check_equal(all_needed.get("action"), "files",
+                    "all-needed bundle still fetches exact files, not a zip")
         check_equal(all_needed.get("selected_count"), 2, "all-needed selection counts files")
+        check_equal(len(all_needed.get("files") or []), 2, "all-needed files are explicit")
 
         subset = env.manager._plan_selection(
             release,
@@ -1183,7 +1183,8 @@ def test_plan_selection():
              {"id": 2, "name": "Overland Vol 1.epub", "size": 10}],
             [1.0],
         )
-        check_equal(ancillary.get("action"), "zip", "ancillary files never block the zip decision")
+        check_equal(ancillary.get("action"), "files", "ancillary files are skipped, volume fetched")
+        check_equal(ancillary.get("selected_volumes"), [1.0], "ancillary selection keeps the volume")
 
         all_needed_large = env.manager._plan_selection(
             release,
@@ -1371,14 +1372,9 @@ def test_build_status():
         env.db.set_setting("torbox_strict_volume_selection", "true")
         strict_payload = env.manager.build_status()
         strict_rows = {row["release_id"]: row for row in strict_payload["torrents"]}
-        check_equal(strict_rows[other["id"]].get("selection"), "all volumes",
-                    "strict row without wanted volumes renders 'all volumes'")
-        env.db.set_setting("torbox_strict_volume_selection", "false")
-        legacy_payload = env.manager.build_status()
-        legacy_rows = {row["release_id"]: row for row in legacy_payload["torrents"]}
-        check_equal(legacy_rows[other["id"]].get("selection"), "legacy whole-torrent",
-                    "non-strict row without wanted volumes renders 'legacy whole-torrent'")
-        env.db.set_setting("torbox_strict_volume_selection", "true")
+        check_equal(strict_rows[other["id"]].get("selection"),
+                    "wanted volumes unknown (not fetched)",
+                    "row without wanted volumes says it will not fetch")
 
         # Connection test helper (uses the injected fake, no network).
         env.fake.connection_result = {

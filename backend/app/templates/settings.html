@@ -297,13 +297,6 @@
                         </span>
                     </label>
                     <label class="flex items-start gap-3 cursor-pointer">
-                        <input type="checkbox" id="setting-torbox-strict-selection" {% if settings.torbox_strict_volume_selection != 'false' %}checked{% endif %} class="mt-0.5 w-4 h-4 rounded bg-slate-950 border-slate-700 text-brand-600 focus:ring-brand-500">
-                        <span>
-                            <span class="text-xs font-semibold text-slate-200">Strict selective volume fetch</span>
-                            <p class="text-[11px] text-slate-500">Fetch only the files for volumes you are missing; falls back to the whole torrent when the mapping is unclear.</p>
-                        </span>
-                    </label>
-                    <label class="flex items-start gap-3 cursor-pointer">
                         <input type="checkbox" id="setting-torbox-delete-on-failure" {% if settings.torbox_delete_on_failure != 'false' %}checked{% endif %} class="mt-0.5 w-4 h-4 rounded bg-slate-950 border-slate-700 text-brand-600 focus:ring-brand-500">
                         <span>
                             <span class="text-xs font-semibold text-slate-200">Delete remote copy on failure</span>
@@ -845,7 +838,6 @@
             torbox_enabled: document.getElementById('setting-torbox-enabled').checked ? 'true' : 'false',
             torbox_api_key: document.getElementById('setting-torbox-api-key').value,
             torbox_delete_after_download: document.getElementById('setting-torbox-delete-after').checked ? 'true' : 'false',
-            torbox_strict_volume_selection: document.getElementById('setting-torbox-strict-selection').checked ? 'true' : 'false',
             torbox_delete_on_failure: document.getElementById('setting-torbox-delete-on-failure').checked ? 'true' : 'false',
             torbox_download_concurrency: document.getElementById('setting-torbox-download-concurrency').value,
             torbox_parallel_chunks: document.getElementById('setting-torbox-parallel-chunks').value,

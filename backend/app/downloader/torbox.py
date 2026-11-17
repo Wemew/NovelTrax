@@ -63,8 +63,6 @@ TORBOX_STREAM_CHUNK_BYTES = 1024 * 256
 # passes the configured ``torbox_max_download_gb`` (default 64 GiB) via the factory;
 # this constant is only the safety default for direct construction.
 TORBOX_MAX_FILE_BYTES = 64 * 1024 * 1024 * 1024
-TORBOX_ZIP_MAX_FILES = 20  # whole-torrent zips only for small bundles
-TORBOX_ZIP_SAFETY_RATIO = 0.9  # archive must be comfortably under the cap
 # Throughput (task-31): parallel per-file downloads and ranged multi-connection fetch.
 TORBOX_DEFAULT_CONCURRENCY = 4
 TORBOX_MAX_CONCURRENCY = 16
@@ -1210,34 +1208,42 @@ class TorboxDownloader:
         text = str(exc).lower()
         return "http 429" in text or "http 503" in text or "rate limit" in text or "too many requests" in text
 
-    def _cleanup_fetch_outputs(self, dest_dir: str, saved: List[Dict[str, Any]]) -> None:
-        """Remove files written by a failed fetch call and any .part remnants."""
-        for entry in saved or []:
+    def _cleanup_fetch_outputs(
+        self,
+        dest_dir: str,
+        saved: List[Dict[str, Any]],
+        expected_files: Any = None,
+    ) -> None:
+        """Remove only the files this fetch call wrote (finals + ``.part`` temps).
+
+        Never scans/deletes arbitrary files in ``dest_dir``: the manager may point
+        the destination at a shared folder, and a failed release must not wipe
+        other downloads.
+        """
+        names: List[str] = []
+        for item in expected_files or []:
+            if not isinstance(item, dict):
+                continue
             try:
-                path = entry.get("path")
-                if path and os.path.isfile(path):
-                    os.remove(path)
+                names.append(_safe_basename(
+                    item.get("name") or item.get("short_name") or item.get("path") or ""
+                ))
+            except DownloaderFileError:
+                continue
+        targets: List[str] = []
+        for entry in saved or []:
+            path = entry.get("path") if isinstance(entry, dict) else None
+            if path:
+                targets.append(str(path))
+        for name in names:
+            base = os.path.join(dest_dir, name)
+            targets.extend([base, base + ".part"])
+        for target in targets:
+            try:
+                if os.path.isfile(target):
+                    os.remove(target)
             except OSError:
                 pass
-        try:
-            with os.scandir(dest_dir) as iterator:
-                for item in iterator:
-                    try:
-                        if not item.is_file(follow_symlinks=False):
-                            continue
-                    except OSError:
-                        continue
-                    # The destination directory is release-specific: on a failed
-                    # parallel fetch remove every file written by this call (completed
-                    # finals included) plus .part/Torbox temp remnants.
-                    lowered = item.name.lower()
-                    if lowered.endswith(".part") or lowered.startswith(".torbox-") or not lowered.startswith("."):
-                        try:
-                            os.remove(item.path)
-                        except OSError:
-                            pass
-        except OSError:
-            pass
 
     def _download_item(self, torrent_id: int, item: Dict[str, Any], dest_dir: str, progress_cb=None) -> Dict[str, Any]:
         if not isinstance(item, dict):
@@ -1386,7 +1392,7 @@ class TorboxDownloader:
                         future.cancel()
                     pool.shutdown(wait=True, cancel_futures=True)
         except Exception:
-            self._cleanup_fetch_outputs(dest_dir, saved)
+            self._cleanup_fetch_outputs(dest_dir, saved, files)
             raise
         if not saved:
             raise DownloaderFileError("No files were downloaded from Torbox.")

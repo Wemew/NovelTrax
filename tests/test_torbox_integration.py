@@ -357,12 +357,27 @@ def wire_happy_path_transport(transport, files, file_bodies, zip_bytes_value=Non
         else ready_info(files, size=len(zip_bytes_value or b""))
     }
     api.on("/torrents/mylist", lambda call: json_ok(info_holder["info"]))
-    api.on("/torrents/requestdl", json_ok("https://cdn.torbox.example/archive.zip"))
+
+    def requestdl(call):
+        file_id = (call.params or {}).get("file_id")
+        if not file_id:
+            return json_ok("https://cdn.torbox.example/archive.zip")
+        return json_ok("https://cdn.torbox.example/f%s.epub" % file_id)
+
+    api.on("/torrents/requestdl", requestdl)
     api.on("/torrents/controltorrent", json_ok(None))
     api.on(
         "cdn.torbox.example/archive.zip",
         FakeStream(zip_bytes_value, headers={"Content-Length": str(len(zip_bytes_value or b""))}),
     )
+    for item in files or []:
+        body = (file_bodies or {}).get(item.get("name"))
+        if body is None:
+            continue
+        api.on(
+            "cdn.torbox.example/f%s.epub" % item.get("id"),
+            FakeStream(body, headers={"Content-Length": str(len(body))}),
+        )
     return info_holder
 
 
@@ -370,7 +385,7 @@ def wire_happy_path_transport(transport, files, file_bodies, zip_bytes_value=Non
 # Tests
 # ---------------------------------------------------------------------------
 def test_happy_path_submit_poll_fetch_complete():
-    """submit -> queued status -> ready -> whole-torrent zip fetch -> COMPLETED."""
+    """submit -> queued status -> ready -> exact per-file fetch -> COMPLETED."""
     ctx = Ctx("happy")
     archive = zip_bytes({"Integration Novel v01.epub": b"epub-bytes-1"})
     files = [{"id": 1, "name": "Integration Novel v01.epub", "size": 12}]
@@ -378,7 +393,7 @@ def test_happy_path_submit_poll_fetch_complete():
     with ctx.transport as transport:
         # First poll must not fetch: TorBox reports the torrent still downloading.
         live = wire_happy_path_transport(
-            transport, files, {}, archive,
+            transport, files, {"Integration Novel v01.epub": b"epub-bytes-1"}, archive,
             live_info=dict(
                 ready_info(files, size=len(archive)),
                 download_state="downloading",
@@ -406,7 +421,7 @@ def test_happy_path_submit_poll_fetch_complete():
         check_eq(ctx.row(release_id).get("download_status"), "DOWNLOADING",
                  "still downloading after first poll")
 
-        # TorBox finishes: now a poll must fetch the whole-torrent zip.
+        # TorBox finishes: now a poll must fetch the exact selected file(s).
         live["info"] = ready_info(files, size=len(archive))
         second = ctx.manager.poll_once(async_fetch=False)
         check_eq(second.get("completed"), 1, "ready torrent is completed in the poll pass")
@@ -785,10 +800,11 @@ def test_mixed_cbz_epub_torrent_is_not_rejected():
     archive = zip_bytes({"Mixed Novel v01.cbz": b"cbz", "Mixed Novel v01.epub": b"epub"})
     with ctx.transport as transport:
         live = wire_happy_path_transport(
-            transport, files, {}, archive,
+            transport, files,
+            {"Mixed Novel v01.cbz": b"cbz", "Mixed Novel v01.epub": b"epub"}, archive,
             live_info=dict(ready_info(files, size=len(archive)), id=777, torrent_id=777),
         )
-        release_id = ctx.insert_release(title="Mixed Novel v01")
+        release_id = ctx.insert_release(title="Mixed Novel v01", volume=1.0)
         ctx.manager.submit_release(ctx.row(release_id), source="manual")
         outcome = ctx.manager.poll_once(async_fetch=False)
         check_eq(outcome.get("completed"), 1, "mixed torrent is fetched normally")
