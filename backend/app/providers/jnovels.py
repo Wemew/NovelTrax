@@ -614,6 +614,55 @@ class JNovelsProvider(BaseFeedProvider):
         logger.info(f"Fetched {len(results)} series from J-Novels Master Index ({index_url}).")
         return results
 
+    def search_series(
+        self,
+        series_name: str,
+        max_pages: int = 3,
+        stop_check=None,
+    ) -> List[ReleaseItem]:
+        """Search J-Novels for one series and keep only matching spellings.
+
+        Per-series backfill uses this instead of the site's global listing: a
+        volume post can exist (``/days-with-my-stepsister-volume-8-epub/``) while
+        not appearing in the ``?s=epub`` feed pages, so the feed scan and the
+        global deep pagination never see it.
+        """
+        from urllib.parse import quote_plus
+        from app.parser import normalize_text, string_similarity
+
+        query = str(series_name or "").strip()
+        if not query:
+            return []
+        try:
+            pages = max(1, int(max_pages))
+        except (TypeError, ValueError):
+            pages = 3
+        search_url = f"https://jnovels.com/?s={quote_plus(query)}"
+        provider = JNovelsProvider(url=search_url, config={"max_pages": pages})
+        items = provider._fetch_via_html(max_pages=pages)
+        query_norm = normalize_text(query)
+        matches: List[ReleaseItem] = []
+        seen = set()
+        for item in items:
+            if stop_check is not None:
+                try:
+                    if stop_check():
+                        break
+                except Exception:
+                    pass
+            series_norm = normalize_text(item.series_name or "")
+            if not series_norm or item.guid in seen:
+                continue
+            if (
+                not query_norm
+                or query_norm in series_norm
+                or series_norm in query_norm
+                or string_similarity(query_norm, series_norm) >= 0.72
+            ):
+                seen.add(item.guid)
+                matches.append(item)
+        return matches
+
     def fetch_releases_since(
         self,
         *,

@@ -1744,7 +1744,9 @@ async def api_series_backfill(series_id: int, payload: Optional[Dict[str, Any]] 
 
     p = payload or {}
     max_pages = int(p.get("max_pages", 3))
-    res = task_manager.run_series_backfill_async(target["name"], max_pages=max_pages)
+    res = task_manager.run_series_backfill_async(
+        target["name"], max_pages=max_pages, include_jnovels=True,
+    )
     return JSONResponse(res)
 
 @app.post("/api/series/backfill")
@@ -1754,7 +1756,9 @@ async def api_series_backfill_by_name(payload: Dict[str, Any]):
     if not series_name:
         return JSONResponse({"status": "error", "message": "Series name is required"}, status_code=400)
     max_pages = int(payload.get("max_pages", 3))
-    res = task_manager.run_series_backfill_async(series_name, max_pages=max_pages)
+    res = task_manager.run_series_backfill_async(
+        series_name, max_pages=max_pages, include_jnovels=True,
+    )
     return JSONResponse(res)
 
 @app.post("/api/blacklist")

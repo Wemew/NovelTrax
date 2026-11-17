@@ -347,7 +347,7 @@ def run_backfill_concurrency_and_network_tests(t: TestResultTracker):
         entered_evt = threading.Event()
         release_evt = threading.Event()
 
-        def mock_backfill_slow(series_name, max_pages=3):
+        def mock_backfill_slow(series_name, max_pages=3, include_jnovels=False):
             entered_evt.set()
             release_evt.wait(timeout=10)
             return {"status": "success", "message": "done", "series_name": series_name, "releases_found": 1, "requested": 1}

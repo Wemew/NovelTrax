@@ -4113,7 +4113,8 @@ class TaskManager:
         finally:
             self.is_backfilling = False
 
-    def run_series_backfill_async(self, series_name: str, max_pages: int = 3) -> Dict[str, Any]:
+    def run_series_backfill_async(self, series_name: str, max_pages: int = 3,
+                                  include_jnovels: bool = False) -> Dict[str, Any]:
         """
         Launches targeted series backfill in a background daemon thread:
         Searches active providers (including NyaaNovelProvider) for older/missing volumes,
@@ -4130,7 +4131,9 @@ class TaskManager:
             self.db.set_setting("backfill_progress", f"Backfilling '{series_name}' across providers (up to {max_pages} pages)...")
             self.db.set_setting("backfill_last_page", "1")
             try:
-                res = self.backfill_series(series_name, max_pages=max_pages)
+                res = self.backfill_series(
+                    series_name, max_pages=max_pages, include_jnovels=include_jnovels,
+                )
                 self.db.set_setting("backfill_status", "idle")
                 self.db.set_setting("backfill_progress", res.get("message", f"Backfill for '{series_name}' complete."))
                 self.db.set_setting("backfill_last_page", str(max_pages))
@@ -4149,7 +4152,8 @@ class TaskManager:
         "series_backfill", lambda self, series_name, max_pages=3: f"Backfill: {series_name}",
         scope=lambda self, series_name, max_pages=3: str(series_name),
     )
-    def backfill_series(self, series_name: str, max_pages: int = 3) -> Dict[str, Any]:
+    def backfill_series(self, series_name: str, max_pages: int = 3,
+                        include_jnovels: bool = False) -> Dict[str, Any]:
         """
         Synchronous worker executing targeted series search across providers.
         """
@@ -4208,7 +4212,26 @@ class TaskManager:
         except Exception as e:
             logger.debug(f"Nyaa provider search skipped or unavailable: {e}")
 
-        all_incoming = self.filter_chapter_releases(nyaa_releases, self.chapter_context())
+        # J-Novels targeted search: volume posts that are absent from the global
+        # ``?s=epub`` listing (e.g. "Days with My Stepsister Volume 8 Epub") are
+        # only reachable through the site's per-series search.  Opt-in so unit
+        # tests that drive backfill_series stay hermetic; the HTTP routes enable it.
+        jnovels_releases = []
+        if include_jnovels:
+            try:
+                from app.providers.jnovels import JNovelsProvider
+                jnovels_provider = JNovelsProvider(config={"max_pages": max_pages})
+                jnovels_releases = jnovels_provider.search_series(
+                    series_name,
+                    max_pages=max_pages,
+                    stop_check=lambda: self.stop_backfill_requested,
+                )
+            except Exception as exc:
+                logger.debug(f"J-Novels series search skipped or unavailable: {exc}")
+
+        all_incoming = self.filter_chapter_releases(
+            nyaa_releases + jnovels_releases, self.chapter_context()
+        )
         for rel in all_incoming:
             if self.stop_backfill_requested:
                 break
