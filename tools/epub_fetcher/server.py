@@ -9,6 +9,7 @@ from __future__ import annotations
 import itertools
 import logging
 import os
+import stat
 import tempfile
 import threading
 import time
@@ -94,12 +95,23 @@ def health():
         playwright_ready = True
     except Exception:
         playwright_ready = False
+    display = os.getenv("DISPLAY", "")
+    display_ready = True if HEADLESS else False
+    if not HEADLESS and display.startswith(":"):
+        number = display[1:].split(".", 1)[0]
+        socket_path = f"/tmp/.X11-unix/X{number}"
+        try:
+            display_ready = stat.S_ISSOCK(os.stat(socket_path).st_mode)
+        except OSError:
+            display_ready = False
+    healthy = playwright_ready and display_ready
     return {
-        "status": "ok" if playwright_ready else "degraded",
+        "status": "ok" if healthy else "degraded",
         "playwright": playwright_ready,
         "flaresolverr": bool(FLARESOLVERR_URL),
         "headless": HEADLESS,
-        "display": os.getenv("DISPLAY", ""),
+        "display": display,
+        "display_ready": display_ready,
         "log_level": LOG_LEVEL,
         "max_concurrency": MAX_CONCURRENCY,
         "active_fetches": _queue_active,
@@ -138,6 +150,15 @@ def fetch_endpoint(payload: FetchRequest):
     except FetchError as exc:
         logger.warning("Fetch failed: %s", exc)
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except Exception as exc:
+        # Playwright launch/display failures are environment problems, not
+        # request failures.  Log the traceback and return a retryable 503
+        # instead of an unhandled ASGI 500 with no actionable detail.
+        logger.exception("Unexpected EPUB fetcher error")
+        raise HTTPException(
+            status_code=503,
+            detail=f"EPUB fetcher internal error: {type(exc).__name__}: {exc}",
+        ) from exc
     logger.info("Fetch succeeded: %s (%s bytes)", result.filename, os.path.getsize(result.path))
     return DeletingFileResponse(
         result.path,

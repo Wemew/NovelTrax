@@ -4,7 +4,7 @@ FROM mcr.microsoft.com/playwright/python:v1.49.1-jammy
 # Headful Chromium under Xvfb: Cloudflare's managed Turnstile refuses to issue
 # a token to headless Chromium, but passes in a real display context.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends xvfb xauth \
+    && apt-get install -y --no-install-recommends xvfb xauth x11-utils \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

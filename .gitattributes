@@ -1,0 +1,2 @@
+# Linux entrypoints must keep LF regardless of the developer's autocrlf.
+*.sh text eol=lf

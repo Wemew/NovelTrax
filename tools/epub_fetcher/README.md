@@ -66,6 +66,17 @@ instance). Set `EPUB_FETCHER_MAX_CONCURRENCY=2` only after checking container
 memory; NovelTrax also rejects a second fetch for the same release while one is
 queued/running.
 
+### Xvfb / HTTP 500 after an unclean restart
+
+Headful Chromium needs a live X server. A container restart can retain
+`/tmp/.X99-lock` and `/tmp/.X11-unix/X99` from the previous Xvfb; the new Xvfb
+then exits with “server is already active”, and Chromium fails with
+`Missing X server or $DISPLAY`. The entrypoint now removes a stale lock/socket
+when its PID is gone or no longer belongs to Xvfb, verifies the display with
+`xdpyinfo`, and falls back to headless mode if Xvfb cannot start. `/health`
+reports `display_ready`; a `503` means the browser/display environment failed,
+while `502` is a source/flow failure.
+
 FlareSolverr is still required for Cloudflare/Turnstile; without it a challenge
 fails with a clear error instead of hanging. A solved URL is remembered, so a
 residual Turnstile iframe or "verify you are human" banner no longer re-triggers
