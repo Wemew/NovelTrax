@@ -3052,6 +3052,19 @@ class TaskManager:
                 if notify_acquired_enabled:
                     notifier.notify_acquired(acq)
 
+            # A bundle that is marked IN_CALIBRE while some of its volumes are
+            # not in the tracked series must go back to Wanted (live D-Genesis
+            # v01-10 case).
+            try:
+                repaired = self.db.repair_incomplete_bundle_statuses()
+                if repaired:
+                    self._task_report(
+                        message=f"Re-opened {repaired} incomplete bundle(s)…",
+                        progress_pct=86,
+                    )
+            except Exception as exc:
+                logger.debug(f"Bundle status repair skipped: {exc}")
+
             # A downloaded volume whose file was removed from disk and never
             # reached Calibre must become wanted again (or a discovery row).
             try:
@@ -4342,8 +4355,11 @@ class TaskManager:
         return {"status": "started", "message": f"Historical backfill for '{series_name}' started in background."}
 
     @background_tasks.tracked_task(
-        "series_backfill", lambda self, series_name, max_pages=3: f"Backfill: {series_name}",
-        scope=lambda self, series_name, max_pages=3: str(series_name),
+        "series_backfill",
+        lambda self, series_name, max_pages=3, include_jnovels=False: (
+            f"Backfill: {series_name}"
+        ),
+        scope=lambda self, series_name, max_pages=3, include_jnovels=False: str(series_name),
     )
     def backfill_series(self, series_name: str, max_pages: int = 3,
                         include_jnovels: bool = False) -> Dict[str, Any]:

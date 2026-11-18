@@ -104,6 +104,14 @@ def check_targeted_jnovels_backfill():
             check_eq(float(row["volume"]), 8.0, "volume 8 parsed")
             check_eq(row["status"], "REQUESTED",
                      "missing volume 8 is wanted, not IN_CALIBRE")
+            with db.get_connection() as conn:
+                task_row = conn.execute(
+                    "SELECT title, status FROM background_tasks "
+                    "WHERE kind = 'series_backfill' ORDER BY id DESC LIMIT 1;"
+                ).fetchone()
+            check(task_row is not None, "series backfill task persisted")
+            check_eq(task_row["title"], "Backfill: Days with My Stepsister",
+                     "backfill task has a title (including include_jnovels)")
         finally:
             jnovels_mod.JNovelsProvider.search_series = original_jn
             nyaa_mod.NyaaNovelProvider.search_series = original_nyaa

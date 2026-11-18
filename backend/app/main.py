@@ -941,11 +941,12 @@ async def releases_view(
     page_size: int = Query(30, ge=10, le=200),
     sort: str = Query("date_desc"),
     q: Optional[str] = Query(None),
-    include_ignored: bool = Query(False)
+    include_ignored: bool = Query(False),
+    hide_owned: bool = Query(False)
 ):
     clean_q = q.strip() if q else None
     if view != "flat":
-        all_groups = db.get_releases_grouped_by_series(status=status, search=clean_q, sort=sort, include_ignored=include_ignored)
+        all_groups = db.get_releases_grouped_by_series(status=status, search=clean_q, sort=sort, include_ignored=include_ignored, hide_owned=hide_owned)
         total_count = len(all_groups)
         total_pages = max(1, math.ceil(total_count / page_size))
         current_page = min(page, total_pages) if total_count > 0 else 1
@@ -961,6 +962,8 @@ async def releases_view(
         releases = db.get_releases(status=status, limit=page_size, offset=offset, search=clean_q, sort=sort, include_ignored=include_ignored)
 
     status_counts = db.get_release_status_counts()
+    if status == "DOWNLOADED":
+        status_counts["DOWNLOADED"] = total_count
 
     return templates.TemplateResponse(
         request=request,
@@ -978,7 +981,8 @@ async def releases_view(
             "total_pages": total_pages,
             "total_count": total_count,
             "status_counts": status_counts,
-            "include_ignored": include_ignored
+            "include_ignored": include_ignored,
+            "hide_owned": hide_owned
         }
     )
 
@@ -1088,11 +1092,17 @@ async def api_releases_cards(
     offset: int = Query(0, ge=0),
     limit: int = Query(8, ge=1, le=50),
     search: Optional[str] = Query(None),
-    sort: str = Query("date_desc")
+    sort: str = Query("date_desc"),
+    hide_owned: bool = Query(False)
 ):
     clean_s = search.strip() if search else None
-    groups = db.get_releases_grouped_by_series(status=status, limit=limit, offset=offset, search=clean_s, sort=sort)
-    total = db.count_releases_grouped_by_series(status=status, search=clean_s)
+    groups = db.get_releases_grouped_by_series(
+        status=status, limit=limit, offset=offset, search=clean_s, sort=sort,
+        hide_owned=hide_owned,
+    )
+    total = db.count_releases_grouped_by_series(
+        status=status, search=clean_s, hide_owned=hide_owned,
+    )
     has_more = (offset + len(groups)) < total
     html = templates.get_template("partials/series_card_chunk.html").render(
         {"request": request, "grouped_series": groups}
@@ -1159,10 +1169,13 @@ async def api_discovery_cards(
 @app.get("/api/series_releases")
 async def api_releases_grouped(
     status: Optional[str] = None,
-    include_ignored: bool = Query(False)
+    include_ignored: bool = Query(False),
+    hide_owned: bool = Query(False)
 ):
     """Returns all releases aggregated into canonical series cards."""
-    groups = db.get_releases_grouped_by_series(status=status, include_ignored=include_ignored)
+    groups = db.get_releases_grouped_by_series(
+        status=status, include_ignored=include_ignored, hide_owned=hide_owned,
+    )
     return JSONResponse({"status": "success", "count": len(groups), "series_groups": groups})
 
 api_get_series_releases = api_releases_grouped

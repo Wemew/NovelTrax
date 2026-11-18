@@ -4645,6 +4645,80 @@ class Database:
             )
             conn.commit()
 
+    def repair_incomplete_bundle_statuses(self) -> int:
+        """Re-open Calibre bundles that still miss detected volumes.
+
+        A bundle marked IN_CALIBRE while ``volumes_json`` contains volumes absent
+        from the tracked series' ``owned_volumes_json`` silently suppresses those
+        volumes from the wishlist.  Re-check every such bundle on Calibre sync.
+        """
+        repaired: List[int] = []
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            rows = cur.execute(
+                "SELECT id, series_name, volumes_json FROM releases "
+                "WHERE is_bundle = 1 AND status = 'IN_CALIBRE';"
+            ).fetchall()
+            from app.parser import strip_ordinal_date_suffix
+            for row in rows:
+                try:
+                    volumes = {
+                        round(float(v), 2)
+                        for v in (json.loads(row["volumes_json"] or "[]") or [])
+                    }
+                except (TypeError, ValueError):
+                    continue
+                if len(volumes) < 2:
+                    continue
+                raw_series = str(row["series_name"] or "")
+                series_name = strip_ordinal_date_suffix(raw_series) or raw_series
+                tracked = cur.execute(
+                    "SELECT owned_volumes_json FROM series_tracking "
+                    "WHERE lower(trim(name)) = lower(trim(?)) "
+                    "   OR noveltrax_series_key(name) = noveltrax_series_key(?) LIMIT 1;",
+                    (series_name, series_name),
+                ).fetchone()
+                if tracked is None:
+                    tracked = cur.execute(
+                        "SELECT st.owned_volumes_json FROM series_alias_overrides sao "
+                        "JOIN series_tracking st "
+                        "  ON lower(trim(st.name)) = lower(trim(sao.target_name)) "
+                        "WHERE lower(trim(sao.source_name)) = lower(trim(?)) "
+                        "   OR noveltrax_series_key(sao.source_name) = noveltrax_series_key(?) "
+                        "LIMIT 1;",
+                        (raw_series, raw_series),
+                    ).fetchone()
+                if tracked is None:
+                    continue
+                try:
+                    owned = {
+                        round(float(v), 2)
+                        for v in (json.loads(tracked["owned_volumes_json"] or "[]") or [])
+                    }
+                except (TypeError, ValueError):
+                    owned = set()
+                if not owned:
+                    # Unknown/legacy ownership: never mass-reopen bundles.
+                    continue
+                missing = sorted(volumes - owned)
+                if not missing:
+                    continue
+                cur.execute(
+                    "UPDATE releases SET status = 'REQUESTED', "
+                    "missing_vols_json = ?, calibre_matched_book_id = NULL, "
+                    "updated_at = CURRENT_TIMESTAMP WHERE id = ?;",
+                    (json.dumps(missing), int(row["id"])),
+                )
+                repaired.append(int(row["id"]))
+            conn.commit()
+        if repaired:
+            self.log_activity(
+                "BUNDLE_STATUS_REPAIRED",
+                f"Re-opened {len(repaired)} incomplete bundle release(s)",
+                json.dumps({"release_ids": repaired[:100], "count": len(repaired)}),
+            )
+        return len(repaired)
+
     def reconcile_missing_downloads(self, downloads_dir: str) -> int:
         """Revert downloaded volumes whose files disappeared and are not in Calibre.
 
@@ -5433,7 +5507,8 @@ class Database:
         search: Optional[str] = None,
         sort: str = "wanted_first",
         prioritized_only: bool = False,
-        include_ignored: bool = False
+        include_ignored: bool = False,
+        hide_owned: bool = False
     ) -> List[Dict[str, Any]]:
         """
         Groups releases under canonical series, aggregating all bundle volumes,
@@ -5466,6 +5541,15 @@ class Database:
                 cur.execute("""
                     SELECT * FROM releases 
                     WHERE (status = 'IGNORED' OR ignored = 1) AND COALESCE(media_type, 'unknown') NOT IN ('audiobook', 'manga')
+                    ORDER BY updated_at DESC, id DESC;
+                """)
+            elif status == "DOWNLOADED":
+                # Downloaded is volume/series state, not only release status:
+                # include completed/partial fetches and let the finished groups
+                # decide (inventory + volume sets + release download status).
+                cur.execute("""
+                    SELECT * FROM releases
+                    WHERE COALESCE(media_type, 'unknown') NOT IN ('audiobook', 'manga')
                     ORDER BY updated_at DESC, id DESC;
                 """)
             elif status:
@@ -5690,6 +5774,7 @@ class Database:
                         "downloaded_volumes_set": set(),
                         "has_wanted": False,
                         "has_downloaded": False,
+                        "has_download_activity": False,
                         "has_discovery": False,
                         "has_in_calibre": False,
                         "has_prioritized": False
@@ -5729,6 +5814,8 @@ class Database:
 
                 # A completed fetch/download marks its volumes blue even when the
                 # release is not (yet) IN_CALIBRE.
+                if str(rel.get("download_status") or "").upper() in ("COMPLETED", "PARTIAL"):
+                    group["has_download_activity"] = True
                 if (
                     str(rel.get("status") or "").upper() == "DOWNLOADED"
                     or str(rel.get("download_status") or "").upper() == "COMPLETED"
@@ -5792,6 +5879,25 @@ class Database:
 
                 del g["all_volumes_set"]
                 del g["missing_volumes_set"]
+                if hide_owned:
+                    owned_set = {round(float(v), 2) for v in g["owned_volumes"]}
+                    kept = []
+                    for rel in g["releases"]:
+                        rel_vols = rel.get("volumes") or (
+                            [rel.get("volume")] if rel.get("volume") is not None else []
+                        )
+                        try:
+                            rel_set = {round(float(v), 2) for v in rel_vols}
+                        except (TypeError, ValueError):
+                            rel_set = set()
+                        # Unknown volume info is kept; a bundle stays visible when
+                        # at least one of its volumes is not owned.
+                        if rel_set and rel_set <= owned_set:
+                            continue
+                        kept.append(rel)
+                    g["releases"] = kept
+                    if not kept:
+                        continue
                 dates = [str(r.get("pub_date") or r.get("updated_at") or r.get("created_at") or "") for r in g["releases"]]
                 valid_dates = [d for d in dates if d]
                 g["latest_date"] = max(valid_dates) if valid_dates else ""
@@ -5801,6 +5907,14 @@ class Database:
             # Filter prioritized only if requested
             if prioritized_only:
                 result_groups = [g for g in result_groups if g.get("has_prioritized")]
+
+            if status == "DOWNLOADED":
+                result_groups = [
+                    g for g in result_groups
+                    if g.get("has_downloaded")
+                    or g.get("downloaded_volumes")
+                    or g.get("has_download_activity")
+                ]
 
             # Instant keyword search filter across series name, synopsis, and release titles
             if search and search.strip():
@@ -5814,13 +5928,30 @@ class Database:
 
             # Sort groups by requested sorting criteria
             if sort in ("wanted_first", "default") or not sort:
-                result_groups.sort(key=lambda item: (
-                    not (item["has_wanted"] and item.get("has_prioritized")),
-                    not item["has_wanted"],
-                    not item.get("has_prioritized"),
-                    -len(item.get("missing_volumes", [])),
-                    item["series_name"].lower()
-                ))
+                def _wanted_volumes(item):
+                    owned = {round(float(v), 2) for v in item.get("owned_volumes") or []}
+                    return [
+                        v for v in item.get("all_volumes") or []
+                        if round(float(v), 2) not in owned
+                    ]
+
+                def _wanted_key(item):
+                    wanted_volumes = _wanted_volumes(item)
+                    # A group is "wanted" when it has a requested release or is
+                    # already in Calibre with detected unowned volumes.  Untracked
+                    # discovery groups must not jump ahead just because nothing of
+                    # theirs is owned yet.
+                    has_gap = bool(item.get("has_wanted")) or (
+                        bool(item.get("in_calibre")) and bool(wanted_volumes)
+                    )
+                    return (
+                        not (has_gap and item.get("has_prioritized")),
+                        not has_gap,
+                        not item.get("has_prioritized"),
+                        item["series_name"].lower(),
+                    )
+
+                result_groups.sort(key=_wanted_key)
             elif sort == "date_desc":
                 result_groups.sort(key=lambda item: item["series_name"].lower())
                 result_groups.sort(key=lambda item: item["latest_date"], reverse=True)
@@ -5862,14 +5993,16 @@ class Database:
         status: Optional[str] = None,
         search: Optional[str] = None,
         prioritized_only: bool = False,
-        include_ignored: bool = False
+        include_ignored: bool = False,
+        hide_owned: bool = False
     ) -> int:
         """Returns the total number of series groups matching status and search filters."""
         groups = self.get_releases_grouped_by_series(
             status=status,
             search=search,
             prioritized_only=prioritized_only,
-            include_ignored=include_ignored
+            include_ignored=include_ignored,
+            hide_owned=hide_owned,
         )
         return len(groups)
 
