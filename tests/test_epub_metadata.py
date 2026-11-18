@@ -1,6 +1,7 @@
 """EPUB OPF metadata read/write and prefill tests."""
 
 import os
+import shutil
 import sys
 import tempfile
 import zipfile
@@ -166,6 +167,14 @@ def test_existing_download_backfill():
         {"title": "Gone", "author": "", "series": "Backfill Series", "series_index": 1},
         review_status="approved",
     )
+    missing_root = os.path.join(tempfile.gettempdir(), "nt_missing_mount_%s" % os.getpid())
+    shutil.rmtree(missing_root, ignore_errors=True)
+    db.set_setting("downloads_dir", missing_root)
+    check(db.prune_missing_epub_metadata_reviews() == 0,
+          "missing downloads mount never prunes")
+    check(db.get_epub_metadata_review_by_path(stale_path) is not None,
+          "stale review survives an unavailable downloads mount")
+    db.set_setting("downloads_dir", tempfile.gettempdir())
     original = epub_prefill.NovelMetadataProvider.fetch_series_metadata
     epub_prefill.NovelMetadataProvider.fetch_series_metadata = classmethod(
         lambda cls, title: {"english_title": "Backfill Series", "author": "Backfill Author", "synonyms": []}

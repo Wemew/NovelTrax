@@ -151,6 +151,8 @@ def check_grouped_behaviour():
               "downloaded filter includes a series whose missing feed volume is on disk")
         check("Orphan File Series" in names,
               "a downloaded volume newer than the feed still appears under Downloaded")
+        check("Owned Feed Saga" in names,
+              "an owned feed series with an extra downloaded file appears under Downloaded")
         check("Complete Series" not in names,
               "downloaded filter excludes series with no downloaded volume")
         orphan = next(g for g in downloaded_groups if g["series_name"] == "Orphan File Series")
@@ -173,6 +175,9 @@ def check_grouped_behaviour():
                  "feed volume set excludes the newer downloaded file")
         check_eq(extra["all_volumes"], [1.0, 2.0],
                  "the newer downloaded volume is still displayed on the card")
+        in_calibre = db.get_releases_grouped_by_series(status="IN_CALIBRE")
+        check("Owned Feed Saga" in {g["series_name"] for g in in_calibre},
+              "extra downloads do not hide a fully owned feed series from In Calibre")
         requested = db.get_releases_grouped_by_series(status="REQUESTED")
         check("Downloaded Gap Series" not in {g["series_name"] for g in requested},
               "fully downloaded groups do not linger under Requested")
