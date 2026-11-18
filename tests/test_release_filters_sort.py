@@ -72,6 +72,12 @@ def check_grouped_behaviour():
                       book_count=1, latest_index=1.0, owned_volumes=[1.0])
         insert_series(db, "Unknown Ownership Series", calibre_id=903,
                       is_monitored=1, owned_volumes=[])
+        insert_series(db, "Downloaded Gap Series", calibre_id=904, is_monitored=1,
+                      book_count=1, latest_index=1.0, owned_volumes=[1.0])
+        insert_series(db, "Owned Feed Saga", calibre_id=905, is_monitored=1,
+                      book_count=1, latest_index=1.0, owned_volumes=[1.0])
+        insert_series(db, "Orphan File Series", calibre_id=None,
+                      is_monitored=0, owned_volumes=[])
 
         # Wanted gap: volumes 1-2 owned, 3 detected but never requested.
         seed_release(db, "gap-single-1", "Wanted Gap Series Volume 1 Epub",
@@ -92,10 +98,28 @@ def check_grouped_behaviour():
             handle.write(b"epub")
         seed_release(db, "unknown-bundle", "Unknown Ownership Series v01-03",
                      "Unknown Ownership Series", [1, 2, 3], "IN_CALIBRE")
+        # Missing feed volume already downloaded: belongs in Downloaded, not
+        # Releases.  The bundle is repaired to REQUESTED for its missing Vol 2.
+        seed_release(db, "downloaded-gap", "Downloaded Gap Series v01-02",
+                     "Downloaded Gap Series", [1, 2], "IN_CALIBRE")
+        with open(os.path.join(downloads, "Downloaded Gap Series Vol 2.epub"), "wb") as handle:
+            handle.write(b"epub")
+        # Fully owned feed volume plus a newer downloaded file: extra volumes
+        # are display-only and must not hide the complete series.
+        seed_release(db, "extra-download-1", "Owned Feed Saga Volume 1 Epub",
+                     "Owned Feed Saga", [1], "IN_CALIBRE")
+        with open(os.path.join(downloads, "Owned Feed Saga Vol 2.epub"), "wb") as handle:
+            handle.write(b"epub")
+        # A downloaded file for a volume with no release row must still show
+        # under Downloaded; its missing feed volume keeps it in Releases too.
+        seed_release(db, "orphan-file-1", "Orphan File Series Volume 1 Epub",
+                     "Orphan File Series", [1], "NEW")
+        with open(os.path.join(downloads, "Orphan File Series Vol 2.epub"), "wb") as handle:
+            handle.write(b"epub")
 
         # Incomplete bundle repair: v01-03 marked IN_CALIBRE while 3 is missing.
         repaired = db.repair_incomplete_bundle_statuses()
-        check_eq(repaired, 1, "only the incomplete bundle is re-opened")
+        check_eq(repaired, 2, "only bundles with known incomplete ownership are re-opened")
         with db.get_connection() as conn:
             unknown_row = conn.execute(
                 "SELECT status FROM releases WHERE guid = 'unknown-bundle';"
@@ -123,8 +147,40 @@ def check_grouped_behaviour():
         names = {g["series_name"] for g in downloaded_groups}
         check("Disk Series" in names,
               "downloaded filter includes a series with a downloaded file")
+        check("Downloaded Gap Series" in names,
+              "downloaded filter includes a series whose missing feed volume is on disk")
+        check("Orphan File Series" in names,
+              "a downloaded volume newer than the feed still appears under Downloaded")
         check("Complete Series" not in names,
               "downloaded filter excludes series with no downloaded volume")
+        orphan = next(g for g in downloaded_groups if g["series_name"] == "Orphan File Series")
+        check_eq(orphan["all_volumes"], [1.0, 2.0],
+                 "the extra downloaded volume is rendered on the card")
+        check_eq(orphan["downloaded_volumes"], [2.0],
+                 "the extra file is marked downloaded, not wanted")
+
+        # Fully downloaded gaps are no longer duplicated in Releases.
+        releases = db.get_releases_grouped_by_series()
+        release_names = {g["series_name"] for g in releases}
+        check("Downloaded Gap Series" not in release_names,
+              "a group whose missing volumes are all downloaded leaves Releases")
+        check("Orphan File Series" in release_names,
+              "a group with its feed volume missing stays in Releases")
+        check("Owned Feed Saga" in release_names,
+              "an owned feed series with only an extra downloaded volume stays in Releases")
+        extra = next(g for g in releases if g["series_name"] == "Owned Feed Saga")
+        check_eq(extra["feed_volumes"], [1.0],
+                 "feed volume set excludes the newer downloaded file")
+        check_eq(extra["all_volumes"], [1.0, 2.0],
+                 "the newer downloaded volume is still displayed on the card")
+        requested = db.get_releases_grouped_by_series(status="REQUESTED")
+        check("Downloaded Gap Series" not in {g["series_name"] for g in requested},
+              "fully downloaded groups do not linger under Requested")
+        check_eq(
+            db.count_releases_grouped_by_series(),
+            len(releases),
+            "grouped count applies the same downloaded-gap exclusion",
+        )
 
         # Hide fully owned releases, keep bundles with any missing volume.
         hidden = db.get_releases_grouped_by_series(hide_owned=True)

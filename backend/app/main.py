@@ -1268,8 +1268,8 @@ async def settings_view(request: Request):
 
 @app.get("/metadata-review", response_class=HTMLResponse)
 async def metadata_review_view(request: Request):
-    reviews = db.list_epub_metadata_reviews(limit=300)
-    pending = sum(1 for row in reviews if (row.get("review_status") or "") == "pending")
+    reviews = db.list_epub_metadata_reviews(status="pending", limit=300)
+    approved_reviews = db.list_epub_metadata_reviews(status="approved", limit=300)
     series_reviews = db.list_series_metadata_reviews(status="pending", limit=100)
     for review_row in series_reviews:
         try:
@@ -1282,7 +1282,8 @@ async def metadata_review_view(request: Request):
         context={
             "active_page": "metadata-review",
             "reviews": reviews,
-            "pending_count": pending,
+            "approved_reviews": approved_reviews,
+            "pending_count": len(reviews),
             "series_reviews": series_reviews,
         },
     )

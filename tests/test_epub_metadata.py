@@ -155,6 +155,17 @@ def test_existing_download_backfill():
         "link": "https://jnovels.com/backfill/", "series_name": "Backfill Series", "volume": 2.0,
     })
     db.set_download_files(release_id, [path])
+    db.set_setting("downloads_dir", tempfile.gettempdir())
+    stale_path = os.path.join(tempfile.gettempdir(), "nt_missing_review_%s.epub" % os.getpid())
+    try:
+        os.unlink(stale_path)
+    except OSError:
+        pass
+    db.upsert_epub_metadata_review(
+        None, stale_path,
+        {"title": "Gone", "author": "", "series": "Backfill Series", "series_index": 1},
+        review_status="approved",
+    )
     original = epub_prefill.NovelMetadataProvider.fetch_series_metadata
     epub_prefill.NovelMetadataProvider.fetch_series_metadata = classmethod(
         lambda cls, title: {"english_title": "Backfill Series", "author": "Backfill Author", "synonyms": []}
@@ -165,6 +176,7 @@ def test_existing_download_backfill():
     finally:
         epub_prefill.NovelMetadataProvider.fetch_series_metadata = original
     check(result["queued"] == 1, result)
+    check(result["pruned"] == 1, result)
     check(again["found"] == 0, again)
     rows = db.list_epub_metadata_reviews()
     check(len(rows) == 1 and rows[0]["file_path"] == path, rows)

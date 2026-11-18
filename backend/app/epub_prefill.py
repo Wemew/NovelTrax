@@ -153,6 +153,7 @@ def prepare_downloaded_epub(db: Any, release: Dict[str, Any], file_path: str) ->
 
 def backfill_downloaded_epubs(db: Any, reporter: Any = None) -> Dict[str, int]:
     """Tag/download-review EPUBs recorded before the prefill feature existed."""
+    pruned = db.prune_missing_epub_metadata_reviews()
     rows = db.list_releases_with_download_files(limit=1000)
     paths = []
     releases = {}
@@ -188,5 +189,9 @@ def backfill_downloaded_epubs(db: Any, reporter: Any = None) -> Dict[str, int]:
                 message=f"Prefilling EPUB {index}/{total}: {os.path.basename(path)}",
             )
     if reporter is not None:
-        reporter.report(done=total, total=total, message=f"Queued {queued} EPUB review(s)", force=True)
-    return {"found": total, "queued": queued, "failed": failed}
+        reporter.report(
+            done=total, total=total,
+            message=f"Queued {queued} EPUB review(s); removed {pruned} stale",
+            force=True,
+        )
+    return {"found": total, "queued": queued, "failed": failed, "pruned": pruned}

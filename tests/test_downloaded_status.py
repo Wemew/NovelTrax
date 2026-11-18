@@ -120,7 +120,7 @@ def test_downloaded_volume_not_missing_or_wanted():
         "volume": 23.0, "missing_volumes": [23.0],
     })
     db.update_release_status(release_id, "DOWNLOADED")
-    groups = db.get_releases_grouped_by_series(limit=10)
+    groups = db.get_releases_grouped_by_series(status="DOWNLOADED", limit=10)
     group = next(g for g in groups if "grouped" in str(g.get("series_name", "")).lower())
     check(group["has_wanted"] is False, group)
     check(23.0 not in group["missing_volumes"], group)

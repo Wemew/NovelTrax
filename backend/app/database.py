@@ -4002,6 +4002,32 @@ class Database:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def prune_missing_epub_metadata_reviews(self) -> int:
+        """Delete reviews whose EPUB is no longer present in the downloads folder."""
+        downloads_root = str(
+            self.get_setting("downloads_dir", os.getenv("DOWNLOAD_DIR", "/downloads"))
+            or "/downloads"
+        )
+        if not os.path.isdir(downloads_root):
+            # A missing mount is not evidence that the files were deleted.
+            return 0
+        with self.get_connection() as conn:
+            rows = conn.execute(
+                "SELECT id, file_path FROM epub_metadata_reviews;",
+            ).fetchall()
+            stale_ids = [
+                int(row["id"]) for row in rows
+                if not str(row["file_path"] or "").strip()
+                or not os.path.isfile(str(row["file_path"]))
+            ]
+            if stale_ids:
+                conn.executemany(
+                    "DELETE FROM epub_metadata_reviews WHERE id = ?;",
+                    [(review_id,) for review_id in stale_ids],
+                )
+                conn.commit()
+        return len(stale_ids)
+
     # --- Hardcover cache + series identity review -------------------------
     def get_hardcover_cache(self, cache_key: str, max_age_seconds: int = 0) -> Optional[Dict[str, Any]]:
         with self.get_connection() as conn:
@@ -5843,7 +5869,6 @@ class Database:
             for g in groups_dict.values():
                 all_vols = sorted(list(g["all_volumes_set"]))
                 missing_vols = sorted(list(g["missing_volumes_set"]))
-                g["all_volumes"] = all_vols
                 g["missing_volumes"] = missing_vols
                 downloaded_from_files = set()
                 for candidate_name in (
@@ -5852,9 +5877,18 @@ class Database:
                     key = normalize_text(str(candidate_name or ""))
                     if key and key in downloaded_volumes_map:
                         downloaded_from_files.update(downloaded_volumes_map[key])
-                g["downloaded_volumes"] = sorted(
+                downloaded_vols = sorted(
                     set(g.pop("downloaded_volumes_set", set())) | downloaded_from_files
                 )
+                g["downloaded_volumes"] = downloaded_vols
+                # Feed volumes drive release suppression; downloaded extras are
+                # display-only and must not hide an otherwise complete series.
+                g["feed_volumes"] = all_vols
+                # Files can exist for volumes newer than the feed rows (for
+                # example a Volume 2 EPUB when only Volume 1 was indexed).
+                # Show them as Downloaded instead of leaving the card with no
+                # explanation for why the series appears under Downloaded.
+                g["all_volumes"] = sorted(set(all_vols) | set(downloaded_vols))
                 latest_owned = g["calibre_latest_index"]
 
                 # Determine if books from this series are present in Calibre
@@ -5909,12 +5943,55 @@ class Database:
                 result_groups = [g for g in result_groups if g.get("has_prioritized")]
 
             if status == "DOWNLOADED":
+                def _downloaded_group_volumes(group):
+                    values = set()
+                    for raw in group.get("downloaded_volumes") or []:
+                        try:
+                            values.add(round(float(raw), 2))
+                        except (TypeError, ValueError):
+                            continue
+                    return values
+
+                def _known_group_volumes(group):
+                    values = set()
+                    for raw in group.get("all_volumes") or []:
+                        try:
+                            values.add(round(float(raw), 2))
+                        except (TypeError, ValueError):
+                            continue
+                    return values
+
                 result_groups = [
                     g for g in result_groups
                     if g.get("has_downloaded")
-                    or g.get("downloaded_volumes")
                     or g.get("has_download_activity")
+                    or (
+                        _downloaded_group_volumes(g)
+                        & _known_group_volumes(g)
+                    )
                 ]
+            elif status != "IGNORED":
+                # A group whose every missing feed volume has a file in the
+                # downloads folder belongs to Downloaded, not Releases.  Extra
+                # files for volumes with no release row do not complete a gap.
+                def _number_set(values):
+                    numbers = set()
+                    for raw in values or []:
+                        try:
+                            numbers.add(round(float(raw), 2))
+                        except (TypeError, ValueError):
+                            continue
+                    return numbers
+
+                still_wanted = []
+                for g in result_groups:
+                    known = _number_set(g.get("feed_volumes", g.get("all_volumes")))
+                    missing = known - _number_set(g.get("owned_volumes"))
+                    downloaded = _number_set(g.get("downloaded_volumes"))
+                    if missing and missing <= downloaded:
+                        continue
+                    still_wanted.append(g)
+                result_groups = still_wanted
 
             # Instant keyword search filter across series name, synopsis, and release titles
             if search and search.strip():
@@ -5929,10 +6006,16 @@ class Database:
             # Sort groups by requested sorting criteria
             if sort in ("wanted_first", "default") or not sort:
                 def _wanted_volumes(item):
-                    owned = {round(float(v), 2) for v in item.get("owned_volumes") or []}
+                    satisfied = {
+                        round(float(v), 2)
+                        for v in (
+                            list(item.get("owned_volumes") or [])
+                            + list(item.get("downloaded_volumes") or [])
+                        )
+                    }
                     return [
                         v for v in item.get("all_volumes") or []
-                        if round(float(v), 2) not in owned
+                        if round(float(v), 2) not in satisfied
                     ]
 
                 def _wanted_key(item):

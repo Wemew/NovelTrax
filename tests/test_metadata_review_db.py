@@ -42,7 +42,10 @@ def main():
     row = db.get_epub_metadata_review(review_id)
     check(row["review_status"] == "approved" and row["series_index"] == 4.0, row)
     template = open(os.path.join(_BASE, "backend", "app", "templates", "metadata_review.html"), encoding="utf-8").read()
-    check("review.is_new_volume" in template and "New volume" in template, "new-volume badge missing")
+    card = open(os.path.join(_BASE, "backend", "app", "templates", "partials", "metadata_review_card.html"), encoding="utf-8").read()
+    check("review.is_new_volume" in card and "New volume" in card, "new-volume badge missing")
+    check("approved_reviews" in template and "<details" in template,
+          "approved reviews are collapsed at the end of the page")
     print("metadata review DB suite PASSED")
 
 

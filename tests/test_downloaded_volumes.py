@@ -129,7 +129,7 @@ def check_group_payload():
     seed(db, "Days with My Stepsister", 10.0, status="DOWNLOADED",
          volumes=[10.0], guid="dl-ten", download_status="COMPLETED")
 
-    groups = db.get_releases_grouped_by_series()
+    groups = db.get_releases_grouped_by_series(status="DOWNLOADED")
     group = next((g for g in groups if "stepsister" in (g.get("stable_name") or "").lower()), None)
     check(group is not None, "grouping: series card missing")
     check_eq(group.get("downloaded_volumes"), [8.0, 9.0, 10.0],
