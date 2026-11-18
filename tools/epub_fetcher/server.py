@@ -9,7 +9,9 @@ from __future__ import annotations
 import itertools
 import logging
 import os
+import shutil
 import stat
+import subprocess
 import tempfile
 import threading
 import time
@@ -98,14 +100,27 @@ def health():
     display = os.getenv("DISPLAY", "")
     display_ready = True if HEADLESS else False
     if not HEADLESS and display.startswith(":"):
-        number = display[1:].split(".", 1)[0]
-        socket_path = f"/tmp/.X11-unix/X{number}"
-        try:
-            display_ready = stat.S_ISSOCK(os.stat(socket_path).st_mode)
-        except OSError:
-            display_ready = False
+        xdpyinfo = shutil.which("xdpyinfo")
+        if xdpyinfo:
+            try:
+                display_ready = subprocess.run(
+                    [xdpyinfo, "-display", display],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=2,
+                    check=False,
+                ).returncode == 0
+            except (OSError, subprocess.TimeoutExpired):
+                display_ready = False
+        else:
+            number = display[1:].split(".", 1)[0]
+            socket_path = f"/tmp/.X11-unix/X{number}"
+            try:
+                display_ready = stat.S_ISSOCK(os.stat(socket_path).st_mode)
+            except OSError:
+                display_ready = False
     healthy = playwright_ready and display_ready
-    return {
+    payload = {
         "status": "ok" if healthy else "degraded",
         "playwright": playwright_ready,
         "flaresolverr": bool(FLARESOLVERR_URL),
@@ -118,6 +133,7 @@ def health():
         "queued_fetches": _queue_waiters,
         "output_dir": OUTPUT_DIR,
     }
+    return JSONResponse(payload, status_code=200 if healthy else 503)
 
 
 @app.post("/fetch")

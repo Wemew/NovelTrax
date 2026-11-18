@@ -27,11 +27,32 @@ def check(condition, message):
 def main():
     client = TestClient(server.app)
 
-    health = client.get("/health").json()
+    health_response = client.get("/health")
+    health = health_response.json()
+    check(health_response.status_code == 503,
+          f"dead display returns 503 from /health, got {health_response.status_code}")
     check(health["display_ready"] is False,
           "headful mode without DISPLAY reports display_ready=false")
     check(health["status"] == "degraded",
           "missing display degrades health instead of claiming ok")
+
+    import types
+    fake_playwright = types.ModuleType("playwright")
+    previous_playwright = sys.modules.get("playwright")
+    previous_headless = server.HEADLESS
+    sys.modules["playwright"] = fake_playwright
+    server.HEADLESS = True
+    try:
+        healthy_response = client.get("/health")
+        check(healthy_response.status_code == 200,
+              f"healthy fetcher returns 200, got {healthy_response.status_code}")
+        check(healthy_response.json()["status"] == "ok", healthy_response.text)
+    finally:
+        server.HEADLESS = previous_headless
+        if previous_playwright is None:
+            sys.modules.pop("playwright", None)
+        else:
+            sys.modules["playwright"] = previous_playwright
 
     def boom(*_args, **_kwargs):
         raise RuntimeError("BrowserType.launch: Missing X server or $DISPLAY")
